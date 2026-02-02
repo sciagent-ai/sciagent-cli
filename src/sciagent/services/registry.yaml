@@ -1,0 +1,469 @@
+# Service Registry
+# Defines containerized simulation/compute services available to the agent
+#
+# Resolution order:
+# 1. Check local Docker images
+# 2. Pull from GHCR (ghcr.io/sciagent-ai/{name}:latest)
+# 3. Build from Dockerfile (services/{name}/Dockerfile)
+
+defaults:
+  organization: sciagent-ai
+  registry: ghcr.io
+  tag: latest
+
+services:
+  scipy-base:
+    description: "Scientific Python foundation - NumPy, SciPy, Matplotlib, Pandas"
+    image: ghcr.io/sciagent-ai/scipy-base
+    dockerfile: services/scipy-base/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Numerical computing (numpy)"
+      - "Scientific algorithms (scipy)"
+      - "Data visualization (matplotlib)"
+      - "Data analysis (pandas)"
+      - "Unit conversions (pint)"
+    example: |
+      import numpy as np
+      from scipy import optimize, integrate, linalg
+      import matplotlib.pyplot as plt
+      import pandas as pd
+
+      # Solve equation
+      result = optimize.root_scalar(lambda x: x**2 - 2, bracket=[1, 2])
+      print(f"sqrt(2) = {result.root}")
+
+      # Integrate function
+      integral, _ = integrate.quad(lambda x: np.sin(x), 0, np.pi)
+      print(f"∫sin(x)dx from 0 to π = {integral}")
+
+  rdkit:
+    description: "RDKit - Cheminformatics toolkit for molecular manipulation and analysis"
+    image: ghcr.io/sciagent-ai/rdkit
+    dockerfile: services/rdkit/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Molecular structure parsing and manipulation (SMILES, SDF, MOL)"
+      - "Molecular fingerprint generation (Morgan, MACCS, etc.)"
+      - "Molecular descriptor calculation"
+      - "Substructure and similarity searching"
+      - "2D/3D coordinate generation"
+      - "Reaction handling and transformations"
+    example: |
+      from rdkit import Chem
+      from rdkit.Chem import AllChem, Descriptors, Draw
+
+      # Parse SMILES
+      mol = Chem.MolFromSmiles('CCO')  # Ethanol
+      print(f"Molecular formula: C{mol.GetNumAtoms()}...")
+
+      # Calculate descriptors
+      mw = Descriptors.MolWt(mol)
+      logp = Descriptors.MolLogP(mol)
+      print(f"MW: {mw:.2f}, LogP: {logp:.2f}")
+
+      # Generate fingerprint
+      fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
+      print(f"Morgan fingerprint: {fp.GetNumOnBits()} bits set")
+
+      # Generate 3D coordinates
+      AllChem.EmbedMolecule(mol)
+      AllChem.MMFFOptimizeMolecule(mol)
+
+  sympy:
+    description: "SymPy - Symbolic mathematics for algebraic manipulation, calculus, and equation solving"
+    image: ghcr.io/sciagent-ai/sympy
+    dockerfile: services/sympy/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Symbolic algebra and simplification"
+      - "Calculus (differentiation, integration, limits)"
+      - "Equation solving (algebraic, differential)"
+      - "Linear algebra (matrices, eigenvalues)"
+      - "LaTeX output for mathematical expressions"
+      - "Code generation (C, Fortran, Python)"
+    example: |
+      from sympy import symbols, solve, diff, integrate, simplify, Matrix, latex, sin, exp
+
+      # Define symbols
+      x, y = symbols('x y')
+
+      # Solve equation
+      solution = solve(x**2 - 2*x - 3, x)
+      print(f"x^2 - 2x - 3 = 0 → x = {solution}")
+
+      # Differentiate
+      f = x**3 * exp(-x)
+      df = diff(f, x)
+      print(f"d/dx[x³e^(-x)] = {df}")
+
+      # Integrate
+      integral = integrate(sin(x)**2, x)
+      print(f"∫sin²(x)dx = {integral}")
+
+      # Matrix operations
+      M = Matrix([[1, 2], [3, 4]])
+      print(f"Eigenvalues: {M.eigenvals()}")
+
+  cvxpy:
+    description: "CVXPY - Convex optimization modeling language for Python"
+    image: ghcr.io/sciagent-ai/cvxpy
+    dockerfile: services/cvxpy/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Convex optimization problem modeling"
+      - "Linear and quadratic programming"
+      - "Semidefinite and conic programming"
+      - "Portfolio optimization"
+      - "Signal processing and control"
+      - "Multiple solver backends (OSQP, ECOS, SCS, Clarabel)"
+    example: |
+      import cvxpy as cp
+      import numpy as np
+
+      # Portfolio optimization example
+      n = 5  # number of assets
+      np.random.seed(1)
+      mu = np.random.randn(n)  # expected returns
+      Sigma = np.random.randn(n, n)
+      Sigma = Sigma @ Sigma.T / n  # covariance matrix
+
+      # Define optimization variables
+      w = cp.Variable(n)
+
+      # Define objective: maximize return - risk
+      gamma = 0.5  # risk aversion
+      objective = cp.Maximize(mu @ w - gamma * cp.quad_form(w, Sigma))
+
+      # Define constraints
+      constraints = [cp.sum(w) == 1, w >= 0]
+
+      # Solve
+      prob = cp.Problem(objective, constraints)
+      prob.solve()
+      print(f"Optimal weights: {w.value}")
+      print(f"Expected return: {mu @ w.value:.4f}")
+
+  rcwa:
+    description: "RCWA/S4 - Rigorous Coupled Wave Analysis for electromagnetic simulations"
+    image: ghcr.io/sciagent-ai/s4-rcwa
+    dockerfile: services/rcwa/Dockerfile
+    license: GPL-2.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Photonic crystal simulations"
+      - "Diffraction grating analysis"
+      - "Multilayer thin film optics"
+      - "Scattering matrix calculations"
+    example: |
+      import S4
+      S = S4.New(Lattice=1, NumBasis=20)
+      S.SetMaterial('Vacuum', 1)  # Must define Vacuum
+      S.SetMaterial('Si', 12+0.1j)
+      S.AddLayer('top', 0, 'Vacuum')
+      S.AddLayer('slab', 0.5, 'Si')
+      S.AddLayerCopy('bottom', 0, 'top')
+      S.SetFrequency(1/0.5)
+      S.SetExcitationPlanewave((0,0), 1, 0)  # Required before GetPowerFlux
+      print(S.GetPowerFlux('bottom'))
+
+  meep:
+    description: "MEEP - FDTD electromagnetic simulation"
+    image: ghcr.io/sciagent-ai/meep
+    dockerfile: services/meep/Dockerfile
+    license: GPL-2.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Time-domain electromagnetic simulations"
+      - "Waveguide design and analysis"
+      - "Resonator modeling"
+      - "Near-to-far-field transformations"
+    example: |
+      import meep as mp
+      cell = mp.Vector3(16, 8, 0)
+      geometry = [mp.Block(mp.Vector3(mp.inf, 1, mp.inf), center=mp.Vector3(), material=mp.Medium(epsilon=12))]
+      sources = [mp.Source(mp.ContinuousSource(frequency=0.15), component=mp.Ez, center=mp.Vector3(-7,0))]
+      sim = mp.Simulation(cell_size=cell, geometry=geometry, sources=sources, resolution=10)
+      sim.run(until=200)
+
+  openfoam:
+    description: "OpenFOAM - Computational Fluid Dynamics"
+    image: ghcr.io/sciagent-ai/openfoam
+    dockerfile: services/openfoam/Dockerfile
+    license: GPL-3.0
+    runtime: bash
+    workdir: /workspace
+    capabilities:
+      - "Incompressible and compressible flow"
+      - "Turbulence modeling (RANS, LES, DNS)"
+      - "Heat transfer simulations"
+      - "Multiphase flow"
+    example: |
+      cd /workspace/cavity
+      blockMesh
+      icoFoam
+      paraFoam
+
+  ngspice:
+    description: "NGSpice - Open-source SPICE circuit simulator with PySpice bindings"
+    image: ghcr.io/sciagent-ai/ngspice
+    dockerfile: services/ngspice/Dockerfile
+    license: BSD-3-Clause
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Analog and digital circuit simulation"
+      - "Transient, AC, and DC analysis"
+      - "SPICE netlist execution"
+      - "Python integration via PySpice"
+      - "Device modeling (BJT, MOSFET, diodes)"
+    example: |
+      from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+      from PySpice.Spice.Parser import SpiceParser
+      from PySpice.Unit import *
+
+      # Simple RC circuit analysis
+      from PySpice.Probe.Plot import plot
+      from PySpice.Spice.Library import SpiceLibrary
+
+      import PySpice.Logging.Logging as Logging
+      logger = Logging.setup_logging()
+
+      from PySpice.Spice.NgSpice.Shared import NgSpiceShared
+      ngspice = NgSpiceShared.new_instance()
+      print("NGSpice ready for circuit simulation")
+
+  ase:
+    description: "ASE - Atomic Simulation Environment for atomistic simulations and materials science"
+    image: ghcr.io/sciagent-ai/ase
+    dockerfile: services/ase/Dockerfile
+    license: LGPL-2.1
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Atomic structure creation and manipulation"
+      - "Molecular dynamics simulations"
+      - "Geometry optimization"
+      - "Electronic structure calculator interfaces (VASP, GPAW, etc.)"
+      - "Equation of state calculations"
+      - "Band structure and DOS analysis"
+      - "Trajectory analysis and visualization"
+    example: |
+      from ase import Atoms
+      from ase.build import bulk, molecule, surface
+      from ase.visualize import view
+      from ase.io import write, read
+
+      # Create a water molecule
+      water = molecule('H2O')
+      print(f"Water: {water.get_chemical_formula()}")
+      print(f"Positions:\n{water.get_positions()}")
+
+      # Create bulk silicon
+      si = bulk('Si', 'diamond', a=5.43)
+      print(f"\nSilicon unit cell: {len(si)} atoms")
+
+      # Create a surface
+      slab = surface('Al', (1, 1, 1), layers=4, vacuum=10.0)
+      print(f"\nAl(111) surface: {len(slab)} atoms")
+
+      # Calculate distances
+      from ase.geometry import get_distances
+      d = water.get_distance(0, 1)
+      print(f"\nO-H bond length: {d:.3f} Angstrom")
+
+  gmsh:
+    description: "Gmsh - 3D finite element mesh generator with Python API"
+    image: ghcr.io/sciagent-ai/gmsh
+    dockerfile: services/gmsh/Dockerfile
+    license: GPL-2.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "2D and 3D mesh generation"
+      - "CAD geometry creation and manipulation"
+      - "Built-in CAD engine and OpenCASCADE integration"
+      - "Mesh import/export (MSH, STL, STEP, IGES, etc.)"
+      - "Mesh optimization and refinement"
+      - "Post-processing and visualization"
+    example: |
+      import gmsh
+
+      # Initialize gmsh
+      gmsh.initialize()
+      gmsh.model.add("box")
+
+      # Create a simple box geometry
+      box = gmsh.model.occ.addBox(0, 0, 0, 1, 1, 1)
+      gmsh.model.occ.synchronize()
+
+      # Set mesh size
+      gmsh.option.setNumber("Mesh.CharacteristicLengthMax", 0.1)
+
+      # Generate 3D mesh
+      gmsh.model.mesh.generate(3)
+
+      # Get mesh statistics
+      nodes = gmsh.model.mesh.getNodes()
+      elements = gmsh.model.mesh.getElements()
+      print(f"Generated mesh: {len(nodes[0])} nodes")
+
+      # Save mesh
+      gmsh.write("box.msh")
+      gmsh.finalize()
+
+  gromacs:
+    description: "GROMACS - Molecular dynamics simulation for biomolecular systems"
+    image: ghcr.io/sciagent-ai/gromacs
+    dockerfile: services/gromacs/Dockerfile
+    license: LGPL-2.1
+    runtime: bash
+    workdir: /workspace
+    capabilities:
+      - "Molecular dynamics simulations"
+      - "Energy minimization"
+      - "Free energy calculations"
+      - "Protein and membrane simulations"
+      - "Trajectory analysis with MDAnalysis"
+      - "Force field support (AMBER, CHARMM, OPLS, etc.)"
+    example: |
+      # GROMACS workflow example
+      # 1. Generate topology from PDB
+      gmx pdb2gmx -f protein.pdb -o protein.gro -water spce
+
+      # 2. Create simulation box
+      gmx editconf -f protein.gro -o box.gro -c -d 1.0 -bt cubic
+
+      # 3. Solvate the system
+      gmx solvate -cp box.gro -cs spc216.gro -o solvated.gro -p topol.top
+
+      # 4. Energy minimization
+      gmx grompp -f minim.mdp -c solvated.gro -p topol.top -o em.tpr
+      gmx mdrun -v -deffnm em
+
+      # 5. Run MD simulation
+      gmx grompp -f md.mdp -c em.gro -p topol.top -o md.tpr
+      gmx mdrun -v -deffnm md
+
+  elmer:
+    description: "Elmer FEM - Open-source multiphysics finite element solver"
+    image: ghcr.io/sciagent-ai/elmer
+    dockerfile: services/elmer/Dockerfile
+    license: GPL-2.0
+    runtime: bash
+    workdir: /workspace
+    capabilities:
+      - "Heat transfer and thermal analysis"
+      - "Structural mechanics and elasticity"
+      - "Fluid dynamics (Navier-Stokes)"
+      - "Electromagnetics (Maxwell equations)"
+      - "Acoustics and wave propagation"
+      - "Multiphysics coupled simulations"
+    example: |
+      # Elmer workflow example
+      # 1. Generate mesh with ElmerGrid (from Gmsh, Netgen, etc.)
+      ElmerGrid 14 2 mesh.msh
+
+      # 2. Create solver input file (case.sif) defining:
+      #    - Simulation parameters
+      #    - Boundary conditions
+      #    - Material properties
+      #    - Solver settings
+
+      # 3. Run the solver
+      ElmerSolver case.sif
+
+      # 4. Post-process results (VTU files) with ParaView
+
+  openroad:
+    description: "OpenROAD - Open-source RTL-to-GDS digital design flow"
+    image: ghcr.io/sciagent-ai/openroad
+    dockerfile: services/openroad/Dockerfile
+    license: BSD-3-Clause
+    runtime: bash
+    workdir: /workspace
+    capabilities:
+      - "RTL synthesis (Yosys)"
+      - "Floorplanning and macro placement"
+      - "Global and detailed placement"
+      - "Clock tree synthesis"
+      - "Global and detailed routing"
+      - "Static timing analysis"
+      - "Design rule checking"
+      - "Power analysis and optimization"
+    example: |
+      # OpenROAD TCL workflow example
+      # 1. Read design files
+      read_lef tech.lef
+      read_def design.def
+
+      # 2. Initialize floorplan
+      initialize_floorplan -die_area "0 0 100 100" -core_area "10 10 90 90"
+
+      # 3. Run global placement
+      global_placement
+
+      # 4. Run detailed placement
+      detailed_placement
+
+      # 5. Clock tree synthesis
+      clock_tree_synthesis
+
+      # 6. Global routing
+      global_route
+
+      # 7. Detailed routing
+      detailed_route
+
+      # 8. Write output
+      write_def output.def
+
+  sciml-julia:
+    description: "Julia SciML ecosystem - differential equations, optimization, and scientific machine learning"
+    image: ghcr.io/sciagent-ai/sciml-julia
+    dockerfile: services/sciml-julia/Dockerfile
+    license: MIT
+    runtime: julia
+    workdir: /workspace
+    capabilities:
+      - "ODE, SDE, DDE, DAE solving (DifferentialEquations.jl)"
+      - "Symbolic modeling and simulation (ModelingToolkit.jl)"
+      - "Optimization and parameter estimation (Optimization.jl)"
+      - "Nonlinear equation solving (NonlinearSolve.jl)"
+      - "Chemical reaction network modeling (Catalyst.jl)"
+      - "Scientific visualization (Plots.jl)"
+      - "Automatic differentiation and sensitivity analysis"
+      - "Neural differential equations"
+    example: |
+      using DifferentialEquations, Plots
+
+      # Define the Lorenz system
+      function lorenz!(du, u, p, t)
+          σ, ρ, β = p
+          du[1] = σ * (u[2] - u[1])
+          du[2] = u[1] * (ρ - u[3]) - u[2]
+          du[3] = u[1] * u[2] - β * u[3]
+      end
+
+      # Initial conditions and parameters
+      u0 = [1.0, 0.0, 0.0]
+      p = (10.0, 28.0, 8/3)
+      tspan = (0.0, 100.0)
+
+      # Solve the ODE
+      prob = ODEProblem(lorenz!, u0, tspan, p)
+      sol = solve(prob)
+
+      # Plot the solution
+      plot(sol, idxs=(1, 2, 3), title="Lorenz Attractor")
+

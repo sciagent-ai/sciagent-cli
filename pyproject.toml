@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sciagent"
+version = "0.1.0"
+description = "A modular, extensible agent framework for software engineering and scientific computing tasks"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+authors = [
+    {name = "SciAgent Team"}
+]
+keywords = ["agent", "llm", "ai", "software-engineering", "scientific-computing", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development",
+]
+
+dependencies = [
+    "litellm>=1.0.0",
+    "requests>=2.28.0",
+    "duckduckgo-search>=4.0.0",
+    "html2text>=2024.2.26",
+    "beautifulsoup4>=4.12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.scripts]
+sciagent = "sciagent.main:main"
+
+[project.urls]
+Homepage = "https://github.com/sciagent/sciagent"
+Documentation = "https://github.com/sciagent/sciagent#readme"
+Repository = "https://github.com/sciagent/sciagent"
+Issues = "https://github.com/sciagent/sciagent/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+sciagent = ["prompts/*", "services/*"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
