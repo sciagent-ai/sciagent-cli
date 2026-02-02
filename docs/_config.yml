@@ -8,7 +8,7 @@ baseurl: "/sciagent-cli"
 remote_theme: just-the-docs/just-the-docs
 
 # Color scheme (optional: light, dark, or custom)
-color_scheme: nil  # Uses default light theme
+color_scheme: default
 
 # Logo and branding
 logo: "Logo.png"
@@ -84,6 +84,7 @@ exclude:
 
 # Plugins
 plugins:
+  - jekyll-remote-theme
   - jekyll-seo-tag
 
 

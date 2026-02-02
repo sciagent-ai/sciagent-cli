@@ -27,7 +27,7 @@ This site is organised into concise guides to help you get started and explore d
 | **[Configuration](configuration.md)** | Customise the model, system prompt, caching, tool registry and sub‑agents via the CLI or Python APIs. |
 | **[Use Cases](usecases.md)** | Explore examples of how researchers and developers can leverage SciAgent in practice. |
 | **[Architecture](architecture.md)** | Understand how the agent loop, LLM client, tools, context window, sub‑agents and orchestrators fit together. |
-| **[Why SciAgent is Novel](novelty.md)** | Learn what distinguishes SciAgent from other agent frameworks and why it matters. |
+| **[Comparison with Other Frameworks](novelty.md)** | See how SciAgent compares to AutoGen, LangChain DeepAgents, OpenHands, and Aider. |
 | **[Sub‑agents](subagents.md)** | Dive deeper into specialised sub‑agents and see how to create your own. |
 
 If you are new to SciAgent, start with **Getting Started**.  Developers looking to customise the system should read **Configuration** and **Architecture**.  To understand how SciAgent can help in your projects, check out **Use Cases** and the **Novelty** page.
