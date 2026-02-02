@@ -1,69 +1,97 @@
 # SciAgent
 
-An agent framework for software engineering and scientific computing. Combines a standard agent loop with **task orchestration** - managing dependencies between tasks, passing data between them, and running independent tasks in parallel.
+SciAgent is a modular agent framework for software engineering and scientific computing.  It combines a standard agent loop with dependency‑aware task orchestration, allowing the language model to plan and execute complex workflows by invoking external tools and containerised services.
 
 ## Features
 
-- **Task DAG Orchestration** - Dependencies, parallel batching, data flow via `result_key`
-- **Artifact & Target Validation** - Verify outputs exist, check metrics meet criteria
-- **14 Scientific Services** - Docker containers for RCWA, MEEP, OpenFOAM, GROMACS, RDKit, SymPy, etc.
-- **Multi-Model Support** - Claude, GPT-4, Gemini, local models via LiteLLM
-- **Sub-Agents** - Specialized agents for research, code review, testing
+- **Task DAG orchestration** – Define a graph of tasks with dependencies (`depends_on`), batch parallelisable steps and pass data between tasks via `result_key`.
+- **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user‑defined criteria.
+- **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
+- **Multi‑model support** – Choose between Anthropic Claude, OpenAI GPT‑4, Google Gemini or local models via LiteLLM.  Caching reduces cost and latency.
+- **Sub‑agents** – Spawn specialised agents for research, code review, test writing and other roles to keep contexts focused.
 
-## Quick Start
+## Quick start
+
+### Installation
+
+SciAgent requires Python 3.9 or newer.  We recommend installing it inside a virtual environment:
 
 ```bash
-# Install
-pip install -e .
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .  # install from source; alternatively use pip install sciagent when available
+```
 
-# Set API key
-export ANTHROPIC_API_KEY="your-key"
+### Set API keys
 
-# Run a task
-sciagent "Create a Python script that calculates fibonacci numbers"
+SciAgent communicates with large‑language models and search engines via external APIs.  At a minimum you need to export an API key for your chosen LLM provider and for the Brave search tool used by the `web` tool:
 
-# Interactive mode
+```bash
+export ANTHROPIC_API_KEY="your-claude-key"      # or OPENAI_API_KEY, GOOGLE_API_KEY, etc.
+export BRAVE_SEARCH_API_KEY="your-brave-key"   # required for web search
+```
+
+Additional environment variables (e.g. `OPENAI_API_KEY`, `GOOGLE_API_KEY`) can be set as needed depending on the model.
+
+### Run a task
+
+Invoke SciAgent via the `sciagent` CLI and pass a natural‑language task description.  A project directory is created to store generated code and artifacts:
+
+```bash
+sciagent --project-dir ~/my-project "Create a Python script that calculates Fibonacci numbers"
+```
+
+Use the `--interactive` flag to enter a REPL for iterative control:
+
+```bash
 sciagent --interactive
+```
 
-# Use a specific model
-sciagent -m openai/gpt-4o "Analyze this codebase"
+Select a different model or enable sub‑agents when needed:
 
-# Enable sub-agents for complex tasks
+```bash
+sciagent -m openai/gpt-4o "Analyse this codebase"
 sciagent --subagents "Research and refactor this module"
 ```
 
-## Scientific Computing
+For more details on CLI flags see the [Configuration](docs/configuration.md) guide or run `sciagent --help`.
 
-Run simulations in specialized Docker containers:
+## Scientific computing examples
+
+SciAgent can run simulations directly in specialised Docker containers.  Some examples:
 
 ```bash
 # RCWA electromagnetic simulation
-sciagent "Design a photonic crystal with bandgap at 1550nm using rcwa"
+sciagent "Design a photonic crystal with bandgap at 1550 nm using rcwa"
 
-# Molecular dynamics
+# Molecular dynamics (GROMACS)
 sciagent "Run a GROMACS simulation for a protein in water"
 
-# Convex optimization
-sciagent "Solve a portfolio optimization problem using cvxpy"
+# Convex optimisation (CVXPY)
+sciagent "Solve a portfolio optimisation problem using cvxpy"
 
-# Symbolic math
+# Symbolic math (SymPy)
 sciagent "Derive equations of motion for a double pendulum using sympy"
 ```
 
-### Available Services
+See [Available Services](#available-services) below for the full list of containerised environments.
+
+## Available services
 
 | Domain | Services |
-|--------|----------|
+|---|---|
 | **Electromagnetics** | `rcwa` (S4/RCWA), `meep` (FDTD) |
-| **Chemistry & Materials** | `rdkit`, `ase`, `gromacs` |
-| **Fluid Dynamics & FEM** | `openfoam`, `elmer`, `gmsh` |
+| **Chemistry & materials** | `rdkit`, `ase`, `gromacs` |
+| **Fluid dynamics & FEM** | `openfoam`, `elmer`, `gmsh` |
 | **Electronics & EDA** | `ngspice`, `openroad` |
-| **Math & Optimization** | `sympy`, `cvxpy`, `scipy-base` |
+| **Math & optimisation** | `sympy`, `cvxpy`, `scipy-base` |
 | **Scientific ML** | `sciml-julia` |
 
-## CLI Reference
+Use the `service` tool to list available services, pull or build images and run code inside them.  Refer to the [Architecture](docs/architecture.md#service-registry) page for details.
 
-```
+## CLI reference
+
+```text
 sciagent [OPTIONS] [TASK]
 
 Options:
@@ -81,10 +109,12 @@ Options:
 
 ## Python API
 
+SciAgent can also be embedded in your own Python code.  Use the `create_agent()` factory to configure an agent and call `run()` or `run_interactive()`:
+
 ```python
 from sciagent import create_agent, run_task
 
-# One-shot task
+# One‑shot task
 result = run_task("Create a hello world script")
 
 # Custom configuration
@@ -92,13 +122,15 @@ agent = create_agent(
     model="anthropic/claude-sonnet-4-20250514",
     working_dir="./my-project"
 )
-result = agent.run("Analyze this codebase")
+result = agent.run("Analyse this codebase")
 
 # Interactive session
 agent.run_interactive()
 ```
 
 ## Architecture
+
+SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks.  Each agent follows a Think → Act → Observe loop and can call tools such as `bash`, `file_ops`, `search`, `web`, `todo` and `service` to interact with the file system, shell, web and containerised simulations.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -128,20 +160,25 @@ agent.run_interactive()
 
 ## Documentation
 
-See **[docs/DOCUMENTATION.md](docs/DOCUMENTATION.md)** for:
+Comprehensive documentation is available in the `docs` folder.  Start with the following pages:
 
-- Task DAG orchestration details
-- Complete tool reference
-- All 14 containerized services
-- Custom tool development
-- Use cases and examples
+- **[Getting Started](docs/getting-started.md)** – installation, running your first task and CLI basics.
+- **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry and sub‑agents.
+- **[Use Cases](docs/usecases.md)** – real‑world examples of how to apply SciAgent to coding, research and simulation.
+- **[Architecture](docs/architecture.md)** – detailed explanation of the agent loop, context management, tools and sub‑agent system.
+- **[Why SciAgent is Novel](docs/novelty.md)** – learn what sets SciAgent apart from other agent frameworks.
+- **[Sub‑agents](docs/subagents.md)** – information on built‑in sub‑agents and how to create your own.
 
 ## Requirements
 
-- Python 3.9+
-- Docker (for containerized services)
-- API key for your chosen LLM provider
+- Python 3.9+
+- Docker (for containerised services)
+- API key for your chosen LLM provider (e.g. Anthropic, OpenAI, Google) and `BRAVE_SEARCH_API_KEY` for web search
 
 ## License
 
-MIT License
+This project is released under the MIT License.
+
+---
+
+© 2026 SciAgent Team – building an open platform for AI‑powered scientific computing and engineering.
