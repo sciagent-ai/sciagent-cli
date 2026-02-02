@@ -1,0 +1,6 @@
+#!/Users/shrutibadhwar/Documents/2026/package/sciagent-cli/.venv/bin/python3.9
+import sys
+from litellm import run_server
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(run_server())

@@ -29,7 +29,7 @@ class AgentConfig:
     model: str = "anthropic/claude-sonnet-4-20250514"
     temperature: float = 0.0
     max_tokens: int = 16384  # Increased to prevent truncation of large code generation
-    max_iterations: int = 30  # Default for complex tasks (simple tasks typically finish in <10)
+    max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
     working_dir: str = "."
     verbose: bool = True
     auto_save: bool = True
