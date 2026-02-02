@@ -177,7 +177,7 @@ Comprehensive documentation is available in the `docs` folder.  Start with the f
 
 ## License
 
-This project is released under the MIT License.
+This project is released under the Apache 2.0 License.
 
 ---
 
