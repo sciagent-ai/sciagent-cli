@@ -6,134 +6,187 @@ nav_order: 3
 
 # Configuration
 
-SciAgent is highly configurable.  You can fine‑tune the language model, system prompts, caching behaviour, tool registry and even introduce custom sub‑agents.  This page explains the main configuration options available via the command‑line and Python APIs.
+This document covers all configuration options for SciAgent.
 
-## Choosing a language model
+## Environment Variables
 
-The `--model` flag controls which large‑language model is used.  SciAgent leverages the [litellm](https://github.com/BerriAI/litellm) library and therefore supports providers such as OpenAI, Anthropic, Google and open models served via custom endpoints.  For example:
+### API Keys
 
+Set the API key for your preferred LLM provider:
+
+| Variable | Provider |
+|----------|----------|
+| `ANTHROPIC_API_KEY` | Anthropic (Claude models) |
+| `OPENAI_API_KEY` | OpenAI (GPT models) |
+| `GOOGLE_API_KEY` | Google (Gemini models) |
+| `AZURE_API_KEY` | Azure OpenAI |
+
+### Optional Variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `LITELLM_LOG` | Set to "DEBUG" for LLM debugging | - |
+| `BRAVE_SEARCH_API_KEY` | Brave Search API for web search (falls back to DuckDuckGo if not set) | - |
+
+**Web Search**: The `web` tool tries Brave Search first (better quality), then falls back to DuckDuckGo (no API key required). Get a free Brave API key at https://brave.com/search/api/
+
+## CLI Arguments
+
+### Required
+
+| Argument | Description |
+|----------|-------------|
+| `task` | The task to execute (unless using `--interactive` or `--resume`) |
+
+### Commonly Used
+
+| Argument | Short | Description | Default |
+|----------|-------|-------------|---------|
+| `--project-dir` | `-p` | Working directory for generated code | Current directory |
+| `--interactive` | `-i` | Run in REPL mode | False |
+| `--model` | `-m` | LLM model to use | `anthropic/claude-sonnet-4-20250514` |
+| `--subagents` | `-s` | Enable sub-agent spawning | False |
+
+### Advanced
+
+| Argument | Description | Default |
+|----------|-------------|---------|
+| `--max-iterations` | Maximum agent loop iterations | 30 |
+| `--temperature` | LLM temperature (0.0 = deterministic) | 0.0 |
+| `--load-tools` | Path to Python module with custom tools | - |
+| `--system-prompt` | Path to custom system prompt file | - |
+| `--resume` | Session ID to resume | - |
+| `--list-sessions` | List available sessions | - |
+| `--verbose` | Verbose output | True |
+| `--quiet` | Minimal output | False |
+
+## Model Configuration
+
+### Supported Models
+
+SciAgent uses [LiteLLM](https://github.com/BerriAI/litellm) for multi-model support.
+
+**Anthropic:**
 ```bash
-sciagent --project-dir ./foo --model openai/gpt-4o "Summarise the contents of README.md"
+--model anthropic/claude-sonnet-4-20250514
+--model anthropic/claude-opus-4-20250514
+--model anthropic/claude-3-haiku-20240307
 ```
 
-When embedding SciAgent within Python, create an `AgentConfig` and supply the model name:
-
-```python
-from sciagent.agent import AgentConfig, AgentLoop
-
-config = AgentConfig(model="anthropic/claude-sonnet-4-20250514", project_dir="./project")
-agent = AgentLoop(config=config)
-agent.run("Describe the main function in src/main.py")
-```
-
-### Temperature and iteration limits
-
-Use `--temperature` to control the randomness of the model’s responses.  A lower value (e.g. `0`) yields deterministic output, whereas higher values (up to `1`) encourage creativity.  `--max-iterations` sets a hard cap on the number of Think → Act → Observe cycles the agent will perform.  Increase it for longer tasks but beware of higher token usage.
-
-### System prompts
-
-The **system prompt** sets the tone and instructions for the language model.  SciAgent ships with a default system prompt that encourages safety, careful reasoning and use of tools.  You can override it by passing `--system-prompt PATH` pointing to a text file:
-
+**OpenAI:**
 ```bash
-sciagent --project-dir ./bar --system-prompt custom_prompt.txt "Translate code comments to Spanish"
+--model openai/gpt-4o
+--model openai/gpt-4-turbo
+--model openai/gpt-3.5-turbo
 ```
 
-The file should contain plain text.  For complex behaviour you may include guidelines, style rules or domain knowledge.  In Python, supply a custom prompt string via the `system_prompt` attribute of `AgentConfig`.
-
-## Caching and API keys
-
-SciAgent caches LLM responses to avoid redundant API calls.  Caching is enabled by default for Anthropic models through litellm’s prompt‑caching.  To configure caching manually, call `configure_cache()` from `sciagent.llm` before constructing your agent:
-
-```python
-from sciagent.llm import configure_cache
-
-# Enable in‑memory caching
-configure_cache("local")
-
-# Or use Redis (assuming a local Redis server running)
-configure_cache("redis")
-
-# Clear cached prompts when needed
-configure_cache(None)
-```
-
-Authentication credentials for different providers should be exported as environment variables according to litellm’s conventions (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`).  When using self‑hosted models, specify `base_url` and `api_key` within `AgentConfig`.
-
-## Managing the tool registry
-
-The default registry includes atomic tools such as `bash`, `file_ops`, `search`, `web`, `todo` and `service`.  You can load additional tools at runtime by writing a Python module that defines a `register_tools(registry)` function or exposes a `TOOLS` list.  Each tool must subclass `BaseTool` or be decorated with `@tool` from `sciagent.tools`.
-
-Example of a custom tool module (`my_tools.py`):
-
-```python
-from sciagent.tools import tool
-from sciagent.tools import ToolResult
-
-@tool(name="count_lines", description="Count lines in a file")
-def count_lines(path: str) -> ToolResult:
-    with open(path) as f:
-        num = sum(1 for _ in f)
-    return ToolResult(success=True, output=str(num))
-
-TOOLS = [count_lines]
-```
-
-Load it via the CLI:
-
+**Google:**
 ```bash
-sciagent --project-dir ./baz --load-tools my_tools.py "How many lines are in src/main.py?"
+--model google/gemini-pro
+--model google/gemini-1.5-pro
 ```
 
-In Python, you can create a registry manually and register tools before instantiating the agent:
-
-```python
-from sciagent.tools import create_default_registry
-from my_tools import count_lines
-
-registry = create_default_registry(working_dir="./project")
-registry.register(count_lines)
-
-config = AgentConfig(project_dir="./project", tool_registry=registry)
-agent = AgentLoop(config=config)
+**Local (Ollama):**
+```bash
+--model ollama/llama3
+--model ollama/codellama
+--model ollama/mistral
 ```
 
-### Disabling or replacing tools
-
-If you wish to restrict the agent’s capabilities, you can unregister tools from the registry or replace them with your own implementations.  For example, remove web access when working offline:
-
-```python
-registry = create_default_registry(working_dir=".")
-registry.unregister("web")
+**Azure OpenAI:**
+```bash
+--model azure/gpt-4
 ```
 
-## Configuring sub‑agents
+### Model Selection Tips
 
-Sub‑agents are specialised agents with their own context window and tool set.  Use the `--subagents` flag to enable sub‑agent spawning from the CLI.  To add custom sub‑agents, import `SubAgentConfig` and register them in `SubAgentRegistry`.  Each configuration specifies a name, description, system prompt, model, iteration budget and list of allowed tools.
+- **Default (Claude Sonnet)**: Best balance of capability and speed
+- **Claude Opus**: Most capable, use for complex reasoning tasks
+- **GPT-4o**: Good alternative, especially for vision tasks
+- **Local models**: For privacy-sensitive work or offline use (may have reduced capability)
+
+## AgentConfig (Python API)
+
+When using the Python API, configure the agent with `AgentConfig`:
 
 ```python
-from sciagent.subagent import SubAgentConfig, SubAgentRegistry
+from agent import AgentLoop, AgentConfig
 
-my_agent = SubAgentConfig(
-    name="matlab_helper",
-    description="Assists with MATLAB simulation tasks",
-    system_prompt="You are an expert MATLAB engineer.",
-    model="openai/gpt-4o",
-    max_iterations=20,
-    allowed_tools=["bash", "file_ops", "service"]
+config = AgentConfig(
+    model="anthropic/claude-sonnet-4-20250514",
+    temperature=0.0,           # 0.0 = deterministic
+    max_tokens=16384,          # Max tokens per response
+    max_iterations=30,         # Max agent loop iterations
+    working_dir="./project",   # Working directory
+    verbose=True,              # Show output
+    auto_save=True,            # Auto-save sessions
+    state_dir=".agent_states"  # Where to save state
 )
 
-registry = SubAgentRegistry()
-registry.register(my_agent)
+agent = AgentLoop(config=config)
 ```
 
-Enable it in the main agent by passing `--subagents` and referencing your sub‑agent’s name when constructing tasks in the todo graph.
+### Config Options
 
-## Services and environments
+| Field | Type | Description | Default |
+|-------|------|-------------|---------|
+| `model` | str | LLM model identifier | `anthropic/claude-sonnet-4-20250514` |
+| `temperature` | float | Sampling temperature (0-1) | 0.0 |
+| `max_tokens` | int | Max tokens per LLM response | 16384 |
+| `max_iterations` | int | Max agent loop iterations | 30 |
+| `working_dir` | str | Working directory for file operations | "." |
+| `verbose` | bool | Enable verbose output | True |
+| `auto_save` | bool | Automatically save session state | True |
+| `state_dir` | str | Directory for session state files | ".agent_states" |
 
-The `service` tool interacts with containerised scientific environments (e.g. SciPy, RCWA, OpenFOAM).  A YAML registry (`src/sciagent/services/registry.yaml`) defines each service’s image, dependencies and capabilities.  To add new services, extend this file and rebuild the container images.  When using the CLI, specify `action="run"` along with the service name and code to execute.
+## Custom System Prompts
+
+Override the default system prompt:
 
 ```bash
-sciagent --project-dir ./opt --service-run "service=rcwa; code=simulate_grating.py"
+python main.py --system-prompt ./my_prompt.txt "Your task"
 ```
 
-See the [service registry](architecture.md#service-registry) section for details on available services and how to use them.
+Or in Python:
+
+```python
+from agent import AgentLoop, AgentConfig
+
+custom_prompt = """You are a specialized agent for data analysis.
+Focus on pandas and numpy operations.
+Always validate data before processing."""
+
+agent = AgentLoop(
+    config=AgentConfig(),
+    system_prompt=custom_prompt
+)
+```
+
+## State Management
+
+### Session Storage
+
+Sessions are stored in `.agent_states/` by default. Each session includes:
+- Conversation history
+- Todo list state
+- Configuration at time of session
+
+### Listing Sessions
+
+```bash
+python main.py --list-sessions
+```
+
+### Resuming Sessions
+
+```bash
+python main.py --resume <session-id>
+```
+
+### Clearing State
+
+Delete the `.agent_states/` directory to clear all saved sessions:
+
+```bash
+rm -rf .agent_states/
+```

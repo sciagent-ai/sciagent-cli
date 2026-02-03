@@ -1,54 +1,165 @@
 ---
 layout: default
-title: Getting Started
+title: Getting Started
 nav_order: 2
 ---
 
-# Getting Started
+# Getting Started
 
-This guide helps you install SciAgent and run your first task.  Even if you have never used an agent framework before, following the steps below will get you up and running quickly.
+This guide walks you through installing and running SciAgent for the first time.
+
+## Prerequisites
+
+- Python 3.9 or higher
+- An API key from one of: Anthropic, OpenAI, Google, or a local model setup
 
 ## Installation
 
-SciAgent requires Python 3.9 or newer.  The recommended way to set it up is with a virtual environment:
+### 1. Clone the Repository
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .
+git clone https://github.com/sciagent-ai/sciagent-1.git
+cd sciagent-1
 ```
 
-If SciAgent is published on PyPI you can install it directly with `pip install sciagent`.  Installing from source via the `-e` flag makes development and debugging easier, because changes to the code take effect immediately.
-
-## Running your first task
-
-Once installed, the `sciagent` command becomes available.  You must specify a project directory where generated files will be stored.  The directory is created if it does not exist.  For example:
+### 2. Install Dependencies
 
 ```bash
-sciagent --project-dir ~/my-project "Generate a Python script that fetches weather data and prints tomorrow’s forecast"
+pip install -r requirements.txt
 ```
 
-The agent will read any existing files in the project, plan its work, call tools such as `file_ops`, `bash` and `web` as needed, and write new files into `~/my-project`.  When it finishes, a summary of the task result is printed and you can inspect the generated code.
+Or create a virtual environment first:
 
-### Interactive mode
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
+```
 
-If you prefer to guide the agent step‑by‑step, run it with the `--interactive` flag.  This starts a REPL where you can enter tasks one at a time, view intermediate tool results and provide feedback.  Use `Ctrl+C` to interrupt and choose to continue, stop or give feedback.
+### 3. Set Up API Keys
 
-## Command‑line options
+Set your preferred LLM provider's API key as an environment variable:
 
-SciAgent’s CLI accepts several flags to tailor its behaviour.  The most common ones are:
+```bash
+# Anthropic (default)
+export ANTHROPIC_API_KEY="sk-ant-..."
 
-| Option | Purpose |
-|---|---|
-| `--project-dir PATH` | Directory where the agent reads and writes files.  Relative paths are resolved against your current working directory. |
-| `--model MODEL_NAME` | Specify the LLM to use (e.g. `openai/gpt-4o`, `anthropic/claude-sonnet-4-20250514`). |
-| `--interactive` | Start a read–eval–print loop instead of executing a single task. |
-| `--load-tools FILE` | Load additional tools from a Python module.  The module should expose a `register_tools(registry)` function or a `TOOLS` list. |
-| `--subagents` | Enable sub‑agent spawning so the main agent can delegate tasks to specialised agents like the researcher or reviewer. |
-| `--resume SESSION_ID` | Resume a previous session saved in the `.agent_states` directory. |
-| `--quiet` / `--verbose` | Suppress or amplify console output.  By default, the agent is verbose. |
-| `--max-iterations N` | Limit the number of Think → Act → Observe cycles.  Set higher values for complex tasks. |
-| `--temperature T` | Control the randomness of the model’s responses.  A value of `0` makes the agent deterministic. |
-| `--system-prompt FILE` | Provide a custom system prompt from a text file to guide the agent’s behaviour. |
+# OpenAI
+export OPENAI_API_KEY="sk-..."
 
-Run `sciagent --help` to see the full set of options and default values.
+# Google
+export GOOGLE_API_KEY="..."
+```
+
+You can also add this to your shell profile (`~/.bashrc`, `~/.zshrc`, etc.) for persistence.
+
+## Your First Task
+
+### Basic Usage
+
+Run a simple task:
+
+```bash
+python main.py --project-dir ~/my-project "Create a Python script that prints hello world"
+```
+
+The `--project-dir` flag specifies where generated files will be created. This is required to prevent the agent from modifying its own source code.
+
+### Interactive Mode
+
+For multiple tasks in a session:
+
+```bash
+python main.py --project-dir ~/my-project --interactive
+```
+
+In interactive mode:
+- Type your task and press Enter
+- Type `status` to see current state and todos
+- Type `clear` to reset the conversation
+- Type `exit` to quit
+
+### Using Different Models
+
+```bash
+# OpenAI GPT-4
+python main.py --model openai/gpt-4o "Your task"
+
+# Google Gemini
+python main.py --model google/gemini-pro "Your task"
+
+# Local Ollama
+python main.py --model ollama/llama3 "Your task"
+```
+
+## Example Tasks
+
+### Code Generation
+
+```bash
+python main.py --project-dir ~/projects/demo "Create a FastAPI server with a /health endpoint"
+```
+
+### Code Analysis
+
+```bash
+python main.py --project-dir ~/my-existing-project "Explain the architecture of this codebase"
+```
+
+### Research + Implementation
+
+```bash
+python main.py --project-dir ~/projects/demo --subagents \
+    "Research best practices for Python logging and implement a logging module"
+```
+
+### Multi-Step Tasks
+
+The agent automatically creates a todo list for complex tasks:
+
+```bash
+python main.py --project-dir ~/projects/demo \
+    "Create a CLI tool with: 1) argument parsing 2) config file support 3) logging"
+```
+
+## Session Management
+
+### Save and Resume
+
+Sessions are automatically saved. To resume:
+
+```bash
+# List available sessions
+python main.py --list-sessions
+
+# Resume a specific session
+python main.py --resume abc123def456
+```
+
+## Troubleshooting
+
+### API Key Not Found
+
+If you see "API key not found" errors:
+1. Verify the environment variable is set: `echo $ANTHROPIC_API_KEY`
+2. Make sure you're using the correct variable name for your provider
+3. Restart your terminal if you just added it to your shell profile
+
+### Timeout Errors
+
+For long-running tasks, increase the max iterations:
+
+```bash
+python main.py --max-iterations 50 "Complex task here"
+```
+
+### Permission Errors
+
+The agent won't write to its own directory. Always use `--project-dir` to specify a different location.
+
+## Next Steps
+
+- Read [Tools Reference](tools.md) to understand available tools
+- See [Configuration](configuration.md) for all options
+- Learn about [Sub-Agents](subagents.md) for complex tasks
+- Check [API Reference](api-reference.md) for programmatic usage
