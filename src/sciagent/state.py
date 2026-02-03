@@ -11,6 +11,7 @@ from pathlib import Path
 from enum import Enum
 
 from .llm import Message
+from .defaults import DEFAULT_MODEL
 
 
 class TodoStatus(Enum):
@@ -352,9 +353,9 @@ class AgentState:
     context: ContextWindow
     todos: TodoList
     working_dir: str
-    model: str = "anthropic/claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     temperature: float = 0.0
-    max_iterations: int = 30
+    max_iterations: int = 120
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now().isoformat())
@@ -391,9 +392,9 @@ class AgentState:
             context=context,
             todos=todos,
             working_dir=data.get("working_dir", "."),
-            model=data.get("model", "anthropic/claude-sonnet-4-20250514"),
+            model=data.get("model", DEFAULT_MODEL),
             temperature=data.get("temperature", 0.0),
-            max_iterations=data.get("max_iterations", 30),
+            max_iterations=data.get("max_iterations", 120),
             metadata=data.get("metadata", {}),
             created_at=data.get("created_at", ""),
             updated_at=data.get("updated_at", "")

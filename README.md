@@ -8,7 +8,7 @@ SciAgent is a modular agent framework for software engineering and scientific co
 - **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user‑defined criteria.
 - **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
 - **Multi‑model support** – Choose between Anthropic Claude, OpenAI GPT‑4, Google Gemini or local models via LiteLLM.  Caching reduces cost and latency.
-- **Sub‑agents** – Spawn specialised agents for research, code review, test writing and other roles to keep contexts focused.
+- **Sub‑agents** – Spawn specialised agents for research, code review, test writing and other roles to keep contexts focused.  Sub‑agents automatically inherit the parent's model.
 
 ## Quick start
 
@@ -102,7 +102,7 @@ Options:
   -s, --subagents       Enable sub-agent spawning
   --resume SESSION_ID   Resume previous session
   --list-sessions       List available sessions
-  --max-iterations N    Max agent iterations (default: 30)
+  --max-iterations N    Max agent iterations (default: 120)
   -v, --verbose         Verbose output (default)
   -q, --quiet           Minimal output
 ```
@@ -112,14 +112,14 @@ Options:
 SciAgent can also be embedded in your own Python code.  Use the `create_agent()` factory to configure an agent and call `run()` or `run_interactive()`:
 
 ```python
-from sciagent import create_agent, run_task
+from sciagent import create_agent, run_task, DEFAULT_MODEL
 
 # One‑shot task
 result = run_task("Create a hello world script")
 
-# Custom configuration
+# Custom configuration (uses DEFAULT_MODEL if not specified)
 agent = create_agent(
-    model="anthropic/claude-sonnet-4-20250514",
+    model=DEFAULT_MODEL,  # Or specify another model like "openai/gpt-4o"
     working_dir="./my-project"
 )
 result = agent.run("Analyse this codebase")
@@ -127,6 +127,8 @@ result = agent.run("Analyse this codebase")
 # Interactive session
 agent.run_interactive()
 ```
+
+To change the default model globally, edit `src/sciagent/defaults.py`.
 
 ## Architecture
 

@@ -26,6 +26,45 @@ SciAgent provides a few ready‑made sub‑agents.  Each is defined by a `SubAge
 
 You can list these sub‑agents from Python via `SubAgentRegistry().list_agents()`.
 
+## Model inheritance
+
+Sub‑agents automatically inherit the parent agent's model.  When you create an agent with `--model openai/gpt-4o`, all spawned sub‑agents will use the same model:
+
+```bash
+# Both parent and sub-agents use GPT-4o
+sciagent --subagents --model openai/gpt-4o "Research this codebase"
+```
+
+This inheritance happens through the `SubAgentOrchestrator`, which receives the parent's model and applies it when spawning sub‑agents from the registry.
+
+### Overriding model inheritance
+
+If you need a specific sub‑agent to use a different model (e.g., a cheaper model for simple tasks), provide a custom `SubAgentConfig`:
+
+```python
+from sciagent.subagent import SubAgentOrchestrator, SubAgentConfig
+
+# Orchestrator with parent model
+orch = SubAgentOrchestrator(
+    tools=registry,
+    working_dir="./project",
+    parent_model="anthropic/claude-sonnet-4-20250514"
+)
+
+# This uses the parent's model (claude-sonnet)
+result = orch.spawn("researcher", "Find relevant files")
+
+# This uses a custom model (overrides inheritance)
+custom_config = SubAgentConfig(
+    name="quick_lookup",
+    description="Fast lookups",
+    system_prompt="Answer briefly.",
+    model="anthropic/claude-haiku-3",  # Cheaper model
+    max_iterations=5
+)
+result = orch.spawn("quick_lookup", "What is 2+2?", custom_config=custom_config)
+```
+
 ## Creating and running sub‑agents
 
 To spawn a sub‑agent directly, construct a `SubAgent` and call its `run()` method:

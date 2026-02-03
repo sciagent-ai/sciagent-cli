@@ -21,12 +21,13 @@ from .state import (
     generate_session_id
 )
 from .display import Display, create_display
+from .defaults import DEFAULT_MODEL
 
 
 @dataclass
 class AgentConfig:
     """Configuration for the agent"""
-    model: str = "anthropic/claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     temperature: float = 0.0
     max_tokens: int = 16384  # Increased to prevent truncation of large code generation
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
@@ -1003,7 +1004,7 @@ class AgentLoop:
 
 def run_task(
     task: str,
-    model: str = "anthropic/claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
     tools: Optional[ToolRegistry] = None,
     working_dir: str = ".",
     verbose: bool = True
@@ -1024,7 +1025,7 @@ def run_task(
 
 
 def create_agent(
-    model: str = "anthropic/claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
     tools: Optional[ToolRegistry] = None,
     working_dir: str = ".",
     system_prompt: Optional[str] = None,

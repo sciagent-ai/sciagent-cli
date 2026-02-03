@@ -8,6 +8,22 @@ nav_order: 3
 
 SciAgent is highly configurable.  You can fine‑tune the language model, system prompts, caching behaviour, tool registry and even introduce custom sub‑agents.  This page explains the main configuration options available via the command‑line and Python APIs.
 
+## Default model
+
+SciAgent uses a single source of truth for the default model, defined in `sciagent.defaults.DEFAULT_MODEL`.  This makes it easy to change the default across the entire codebase by editing one constant:
+
+```python
+from sciagent import DEFAULT_MODEL
+print(DEFAULT_MODEL)  # "anthropic/claude-sonnet-4-20250514"
+```
+
+To use a different default model globally, modify `src/sciagent/defaults.py`:
+
+```python
+# defaults.py
+DEFAULT_MODEL = "openai/gpt-4o"  # Change this to update the default everywhere
+```
+
 ## Choosing a language model
 
 The `--model` flag controls which large‑language model is used.  SciAgent leverages the [litellm](https://github.com/BerriAI/litellm) library and therefore supports providers such as OpenAI, Anthropic, Google and open models served via custom endpoints.  For example:
@@ -20,15 +36,22 @@ When embedding SciAgent within Python, create an `AgentConfig` and supply the mo
 
 ```python
 from sciagent.agent import AgentConfig, AgentLoop
+from sciagent import DEFAULT_MODEL
 
-config = AgentConfig(model="anthropic/claude-sonnet-4-20250514", project_dir="./project")
+# Use the default model
+config = AgentConfig(model=DEFAULT_MODEL, working_dir="./project")
 agent = AgentLoop(config=config)
 agent.run("Describe the main function in src/main.py")
+
+# Or specify a different model
+config = AgentConfig(model="openai/gpt-4o", working_dir="./project")
 ```
 
 ### Temperature and iteration limits
 
-Use `--temperature` to control the randomness of the model’s responses.  A lower value (e.g. `0`) yields deterministic output, whereas higher values (up to `1`) encourage creativity.  `--max-iterations` sets a hard cap on the number of Think → Act → Observe cycles the agent will perform.  Increase it for longer tasks but beware of higher token usage.
+Use `--temperature` to control the randomness of the model’s responses.  A lower value (e.g. `0`) yields deterministic output, whereas higher values (up to `1`) encourage creativity.  `--max-iterations` sets a hard cap on the number of Think → Act → Observe cycles the agent will perform.  (default: 120).  Decrease it for simpler tasks to save tokens, or increase further for very complex multi‑step workflows.
+
+Note that sub‑agents use a lower default of 20 iterations since they handle focused, isolated tasks.
 
 ### System prompts
 
@@ -110,14 +133,28 @@ registry.unregister("web")
 
 Sub‑agents are specialised agents with their own context window and tool set.  Use the `--subagents` flag to enable sub‑agent spawning from the CLI.  To add custom sub‑agents, import `SubAgentConfig` and register them in `SubAgentRegistry`.  Each configuration specifies a name, description, system prompt, model, iteration budget and list of allowed tools.
 
+### Model inheritance
+
+By default, sub‑agents **inherit the parent agent's model**.  This means if you run the CLI with `--model openai/gpt-4o`, all spawned sub‑agents will also use GPT‑4o rather than the hardcoded default.  This ensures consistent model usage across your entire agent hierarchy.
+
+```bash
+# Parent and all sub-agents will use GPT-4o
+sciagent --subagents --model openai/gpt-4o "Research and analyze this codebase"
+```
+
+### Custom sub‑agent models
+
+You can override model inheritance by providing a custom `SubAgentConfig` with an explicit model:
+
 ```python
 from sciagent.subagent import SubAgentConfig, SubAgentRegistry
 
+# This sub-agent will always use GPT-4o, regardless of parent's model
 my_agent = SubAgentConfig(
     name="matlab_helper",
     description="Assists with MATLAB simulation tasks",
     system_prompt="You are an expert MATLAB engineer.",
-    model="openai/gpt-4o",
+    model="openai/gpt-4o",  # Explicit model overrides inheritance
     max_iterations=20,
     allowed_tools=["bash", "file_ops", "service"]
 )
@@ -126,7 +163,9 @@ registry = SubAgentRegistry()
 registry.register(my_agent)
 ```
 
-Enable it in the main agent by passing `--subagents` and referencing your sub‑agent’s name when constructing tasks in the todo graph.
+Built‑in sub‑agents (researcher, reviewer, test_writer, general) use the parent's model by default.  Custom sub‑agents with explicit model settings will use their configured model.
+
+Enable sub‑agents in the main agent by passing `--subagents` and referencing your sub‑agent's name when constructing tasks in the todo graph.
 
 ## Services and environments
 

@@ -11,15 +11,33 @@ This document covers the Python API for using SciAgent programmatically.
 ## Quick Start
 
 ```python
-from agent import create_agent, run_task
+from sciagent import create_agent, run_task, DEFAULT_MODEL
 
 # Simple one-shot execution
 result = run_task("Create a hello world script")
 
-# Configured agent
+# Configured agent with default model
+agent = create_agent(model=DEFAULT_MODEL)
+result = agent.run("Analyze this codebase")
+
+# Or use a specific model
 agent = create_agent(model="openai/gpt-4o")
 result = agent.run("Analyze this codebase")
 ```
+
+## Constants
+
+### DEFAULT_MODEL
+
+The default LLM model used throughout the framework.
+
+```python
+from sciagent import DEFAULT_MODEL
+
+print(DEFAULT_MODEL)  # "anthropic/claude-sonnet-4-20250514"
+```
+
+To change the default model globally, edit `src/sciagent/defaults.py`.
 
 ## Core Classes
 
@@ -105,19 +123,21 @@ agent.on_response(lambda text: print(f"Response: {text[:100]}"))
 Configuration dataclass for agent behavior.
 
 ```python
-from agent import AgentConfig
+from sciagent import AgentConfig, DEFAULT_MODEL
 
 config = AgentConfig(
-    model="anthropic/claude-sonnet-4-20250514",  # LLM model
-    temperature=0.0,                              # Sampling temperature
-    max_tokens=16384,                             # Max tokens per response
-    max_iterations=30,                            # Max loop iterations
-    working_dir=".",                              # Working directory
-    verbose=True,                                 # Verbose output
-    auto_save=True,                               # Auto-save sessions
-    state_dir=".agent_states"                     # State storage path
+    model=DEFAULT_MODEL,         # LLM model (defaults to DEFAULT_MODEL)
+    temperature=0.0,             # Sampling temperature
+    max_tokens=16384,            # Max tokens per response
+    max_iterations=120,          # Max loop iterations
+    working_dir=".",             # Working directory
+    verbose=True,                # Verbose output
+    auto_save=True,              # Auto-save sessions
+    state_dir=".agent_states"    # State storage path
 )
 ```
+
+The `model` parameter defaults to `DEFAULT_MODEL` if not specified.
 
 ---
 
@@ -245,11 +265,11 @@ class MyTool(BaseTool):
 One-shot task execution.
 
 ```python
-from agent import run_task
+from sciagent import run_task, DEFAULT_MODEL
 
 result = run_task(
     task="Create a script",
-    model="anthropic/claude-sonnet-4-20250514",
+    model=DEFAULT_MODEL,     # Defaults to DEFAULT_MODEL
     tools=None,              # Use default tools
     working_dir=".",
     verbose=True
@@ -261,10 +281,10 @@ result = run_task(
 Create a configured agent instance.
 
 ```python
-from agent import create_agent
+from sciagent import create_agent, DEFAULT_MODEL
 
 agent = create_agent(
-    model="anthropic/claude-sonnet-4-20250514",
+    model=DEFAULT_MODEL,     # Defaults to DEFAULT_MODEL
     tools=None,
     working_dir=".",
     system_prompt=None,
@@ -274,13 +294,20 @@ agent = create_agent(
 
 ### create_agent_with_subagents
 
-Create an agent with sub-agent support.
+Create an agent with sub-agent support. Sub-agents inherit the specified model.
 
 ```python
-from subagent import create_agent_with_subagents
+from sciagent import create_agent_with_subagents, DEFAULT_MODEL
 
 agent = create_agent_with_subagents(
-    model="anthropic/claude-sonnet-4-20250514",
+    model=DEFAULT_MODEL,     # Parent and sub-agents use this model
+    working_dir="./project",
+    verbose=True
+)
+
+# Or use a specific model - sub-agents will inherit it
+agent = create_agent_with_subagents(
+    model="openai/gpt-4o",   # All sub-agents also use GPT-4o
     working_dir="./project",
     verbose=True
 )
@@ -295,15 +322,39 @@ agent = create_agent_with_subagents(
 Configuration for a sub-agent type.
 
 ```python
-from subagent import SubAgentConfig
+from sciagent import SubAgentConfig, DEFAULT_MODEL
 
 config = SubAgentConfig(
     name="researcher",
+    description="Research specialist",
     system_prompt="You are a research specialist...",
-    allowed_tools=["view", "search", "web"],
-    model="anthropic/claude-sonnet-4-20250514"
+    model=DEFAULT_MODEL,                    # Defaults to DEFAULT_MODEL
+    max_iterations=20,
+    allowed_tools=["file_ops", "search", "web"],
+    temperature=0.0
 )
 ```
+
+### SubAgentOrchestrator
+
+Orchestrates sub-agent spawning with model inheritance.
+
+```python
+from sciagent.subagent import SubAgentOrchestrator
+from sciagent.tools import create_default_registry
+
+orch = SubAgentOrchestrator(
+    tools=create_default_registry("./project"),
+    working_dir="./project",
+    max_workers=4,
+    parent_model="openai/gpt-4o"  # Sub-agents inherit this model
+)
+
+# Spawned sub-agents use parent_model by default
+result = orch.spawn("researcher", "Find API endpoints")
+```
+
+When `parent_model` is set, sub-agents spawned from the registry automatically inherit this model. Custom configs with explicit models override inheritance.
 
 ### SubAgentResult
 
@@ -369,10 +420,11 @@ sessions = manager.list_sessions()
 Wrapper for LiteLLM multi-model support.
 
 ```python
-from llm import LLMClient
+from sciagent.llm import LLMClient
+from sciagent import DEFAULT_MODEL
 
 client = LLMClient(
-    model="anthropic/claude-sonnet-4-20250514",
+    model=DEFAULT_MODEL,     # Defaults to DEFAULT_MODEL
     temperature=0.0,
     max_tokens=16384
 )

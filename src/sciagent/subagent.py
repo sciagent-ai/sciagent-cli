@@ -18,6 +18,7 @@ from .llm import LLMClient, Message
 from .tools import ToolRegistry, BaseTool, ToolResult, create_default_registry
 from .state import ContextWindow, generate_session_id
 from .agent import AgentLoop, AgentConfig
+from .defaults import DEFAULT_MODEL
 
 
 @dataclass
@@ -26,7 +27,7 @@ class SubAgentConfig:
     name: str
     description: str
     system_prompt: str
-    model: str = "anthropic/claude-sonnet-4-20250514"
+    model: str = DEFAULT_MODEL
     max_iterations: int = 20
     allowed_tools: Optional[List[str]] = None  # None = all tools
     temperature: float = 0.0
@@ -250,11 +251,13 @@ class SubAgentOrchestrator:
         self,
         tools: Optional[ToolRegistry] = None,
         working_dir: str = ".",
-        max_workers: int = 4
+        max_workers: int = 4,
+        parent_model: Optional[str] = None
     ):
         self.tools = tools or create_default_registry(working_dir)
         self.working_dir = working_dir
         self.max_workers = max_workers
+        self.parent_model = parent_model  # Model to inherit for subagents
         self.registry = SubAgentRegistry()
         
         # Track active sub-agents
@@ -269,16 +272,30 @@ class SubAgentOrchestrator:
     ) -> SubAgentResult:
         """
         Spawn and run a sub-agent
-        
+
         Args:
             agent_name: Name of registered agent type
             task: Task to execute
             custom_config: Optional custom configuration
-            
+
         Returns:
             SubAgentResult with output
         """
         config = custom_config or self.registry.get(agent_name)
+
+        # Inherit parent's model for registry configs (not custom configs)
+        if config and not custom_config and self.parent_model:
+            # Create a copy to avoid mutating registry
+            config = SubAgentConfig(
+                name=config.name,
+                description=config.description,
+                system_prompt=config.system_prompt,
+                model=self.parent_model,
+                max_iterations=config.max_iterations,
+                allowed_tools=config.allowed_tools,
+                temperature=config.temperature
+            )
+
         if not config:
             return SubAgentResult(
                 agent_name=agent_name,
@@ -408,20 +425,20 @@ Use this for tasks that benefit from isolated context or parallel execution."""
 
 
 def create_agent_with_subagents(
-    model: str = "anthropic/claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
     working_dir: str = ".",
     verbose: bool = True
 ) -> AgentLoop:
     """
     Create an agent with sub-agent spawning capability
-    
+
     Example:
         agent = create_agent_with_subagents()
         agent.run("Research this codebase, then write tests for the main module")
     """
     # Create tools with sub-agent support
     tools = create_default_registry(working_dir)
-    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir)
+    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir, parent_model=model)
     tools.register(TaskTool(orchestrator))
     
     config = AgentConfig(
@@ -602,7 +619,7 @@ Example workflow:
 
 
 def create_agent_with_orchestration(
-    model: str = "anthropic/claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
     working_dir: str = ".",
     verbose: bool = True
 ) -> AgentLoop:
@@ -627,7 +644,7 @@ def create_agent_with_orchestration(
     """
     # Create tools with orchestration support
     tools = create_default_registry(working_dir)
-    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir)
+    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir, parent_model=model)
 
     # Register both task and workflow tools
     tools.register(TaskTool(orchestrator))

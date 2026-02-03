@@ -6,6 +6,8 @@ import json
 from typing import List, Dict, Any, Optional, Generator
 from dataclasses import dataclass, field
 
+from .defaults import DEFAULT_MODEL
+
 try:
     import litellm
     from litellm import completion
@@ -114,7 +116,7 @@ class LLMClient:
     
     def __init__(
         self,
-        model: str = "anthropic/claude-sonnet-4-20250514",
+        model: str = DEFAULT_MODEL,
         temperature: float = 0.0,
         max_tokens: int = 4096,
         api_key: Optional[str] = None,
@@ -354,7 +356,7 @@ class LLMClient:
 # Convenience function for simple calls
 def ask(
     prompt: str,
-    model: str = "anthropic/claude-sonnet-4-20250514",
+    model: str = DEFAULT_MODEL,
     system: Optional[str] = None,
     **kwargs
 ) -> str:

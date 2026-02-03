@@ -19,6 +19,7 @@ from .agent import AgentLoop, AgentConfig, create_agent
 from .tools import ToolRegistry, create_default_registry
 from .subagent import create_agent_with_subagents
 from .state import StateManager
+from .defaults import DEFAULT_MODEL
 
 # Suppress warnings early before any other imports trigger them
 _display = create_display(verbose=False)
@@ -68,8 +69,8 @@ Examples:
     
     parser.add_argument(
         "-m", "--model",
-        default="anthropic/claude-sonnet-4-20250514",
-        help="Model to use (default: anthropic/claude-sonnet-4-20250514)"
+        default=DEFAULT_MODEL,
+        help=f"Model to use (default: {DEFAULT_MODEL})"
     )
     
     parser.add_argument(
@@ -118,8 +119,8 @@ Examples:
     parser.add_argument(
         "--max-iterations",
         type=int,
-        default=30,
-        help="Maximum agent loop iterations (default: 30)"
+        default=120,
+        help="Maximum agent loop iterations (default: 120)"
     )
     
     parser.add_argument(

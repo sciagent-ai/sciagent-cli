@@ -47,7 +47,7 @@ SciAgent’s CLI accepts several flags to tailor its behaviour.  The most common
 | `--subagents` | Enable sub‑agent spawning so the main agent can delegate tasks to specialised agents like the researcher or reviewer. |
 | `--resume SESSION_ID` | Resume a previous session saved in the `.agent_states` directory. |
 | `--quiet` / `--verbose` | Suppress or amplify console output.  By default, the agent is verbose. |
-| `--max-iterations N` | Limit the number of Think → Act → Observe cycles.  Set higher values for complex tasks. |
+| `--max-iterations N` | Limit the number of Think → Act → Observe cycles.  (default: 120).  Decrease for simpler tasks. |
 | `--temperature T` | Control the randomness of the model’s responses.  A value of `0` makes the agent deterministic. |
 | `--system-prompt FILE` | Provide a custom system prompt from a text file to guide the agent’s behaviour. |
 

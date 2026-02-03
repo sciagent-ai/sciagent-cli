@@ -32,9 +32,12 @@ from .subagent import (
     SubAgentRegistry, SubAgentOrchestrator,
     create_agent_with_subagents
 )
+from .defaults import DEFAULT_MODEL
 
 __version__ = "0.1.0"
 __all__ = [
+    # Config
+    "DEFAULT_MODEL",
     # LLM
     "LLMClient", "Message", "LLMResponse", "ask",
     # Tools
