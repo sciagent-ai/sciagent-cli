@@ -3,14 +3,15 @@ Tool collection package.
 
 Architecture v2: Filesystem-as-Memory Model
 
-This package provides 5 atomic tools that handle 90% of tasks:
+This package provides 7 atomic tools that handle 90% of tasks:
 - bash (shell.py): Execute shell commands
 - file_ops (file_ops.py): Read/write/edit files - THIS IS MEMORY
 - search (search.py): Find files (glob) and content (grep)
 - web (web.py): Search and fetch web content
 - todo (todo.py): Track task progress
+- service (service.py): Run code in containerized simulation environments
+- ask_user (ask_user.py): Request user input for decisions/clarifications
 
-Old tools are archived in tools/archive/core_v1/
 """
 
 from .atomic import (
@@ -19,6 +20,8 @@ from .atomic import (
     SearchTool,
     WebTool,
     TodoTool,
+    ServiceTool,
+    AskUserTool,
 )
 
 from .registry import (
@@ -38,6 +41,8 @@ __all__ = [
     "SearchTool",
     "WebTool",
     "TodoTool",
+    "ServiceTool",
+    "AskUserTool",
     # Registry
     "ToolRegistry",
     "ToolResult",
