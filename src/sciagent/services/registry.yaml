@@ -428,6 +428,148 @@ services:
       # 8. Write output
       write_def output.def
 
+  biopython:
+    description: "Biopython - Computational biology and bioinformatics toolkit"
+    image: ghcr.io/sciagent-ai/biopython
+    dockerfile: services/biopython/Dockerfile
+    license: BSD-3-Clause
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "DNA/RNA/protein sequence manipulation and analysis"
+      - "Sequence file parsing (FASTA, GenBank, FASTQ, etc.)"
+      - "BLAST searching and result parsing"
+      - "Phylogenetic tree construction and manipulation"
+      - "PDB structure file parsing and analysis"
+      - "Multiple sequence alignment tools"
+      - "Population genetics analysis"
+    example: |
+      from Bio.Seq import Seq
+      from Bio import SeqIO
+      from Bio.SeqUtils import gc_fraction
+
+      # Create and manipulate a DNA sequence
+      dna = Seq("ATGCGATCGATCGATCG")
+      print(f"DNA: {dna}")
+      print(f"Complement: {dna.complement()}")
+      print(f"Reverse complement: {dna.reverse_complement()}")
+      print(f"Transcription (mRNA): {dna.transcribe()}")
+      print(f"Translation (protein): {dna.translate()}")
+      print(f"GC content: {gc_fraction(dna):.2%}")
+
+      # Parse a FASTA file
+      # for record in SeqIO.parse("sequences.fasta", "fasta"):
+      #     print(f"{record.id}: {len(record.seq)} bp")
+
+  qiskit:
+    description: "Qiskit - IBM open-source SDK for quantum computing"
+    image: ghcr.io/sciagent-ai/qiskit
+    dockerfile: services/qiskit/Dockerfile
+    license: Apache-2.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Quantum circuit construction and manipulation"
+      - "Quantum gate operations (Hadamard, CNOT, Pauli, etc.)"
+      - "Quantum state simulation (AerSimulator)"
+      - "Quantum algorithm implementation (Grover, Shor, VQE, QAOA)"
+      - "Quantum error correction"
+      - "Circuit visualization and analysis"
+      - "Transpilation and optimization for hardware"
+    example: |
+      from qiskit import QuantumCircuit
+      from qiskit_aer import AerSimulator
+      from qiskit.visualization import plot_histogram
+
+      # Create a Bell state circuit
+      qc = QuantumCircuit(2, 2)
+      qc.h(0)        # Hadamard gate on qubit 0
+      qc.cx(0, 1)    # CNOT gate
+      qc.measure([0, 1], [0, 1])
+
+      print(qc.draw())
+
+      # Simulate the circuit
+      simulator = AerSimulator()
+      job = simulator.run(qc, shots=1000)
+      result = job.result()
+      counts = result.get_counts(qc)
+      print(f"Measurement results: {counts}")
+      # Expected: {'00': ~500, '11': ~500} (Bell state)
+
+  networkx:
+    description: "NetworkX - Python package for complex network analysis"
+    image: ghcr.io/sciagent-ai/networkx
+    dockerfile: services/networkx/Dockerfile
+    license: BSD-3-Clause
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Graph creation (directed, undirected, multigraph)"
+      - "Graph algorithms (shortest path, centrality, clustering)"
+      - "Network analysis (connectivity, components, flow)"
+      - "Graph generators (random, small-world, scale-free)"
+      - "Graph I/O (GML, GraphML, adjacency list, edge list)"
+      - "Visualization with matplotlib integration"
+      - "Social network analysis"
+    example: |
+      import networkx as nx
+      import matplotlib.pyplot as plt
+
+      # Create a graph
+      G = nx.karate_club_graph()
+      print(f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
+
+      # Compute centrality measures
+      degree_cent = nx.degree_centrality(G)
+      betweenness = nx.betweenness_centrality(G)
+      print(f"Most central node (degree): {max(degree_cent, key=degree_cent.get)}")
+
+      # Find shortest path
+      path = nx.shortest_path(G, source=0, target=33)
+      print(f"Shortest path 0->33: {path}")
+
+      # Detect communities
+      communities = nx.community.greedy_modularity_communities(G)
+      print(f"Number of communities: {len(communities)}")
+
+      # Graph properties
+      print(f"Clustering coefficient: {nx.average_clustering(G):.3f}")
+      print(f"Density: {nx.density(G):.3f}")
+
+  blast:
+    description: "NCBI BLAST+ - Basic Local Alignment Search Tool for sequence similarity searching"
+    image: ghcr.io/sciagent-ai/blast
+    dockerfile: services/blast/Dockerfile
+    license: Unlicense
+    runtime: bash
+    workdir: /workspace
+    capabilities:
+      - "Nucleotide-nucleotide BLAST (blastn)"
+      - "Protein-protein BLAST (blastp)"
+      - "Translated BLAST (blastx, tblastn, tblastx)"
+      - "PSI-BLAST and PHI-BLAST for profile searches"
+      - "BLAST database creation and management"
+      - "Result parsing with Biopython"
+      - "Sequence similarity and homology detection"
+    example: |
+      # Create a BLAST database from FASTA file
+      makeblastdb -in sequences.fasta -dbtype nucl -out mydb
+
+      # Search nucleotide sequences
+      blastn -query query.fasta -db mydb -out results.txt -outfmt 6
+
+      # Search protein sequences
+      blastp -query protein.fasta -db nr -out results.xml -outfmt 5
+
+      # Parse results with Biopython
+      from Bio.Blast import NCBIXML
+      with open("results.xml") as f:
+          records = NCBIXML.parse(f)
+          for record in records:
+              for alignment in record.alignments:
+                  print(f"Hit: {alignment.title}")
+
   sciml-julia:
     description: "Julia SciML ecosystem - differential equations, optimization, and scientific machine learning"
     image: ghcr.io/sciagent-ai/sciml-julia
