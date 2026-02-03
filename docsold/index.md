@@ -16,6 +16,7 @@ permalink: /
 * **Run scientific simulations** inside containerised environments for numerical computation, chemistry, optimisation, optics, fluid dynamics and circuit design.
 * **Compose multi‑stage workflows** by breaking down large objectives into dependent tasks and delegating them to specialised sub‑agents.
 * **Extend the framework** with your own tools, services and system prompts to suit your domain.
+ 
 
 ## Quick navigation
 
