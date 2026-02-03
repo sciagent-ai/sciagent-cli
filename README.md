@@ -132,7 +132,7 @@ To change the default model globally, edit `src/sciagent/defaults.py`.
 
 ## Architecture
 
-SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks.  Each agent follows a Think → Act → Observe loop and can call tools such as `bash`, `file_ops`, `search`, `web`, `todo` and `service` to interact with the file system, shell, web and containerised simulations.
+SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks.  Each agent follows a Think → Act → Observe loop and can call tools such as `bash`, `file_ops`, `search`, `web`, `todo`, `service` and `ask_user` to interact with the file system, shell, web, containerised simulations and request user input when needed.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -155,7 +155,8 @@ SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed 
         └─────────────┼─────────────┘
                       ▼
 ┌─────────────────────────────────────────────────┐
-│  Tools: bash, file_ops, search, web, todo       │
+│  Tools: bash, file_ops, search, web, todo,      │
+│         service, ask_user                       │
 │  Services: rcwa, meep, openfoam, gromacs, ...   │
 └─────────────────────────────────────────────────┘
 ```

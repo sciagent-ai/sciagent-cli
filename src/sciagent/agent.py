@@ -187,6 +187,31 @@ NEVER mark a task complete without verification. This is the #1 cause of failed 
 ❌ Partial results → mark complete (targets not met)
 ```
 
+## Asking the User (ask_user tool)
+
+Use ask_user when you genuinely need user input. Stay autonomous for routine decisions.
+
+### WHEN TO ASK
+- Choosing between simulation services (MEEP vs RCWA, GROMACS vs ASE, etc.)
+- Confirming expensive computation parameters (simulation time, mesh resolution)
+- Ambiguous scientific requirements (convergence criteria, accuracy vs speed trade-offs)
+- Multiple valid approaches where user preference matters
+
+### WHEN NOT TO ASK
+- Decisions you can make based on context/files
+- Routine steps you can verify yourself
+- Every step of execution (stay autonomous)
+- Trivial choices that don't significantly impact results
+
+### EXAMPLE
+```
+ask_user(
+    question="Which electromagnetic solver should I use for this photonic crystal simulation?",
+    options=["MEEP (FDTD, good for broadband)", "RCWA (faster for periodic structures)", "Both and compare"],
+    context="MEEP is more general but slower. RCWA is faster for layered/periodic structures."
+)
+```
+
 ## Error Recovery
 
 - Same error 3+ times → STOP. Try different approach.
@@ -363,6 +388,87 @@ class AgentLoop:
         except EOFError:
             self._cancelled = True
         self._paused = False
+
+    def _prompt_user_for_input(self, request: Dict[str, Any]) -> str:
+        """
+        Display a question to the user and get their response.
+
+        Args:
+            request: The ask_user tool output containing question, options, context, default
+
+        Returns:
+            The user's response string
+        """
+        print("\n" + "=" * 60)
+        print("🤔 AGENT NEEDS YOUR INPUT")
+        print("=" * 60)
+
+        # Show context if provided
+        if request.get("context"):
+            print(f"\nContext: {request['context']}")
+
+        # Show the question
+        print(f"\n{request['question']}")
+
+        # Show options if provided
+        options = request.get("options")
+        default = request.get("default")
+
+        if options:
+            print("\nOptions:")
+            for i, opt in enumerate(options, 1):
+                default_marker = " (default)" if opt == default else ""
+                print(f"  [{i}] {opt}{default_marker}")
+            print(f"  [0] Other (type your own response)")
+
+            # Get choice
+            prompt = f"\nYour choice [1-{len(options)}, or 0 for other]"
+            if default:
+                prompt += f" (Enter for '{default}')"
+            prompt += ": "
+
+            try:
+                choice = input(prompt).strip()
+
+                if not choice and default:
+                    print(f"Using default: {default}")
+                    return default
+
+                if choice.isdigit():
+                    idx = int(choice)
+                    if 1 <= idx <= len(options):
+                        selected = options[idx - 1]
+                        print(f"Selected: {selected}")
+                        return selected
+                    elif idx == 0:
+                        custom = input("Your response: ").strip()
+                        return custom if custom else (default or options[0])
+
+                # If input matches an option directly, use it
+                if choice in options:
+                    return choice
+
+                # Otherwise treat as custom response
+                return choice if choice else (default or options[0])
+
+            except (EOFError, KeyboardInterrupt):
+                print(f"\nUsing default: {default or options[0]}")
+                return default or options[0]
+        else:
+            # Free-form response
+            prompt = "\nYour response"
+            if default:
+                prompt += f" (Enter for '{default}')"
+            prompt += ": "
+
+            try:
+                response = input(prompt).strip()
+                if not response and default:
+                    print(f"Using default: {default}")
+                    return default
+                return response if response else "No response provided"
+            except (EOFError, KeyboardInterrupt):
+                return default or "No response provided"
 
     def _setup_interrupt_handler(self):
         """Install our interrupt handler"""
@@ -613,6 +719,21 @@ class AgentLoop:
 
         if self._on_tool_end:
             self._on_tool_end(tool_call.name, result)
+
+        # Special handling for ask_user tool - prompt user and return their response
+        if tool_call.name == "ask_user" and result.success:
+            output = result.output
+            if isinstance(output, dict) and output.get("awaiting_user_input"):
+                # Get user input
+                user_response = self._prompt_user_for_input(output)
+                # Replace the tool result with the user's response
+                result = ToolResult(
+                    success=True,
+                    output=f"User responded: {user_response}",
+                    metadata={"user_response": user_response}
+                )
+                self.display.tool_end(tool_call.name, success=True, message=f"User: {user_response[:50]}...")
+                return result
 
         # Spiral detection: track errors (skip if deferred to caller)
         if not defer_spiral:

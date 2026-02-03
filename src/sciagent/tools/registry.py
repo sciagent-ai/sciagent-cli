@@ -2,7 +2,7 @@
 Tool Registry - load and manage the atomic tool set.
 
 This module provides the central registry for tools. It loads
-only the 5 atomic tools by default, keeping context minimal.
+only the 7 atomic tools by default, keeping context minimal.
 """
 
 from __future__ import annotations
@@ -193,7 +193,7 @@ class ToolRegistry:
 
 def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     """
-    Create registry with the 6 atomic tools.
+    Create registry with the 7 atomic tools.
 
     This is the minimal tool set for scientific/engineering tasks:
     - bash: Shell execution
@@ -202,8 +202,9 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     - web: Search and fetch web content
     - todo: Track task progress
     - service: Run code in containerized simulation environments (RCWA, MEEP, etc.)
+    - ask_user: Request user input for decisions/clarifications
 
-    Total: 6 tools
+    Total: 7 tools
     """
     from .atomic.shell import ShellTool
     from .atomic.file_ops import FileOpsTool
@@ -211,6 +212,7 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     from .atomic.web import WebTool
     from .atomic.todo import TodoTool
     from .atomic.service import ServiceTool
+    from .atomic.ask_user import AskUserTool
 
     registry = ToolRegistry()
 
@@ -220,6 +222,7 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     registry.register(WebTool())
     registry.register(TodoTool())
     registry.register(ServiceTool(working_dir))
+    registry.register(AskUserTool())
 
     return registry
 

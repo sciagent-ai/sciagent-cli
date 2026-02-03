@@ -65,6 +65,7 @@ Atomic tools provide powerful, composable actions that cover file I/O, searching
 | **web** | Search the web and fetch page content.  Implements rate‑limiting and categorises results by trustworthiness (peer‑reviewed, preprint, government, etc.). |
 | **todo** | Manage a directed acyclic graph of tasks with statuses, types and dependencies.  Supports queries for ready tasks, blocked tasks and execution order. |
 | **service** | Run code inside Docker containers for scientific computing.  Services such as SciPy, RDKit, SymPy and OpenFOAM are described in a YAML registry. |
+| **ask_user** | Request user input for decisions and clarifications.  Pauses execution to ask questions about service selection, simulation parameters or ambiguous requirements. |
 
 ### Base tools
 

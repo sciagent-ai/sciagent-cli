@@ -168,6 +168,55 @@ search(command="grep", pattern="def main", include="*.py")
 search(command="grep", pattern="TODO", path="./src")
 ```
 
+---
+
+### ask_user
+
+Request user input during agent execution for decisions and clarifications.
+
+**Parameters:**
+- `question` (required): The question to ask the user
+- `options` (optional): List of choices to present (minimum 2 if provided)
+- `context` (optional): Additional context to help the user decide
+- `default` (optional): Default choice if user presses Enter
+
+**Behavior:**
+- Pauses agent execution and displays the question
+- If options provided, shows numbered choices
+- Returns the user's response to the agent
+- Supports free-form responses when no options given
+
+**When to use:**
+- Choosing between simulation services (e.g., MEEP vs RCWA)
+- Confirming expensive computation parameters (e.g., simulation time, mesh resolution)
+- Clarifying ambiguous scientific requirements
+- Trade-off decisions where user preference matters
+
+**When NOT to use:**
+- Decisions you can make based on available context
+- Routine steps that don't need user input
+- Every step of execution (stay autonomous)
+
+**Examples:**
+```
+ask_user(
+    question="Which electromagnetic solver should I use?",
+    options=["MEEP (FDTD, broadband)", "RCWA (faster for periodic)", "Both and compare"],
+    context="MEEP is more general but slower. RCWA is optimized for layered structures.",
+    default="RCWA (faster for periodic)"
+)
+
+ask_user(
+    question="How long should the molecular dynamics simulation run?",
+    options=["10 ns (quick test)", "100 ns (production)", "1 μs (extended)"],
+    context="Longer runs give better statistics but take more time."
+)
+
+ask_user(question="What convergence criterion should I use for the optimization?")
+```
+
+---
+
 ## Custom Tools
 
 You can create and load custom tools. See [Custom Tools](../README.md#custom-tools) in the README.
