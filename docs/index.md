@@ -5,9 +5,9 @@ nav_order: 1
 permalink: /
 ---
 
-# Welcome to SciAgent-CLI
+# Welcome to SciAgent
 
-**SciAgent-CLI** is a modular agent framework that pairs large‑language‑model reasoning with a rich set of external tools, that runs from terminal.  It automates many of the repetitive steps involved in software engineering, scientific computing and research—such as reading and writing files, searching code, running shell commands, executing simulations and performing web queries—so you can focus on higher‑level problem solving.
+**SciAgent** is a modular agent framework that pairs large‑language‑model reasoning with a rich set of external tools, that runs from terminal.  It automates many of the repetitive steps involved in software engineering, scientific computing and research—such as reading and writing files, searching code, running shell commands, executing simulations and performing web queries—so you can focus on higher‑level problem solving.
 
 ## What you can do with SciAgent
 
