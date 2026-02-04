@@ -9,6 +9,30 @@ from typing import Dict, Any, Optional
 
 
 # =============================================================================
+# ANSI Color Codes
+# =============================================================================
+
+class Colors:
+    """ANSI escape codes for terminal colors."""
+    RESET = "\033[0m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    ITALIC = "\033[3m"
+    # Foreground
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE = "\033[34m"
+    MAGENTA = "\033[35m"
+    CYAN = "\033[36m"
+    WHITE = "\033[37m"
+    # Bright variants
+    BRIGHT_GREEN = "\033[92m"
+    BRIGHT_CYAN = "\033[96m"
+    BRIGHT_WHITE = "\033[97m"
+
+
+# =============================================================================
 # Tool Labels - Map raw tool calls to human-readable messages
 # =============================================================================
 
@@ -35,8 +59,20 @@ TOOL_LABELS = {
     "find": "Finding files: {pattern}",
 }
 
-# Status icons
+# Status icons (with colors)
+C = Colors
+
 ICONS = {
+    "success": f"{C.BRIGHT_GREEN}✓{C.RESET}",
+    "error": f"{C.RED}✗{C.RESET}",
+    "pending": f"{C.DIM}○{C.RESET}",
+    "in_progress": f"{C.BRIGHT_CYAN}◐{C.RESET}",
+    "thinking": f"{C.DIM}💭{C.RESET}",
+    "tool": f"{C.CYAN}→{C.RESET}",
+}
+
+# Plain icons (no color) for reference
+ICONS_PLAIN = {
     "success": "✓",
     "error": "✗",
     "pending": "○",
@@ -91,10 +127,10 @@ class Display:
 
         print()
         if project_dir:
-            print(f"Project: {project_dir}")
-        print("─" * 60)
-        print(f"Task: {self._truncate(task, 100)}")
-        print("─" * 60)
+            print(f"{C.DIM}Project: {project_dir}{C.RESET}")
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+        print(f"{C.BOLD}Task:{C.RESET} {self._truncate(task, 100)}")
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
 
     def task_complete(self, stats: Dict[str, Any]):
         """Display task completion summary."""
@@ -105,9 +141,9 @@ class Display:
         tokens = stats.get("tokens", 0)
 
         print()
-        print("─" * 60)
-        print(f"{ICONS['success']} Completed in {iterations} iterations | ~{tokens} tokens")
-        print("─" * 60)
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
+        print(f"{ICONS['success']} {C.BRIGHT_GREEN}Completed{C.RESET} in {C.BOLD}{iterations}{C.RESET} iterations | ~{tokens} tokens")
+        print(f"{C.DIM}{'─' * 60}{C.RESET}")
 
     # =========================================================================
     # Tool Display
@@ -119,7 +155,7 @@ class Display:
             return
 
         message = self._format_tool_message(name, args)
-        print(f"\n{ICONS['tool']} {message}")
+        print(f"\n{ICONS['tool']} {C.CYAN}{name}{C.RESET}{C.DIM}({self._summarize_args(args)}){C.RESET}")
 
     def tool_end(self, name: str, success: bool, message: Optional[str] = None, error: Optional[str] = None):
         """Display tool execution result."""
@@ -129,11 +165,11 @@ class Display:
         icon = ICONS['success'] if success else ICONS['error']
 
         if error:
-            print(f"  {icon} Error: {self._truncate(error, 100)}")
+            print(f"  {icon} {C.RED}Error: {self._truncate(error, 100)}{C.RESET}")
         elif message:
-            print(f"  {icon} {self._truncate(message, 100)}")
+            print(f"  {icon} {C.DIM}{self._truncate(message, 100)}{C.RESET}")
         else:
-            status = "Done" if success else "Failed"
+            status = f"{C.GREEN}Done{C.RESET}" if success else f"{C.RED}Failed{C.RESET}"
             print(f"  {icon} {status}")
 
     # =========================================================================
@@ -148,9 +184,9 @@ class Display:
         if not text:
             return
 
-        # Show truncated thinking
+        # Show truncated thinking in dim italic style
         truncated = self._truncate(text, 200)
-        print(f"\n{ICONS['thinking']} {truncated}")
+        print(f"\n{ICONS['thinking']} {C.DIM}{C.ITALIC}{truncated}{C.RESET}")
 
     def response(self, text: str):
         """Display final response."""
@@ -185,13 +221,13 @@ class Display:
 
     def error(self, message: str):
         """Display error message (always shown)."""
-        print(f"\n{ICONS['error']} Error: {message}", file=sys.stderr)
+        print(f"\n{ICONS['error']} {C.RED}{C.BOLD}Error:{C.RESET} {C.RED}{message}{C.RESET}", file=sys.stderr)
 
     def warning(self, message: str):
         """Display warning message (user-facing only)."""
         if self.quiet:
             return
-        print(f"  Warning: {message}")
+        print(f"  {C.YELLOW}⚠ Warning: {message}{C.RESET}")
 
     # =========================================================================
     # Todo List Display
@@ -206,20 +242,29 @@ class Display:
         completed = sum(1 for t in todos if t.get("status") == "completed")
         total = len(todos)
 
+        # Status colors
+        STATUS_COLOR = {
+            "completed": C.BRIGHT_GREEN,
+            "in_progress": C.BRIGHT_CYAN,
+            "pending": C.WHITE,
+            "failed": C.RED,
+        }
+
         for todo in todos:
             status = todo.get("status", "pending")
             content = todo.get("content", "")
+            color = STATUS_COLOR.get(status, C.WHITE)
 
             if status == "completed":
-                icon = "☑"
+                icon = f"{C.BRIGHT_GREEN}☑{C.RESET}"
             elif status == "in_progress":
-                icon = "◐"
+                icon = f"{C.BRIGHT_CYAN}◐{C.RESET}"
             else:
-                icon = "☐"
+                icon = f"{C.DIM}☐{C.RESET}"
 
-            print(f"  {icon} {content}")
+            print(f"  {icon} {color}{content}{C.RESET}")
 
-        print(f"\n  Progress: {completed}/{total}")
+        print(f"\n  {C.DIM}Progress:{C.RESET} {C.BRIGHT_GREEN}{completed}{C.RESET}/{total}")
 
     # =========================================================================
     # Helpers

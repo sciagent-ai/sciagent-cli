@@ -291,6 +291,25 @@ COMMANDS:
 - Set result_key to name outputs for dependent tasks
 - Query ready_tasks to see what can execute next"""
 
+    # ANSI color codes for terminal output
+    class Colors:
+        RESET = "\033[0m"
+        BOLD = "\033[1m"
+        DIM = "\033[2m"
+        # Foreground colors
+        GREEN = "\033[32m"
+        YELLOW = "\033[33m"
+        BLUE = "\033[34m"
+        MAGENTA = "\033[35m"
+        CYAN = "\033[36m"
+        WHITE = "\033[37m"
+        RED = "\033[31m"
+        # Bright variants
+        BRIGHT_GREEN = "\033[92m"
+        BRIGHT_YELLOW = "\033[93m"
+        BRIGHT_CYAN = "\033[96m"
+        BRIGHT_WHITE = "\033[97m"
+
     parameters = {
         "type": "object",
         "properties": {
@@ -513,25 +532,35 @@ COMMANDS:
         return ToolResult(success=False, output=None, error=f"Unknown query: {query}")
 
     def _format_graph(self) -> str:
-        """Format the todo graph for display."""
+        """Format the todo graph for display with ANSI colors."""
+        C = self.Colors
         todos = self.graph.get_all()
 
         if not todos:
-            return "No tasks in list."
+            return f"{C.DIM}No tasks in list.{C.RESET}"
 
         # Count statuses
         counts = {"pending": 0, "in_progress": 0, "completed": 0, "blocked": 0, "failed": 0}
 
+        # Status colors
+        STATUS_COLOR = {
+            "pending": C.WHITE,
+            "in_progress": C.BRIGHT_CYAN,
+            "completed": C.BRIGHT_GREEN,
+            "blocked": C.YELLOW,
+            "failed": C.RED,
+        }
+
         # Build output with dependency info
-        lines = ["## Task List", ""]
+        lines = [f"{C.BOLD}{C.CYAN}━━━ Task List ━━━{C.RESET}", ""]
 
         # Get execution order for grouping
         batches = self.graph.get_execution_order()
 
         for batch_num, batch in enumerate(batches):
             if len(batches) > 1:
-                parallel_note = " (can run in parallel)" if len(batch) > 1 else ""
-                lines.append(f"### Phase {batch_num + 1}{parallel_note}")
+                parallel_note = f" {C.DIM}(parallel){C.RESET}" if len(batch) > 1 else ""
+                lines.append(f"{C.BOLD}{C.BLUE}▸ Phase {batch_num + 1}{C.RESET}{parallel_note}")
 
             for todo in batch:
                 status = todo.status
@@ -541,54 +570,60 @@ COMMANDS:
                 status_sym = self.STATUS_SYMBOL.get(status, "?")
                 priority_sym = self.PRIORITY_SYMBOL.get(priority, "")
                 type_sym = self.TYPE_SYMBOL.get(task_type, "")
+                color = STATUS_COLOR.get(status, C.WHITE)
 
-                # Main line
-                line = f"{status_sym} [{todo.id}] {type_sym} {todo.content} {priority_sym}"
+                # Main line with color
+                task_id_display = f"{C.DIM}[{todo.id}]{C.RESET}"
+                content_display = f"{color}{todo.content}{C.RESET}"
+                line = f"  {color}{status_sym}{C.RESET} {task_id_display} {type_sym} {content_display}"
                 lines.append(line)
 
-                # Dependencies
+                # Dependencies (dimmed)
                 if todo.depends_on:
                     dep_status = []
                     for dep_id in todo.depends_on:
                         dep = self.graph.get(dep_id)
                         if dep:
                             dep_sym = self.STATUS_SYMBOL.get(dep.status, "?")
-                            dep_status.append(f"{dep_sym}{dep_id}")
+                            dep_color = STATUS_COLOR.get(dep.status, C.WHITE)
+                            dep_status.append(f"{dep_color}{dep_sym}{C.RESET}{C.DIM}{dep_id}{C.RESET}")
                         else:
                             dep_status.append(f"?{dep_id}")
-                    lines.append(f"    ↳ depends on: {', '.join(dep_status)}")
+                    lines.append(f"     {C.DIM}↳ depends on: {', '.join(dep_status)}{C.RESET}")
 
-                # Result preview
+                # Result preview (dimmed green for success)
                 if todo.result is not None:
                     result_preview = str(todo.result)[:50]
                     if len(str(todo.result)) > 50:
                         result_preview += "..."
                     key_info = f" (key: {todo.result_key})" if todo.result_key else ""
-                    lines.append(f"    ↳ result{key_info}: {result_preview}")
+                    lines.append(f"     {C.DIM}{C.GREEN}↳ result{key_info}: {result_preview}{C.RESET}")
 
                 if status in counts:
                     counts[status] += 1
 
             lines.append("")
 
-        # Summary
+        # Summary bar
         total = len(todos)
         ready = len(self.graph.get_ready_tasks())
         blocked = len(self.graph.get_blocked_tasks())
 
-        lines.append("---")
-        lines.append(
-            f"**Progress:** {counts['completed']}/{total} completed | "
-            f"{counts['in_progress']} active | "
-            f"{ready} ready | "
-            f"{blocked} blocked"
-        )
+        lines.append(f"{C.DIM}{'─' * 50}{C.RESET}")
+
+        # Colored progress summary
+        completed_str = f"{C.BRIGHT_GREEN}{counts['completed']}/{total} done{C.RESET}"
+        active_str = f"{C.BRIGHT_CYAN}{counts['in_progress']} active{C.RESET}"
+        ready_str = f"{C.WHITE}{ready} ready{C.RESET}"
+        blocked_str = f"{C.YELLOW}{blocked} blocked{C.RESET}" if blocked > 0 else f"{C.DIM}0 blocked{C.RESET}"
+
+        lines.append(f"{C.BOLD}Progress:{C.RESET} {completed_str} │ {active_str} │ {ready_str} │ {blocked_str}")
 
         # Next actions hint
         if ready > 0:
             ready_tasks = self.graph.get_ready_tasks()
             ready_ids = [t.id for t in ready_tasks[:3]]
-            lines.append(f"**Next:** {', '.join(ready_ids)} ready to execute")
+            lines.append(f"{C.BRIGHT_WHITE}▶ Next:{C.RESET} {C.CYAN}{', '.join(ready_ids)}{C.RESET}")
 
         return "\n".join(lines)
 
