@@ -1,6 +1,13 @@
 """
 LLM Interface - Model-agnostic LLM calls via litellm
 """
+# Suppress pydantic warnings before importing litellm
+import warnings
+warnings.filterwarnings("ignore", module="pydantic.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+
 import os
 import json
 from typing import List, Dict, Any, Optional, Generator

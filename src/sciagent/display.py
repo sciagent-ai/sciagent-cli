@@ -109,10 +109,12 @@ class Display:
         if self._setup_done:
             return
 
-        # Suppress noisy warnings
-        warnings.filterwarnings("ignore", module="pydantic")
-        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+        # Suppress noisy warnings from pydantic and litellm
+        # Use regex pattern "pydantic.*" to match all pydantic submodules (pydantic.main, etc.)
+        warnings.filterwarnings("ignore", module="pydantic.*")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
         warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+        warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
 
         self._setup_done = True
 

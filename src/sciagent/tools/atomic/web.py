@@ -340,18 +340,19 @@ TIPS:
         self._wait_rate_limit()
 
         try:
+            # Don't use freshness parameter - it can be too restrictive
+            params = {
+                "q": query,
+                "count": num_results,
+            }
+
             response = requests.get(
                 "https://api.search.brave.com/res/v1/web/search",
                 headers={
                     "Accept": "application/json",
                     "X-Subscription-Token": api_key
                 },
-                params={
-                    "q": query,
-                    "count": num_results,
-                    "search_lang": "en",
-                    "freshness": "pw"  # Prefer recent results (past week)
-                },
+                params=params,
                 timeout=15
             )
 
@@ -363,20 +364,44 @@ TIPS:
                     print(f"🔄 Retrying in {wait_time}s (attempt {retry + 1}/{self._max_retries})")
                     time.sleep(wait_time)
                     return self._search_brave(query, num_results, retry + 1)
+                print(f"❌ Brave rate limited after {self._max_retries} retries")
                 return []
 
-            response.raise_for_status()
+            # Check for other error status codes
+            if response.status_code != 200:
+                print(f"❌ Brave API returned status {response.status_code}: {response.text[:200]}")
+                return []
+
             self._reset_failures()  # Reset on success
 
             data = response.json()
 
+            # Debug: show response structure if no results
+            web_data = data.get('web', {})
+            raw_results = web_data.get('results', [])
+
+            if not raw_results:
+                # Check alternative response structures
+                # Some Brave API versions use different keys
+                if 'results' in data:
+                    raw_results = data['results']
+                elif 'webPages' in data:
+                    # Microsoft Bing-style response
+                    raw_results = data.get('webPages', {}).get('value', [])
+
+                if not raw_results:
+                    print(f"⚠️ Brave returned no results. Response keys: {list(data.keys())}")
+                    if 'web' in data:
+                        print(f"   web keys: {list(data['web'].keys())}")
+                    return []
+
             results = []
-            for i, r in enumerate(data.get('web', {}).get('results', []), 1):
+            for i, r in enumerate(raw_results, 1):
                 results.append({
                     'index': i,
                     'title': r.get('title', ''),
                     'url': r.get('url', ''),
-                    'snippet': r.get('description', ''),
+                    'snippet': r.get('description', r.get('snippet', '')),
                     'age': r.get('age', ''),  # Include result age if available
                 })
 
@@ -390,6 +415,8 @@ TIPS:
             return []
         except Exception as e:
             print(f"❌ Unexpected error in Brave search: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def _search_duckduckgo(self, query: str, num_results: int) -> List[Dict]:

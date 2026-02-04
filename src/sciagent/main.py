@@ -8,6 +8,13 @@ Usage:
     sciagent --model openai/gpt-4o "Your task"
     sciagent --load-tools ./my_tools.py "Your task"
 """
+# IMPORTANT: Suppress pydantic warnings BEFORE any imports that use pydantic/litellm
+import warnings
+warnings.filterwarnings("ignore", module="pydantic.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+
 import os
 import sys
 import argparse
@@ -21,10 +28,6 @@ from .subagent import create_agent_with_subagents
 from .state import StateManager
 from .defaults import DEFAULT_MODEL
 from .startup import show_startup_banner, check_configuration_ready, check_optional_keys
-
-# Suppress warnings early before any other imports trigger them
-_display = create_display(verbose=False)
-_display.setup()
 
 
 def parse_args():

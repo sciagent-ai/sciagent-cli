@@ -3,19 +3,25 @@ SWE Agent - A modular Software Engineering Agent Framework
 
 Quick Start:
     from swe_agent import create_agent, run_task
-    
+
     # One-shot task
     result = run_task("Create a hello world script")
-    
+
     # Interactive agent
     agent = create_agent()
     agent.run_interactive()
-    
+
     # With sub-agents
     from swe_agent import create_agent_with_subagents
     agent = create_agent_with_subagents()
     agent.run("Research this codebase and write tests")
 """
+# Suppress pydantic serialization warnings BEFORE any imports
+import warnings
+warnings.filterwarnings("ignore", module="pydantic.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
 
 from .llm import LLMClient, Message, LLMResponse, ask
 from .tools import (
