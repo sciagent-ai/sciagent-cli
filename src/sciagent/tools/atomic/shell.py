@@ -8,6 +8,10 @@ Token Optimization:
 - Success: show summary only
 - Failure: show last 40 lines + error
 - Full logs saved to _logs/ directory
+
+Visual Output:
+- Detects generated image files (png, jpg, svg, pdf)
+- Automatically opens them for viewing on macOS
 """
 
 from __future__ import annotations
@@ -15,8 +19,10 @@ from __future__ import annotations
 import subprocess
 import os
 import hashlib
+import platform
+import glob
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Set, List
 from dataclasses import dataclass
 
 
@@ -75,9 +81,13 @@ class ShellTool:
     MAX_LINES_FAILURE = 40      # Failure details
     MAX_LINES_NORMAL = 200      # Non-verbose commands
 
-    def __init__(self, working_dir: str = "."):
+    # Image file extensions to detect and display
+    IMAGE_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.pdf', '.webp'}
+
+    def __init__(self, working_dir: str = ".", auto_open_images: bool = True):
         self.working_dir = working_dir
         self._logs_dir = Path(working_dir) / "_logs"
+        self.auto_open_images = auto_open_images
 
     def _is_verbose_command(self, command: str) -> bool:
         """Check if command is known to produce verbose output."""
@@ -95,6 +105,51 @@ class ShellTool:
         # Sanitize command for filename
         cmd_short = command[:30].replace("/", "_").replace(" ", "_")
         return self._ensure_logs_dir() / f"{cmd_short}_{cmd_hash}.log"
+
+    def _get_existing_images(self) -> Set[Path]:
+        """Get set of existing image files in working directory."""
+        images = set()
+        work_path = Path(self.working_dir)
+        for ext in self.IMAGE_EXTENSIONS:
+            images.update(work_path.glob(f"*{ext}"))
+            images.update(work_path.glob(f"**/*{ext}"))  # Also check subdirs
+        return images
+
+    def _detect_new_images(self, before: Set[Path]) -> List[Path]:
+        """Detect newly created image files."""
+        after = self._get_existing_images()
+        new_images = after - before
+        # Sort by modification time (newest first)
+        return sorted(new_images, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    def _open_images(self, images: List[Path]) -> List[str]:
+        """Open image files with system viewer. Returns list of opened files."""
+        if not images:
+            return []
+
+        opened = []
+        system = platform.system()
+
+        for img_path in images[:5]:  # Limit to 5 images to avoid spam
+            try:
+                if system == "Darwin":  # macOS
+                    subprocess.run(["open", str(img_path)], check=False)
+                elif system == "Linux":
+                    # Try common Linux viewers
+                    for viewer in ["xdg-open", "eog", "feh", "display"]:
+                        try:
+                            subprocess.run([viewer, str(img_path)], check=False)
+                            break
+                        except FileNotFoundError:
+                            continue
+                elif system == "Windows":
+                    os.startfile(str(img_path))
+
+                opened.append(str(img_path))
+            except Exception:
+                pass  # Silently skip if can't open
+
+        return opened
 
     def _truncate_output(self, output: str, command: str, success: bool) -> str:
         """Truncate output to save tokens.
@@ -175,6 +230,10 @@ class ShellTool:
         - Verbose commands (pip, npm, etc.) return minimal output on success
         - Failed commands show last 40 lines for debugging
         - Full logs saved to _logs/ directory
+
+        Visual Output:
+        - Detects newly generated image files (png, jpg, svg, pdf, etc.)
+        - Automatically opens them for viewing
         """
         if not command or not command.strip():
             return ToolResult(
@@ -184,6 +243,9 @@ class ShellTool:
             )
 
         timeout = self._adjust_timeout(command, timeout)
+
+        # Capture existing images before running command
+        images_before = self._get_existing_images() if self.auto_open_images else set()
 
         try:
             result = subprocess.run(
@@ -207,6 +269,16 @@ class ShellTool:
             # Truncate output to save tokens
             truncated_output = self._truncate_output(output, command, success)
 
+            # Detect and open any newly created images
+            opened_images = []
+            if self.auto_open_images and success:
+                new_images = self._detect_new_images(images_before)
+                if new_images:
+                    opened_images = self._open_images(new_images)
+                    if opened_images:
+                        image_list = "\n".join(f"  📊 {img}" for img in opened_images)
+                        truncated_output += f"\n\n[Visual Output - Opened {len(opened_images)} image(s)]\n{image_list}"
+
             return ToolResult(
                 success=success,
                 output=truncated_output,
@@ -227,6 +299,11 @@ class ShellTool:
         }
 
 
-def get_tool(working_dir: str = ".") -> ShellTool:
-    """Factory function for tool discovery."""
-    return ShellTool(working_dir)
+def get_tool(working_dir: str = ".", auto_open_images: bool = True) -> ShellTool:
+    """Factory function for tool discovery.
+
+    Args:
+        working_dir: Directory to execute commands in
+        auto_open_images: If True, automatically open generated images (default: True)
+    """
+    return ShellTool(working_dir, auto_open_images=auto_open_images)
