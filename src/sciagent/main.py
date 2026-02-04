@@ -29,7 +29,7 @@ _display.setup()
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="SciAgent - Software Engineering Agent Framework",
+        description="SciAgent - LLM-Agnostic Agent for Scientific and Engineering Workflows",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
