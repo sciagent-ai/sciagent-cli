@@ -29,17 +29,62 @@ When exploring unfamiliar domains or libraries, SciAgent can act as a research a
 
 ## Scientific computing and simulation
 
-SciAgent integrates with containerised simulation environments via the `service` tool.  Use it for:
+SciAgent integrates with 18 containerised simulation environments via the `service` tool, organised by domain:
 
-* **Numerical and symbolic computation** – run scripts in services like SciPy and SymPy to solve differential equations, perform optimisations or manipulate matrices.
-* **Molecular modelling** – leverage the RDKit service to calculate molecular descriptors, generate fingerprints or perform similarity searches.
-* **Optimisation and convex programming** – model and solve convex programs with CVXPY, then visualise the results.
-* **Electromagnetic and fluid simulations** – use RCWA for photonic structures, MEEP for time‑domain electromagnetic simulations and OpenFOAM for computational fluid dynamics.  The agent can prepare input files, run the simulations and analyse the output.
-* **Circuit analysis** – run NGSPICE simulations from Python code and interpret voltage and current results.
+### Bioinformatics and Computational Biology
+* **biopython** – DNA/RNA/protein sequence manipulation, file parsing (FASTA, GenBank), phylogenetics
+* **blast** – NCBI BLAST+ for sequence similarity searching (blastn, blastp, blastx)
+* **gromacs** – molecular dynamics for biomolecular systems, free energy calculations
+
+### Computational Chemistry and Materials
+* **rdkit** – cheminformatics: molecular descriptors, fingerprints, similarity searches, SMILES/SDF parsing
+* **ase** – Atomic Simulation Environment for atomistic simulations, DFT interfaces, trajectory analysis
+* **gromacs** – force field simulations for proteins, membranes, and small molecules
+
+### Photonics and Electromagnetics
+* **rcwa** – Rigorous Coupled Wave Analysis (S4) for photonic crystals, gratings, multilayer optics
+* **meep** – FDTD electromagnetic simulation for waveguides, resonators, near-to-far-field transforms
+
+### CFD and Multiphysics
+* **openfoam** – incompressible/compressible flow, turbulence modeling (RANS, LES), multiphase
+* **gmsh** – 2D/3D mesh generation with boundary layer refinement, CAD integration
+* **elmer** – multiphysics FEM: heat transfer, structural mechanics, electromagnetics, acoustics
+
+### EDA and Digital Design
+* **openroad** – complete RTL-to-GDS flow: synthesis (Yosys), placement, CTS, routing, timing analysis
+
+### Circuit Simulation
+* **ngspice** – SPICE circuit simulation with PySpice bindings: transient, AC, DC analysis
+
+### Quantum Computing
+* **qiskit** – quantum circuit construction, gate operations, simulation, algorithm implementation (Grover, VQE, QAOA)
+
+### Mathematical Computing
+* **scipy-base** – NumPy, SciPy, Matplotlib, Pandas for numerical computing and visualization
+* **sympy** – symbolic algebra, calculus, equation solving, LaTeX output
+* **cvxpy** – convex optimization: LP, QP, SDP with multiple solver backends
+
+### Network and Graph Analysis
+* **networkx** – graph algorithms, centrality measures, community detection, visualization
+
+### Scientific Machine Learning
+* **sciml-julia** – Julia ecosystem: DifferentialEquations.jl, ModelingToolkit.jl, neural ODEs
 
 ## Complex workflows
 
-Many tasks require multiple stages that depend on each other.  SciAgent’s todo graph and sub‑agent system make it easy to orchestrate these workflows.  For example:
+Many tasks require multiple stages that depend on each other.  SciAgent's todo graph and sub‑agent system make it easy to orchestrate these workflows.
+
+### Example: Multi-service pipelines
+
+| Workflow | Services chained | Output |
+|----------|------------------|--------|
+| Drug candidate screening | rdkit → gromacs → scipy-base | Ranked molecules by binding affinity |
+| Metasurface optimization | web (literature) → scipy-base (BO) → rcwa → file_ops | Novel unit-cell design |
+| Digital chip PPA analysis | openroad → scipy-base (analysis) | Power/performance/area report |
+| Protein structure pipeline | blast → biopython → gromacs | MD trajectory from sequence |
+| Photonic device design | meep → scipy-base (optimization) → gmsh | Optimized waveguide geometry |
+
+### Workflow stages
 
 1. **Research** – instruct the `researcher` sub‑agent to gather background information and summarise requirements.
 2. **Implementation** – generate code or mathematical models based on the research.
@@ -52,4 +97,8 @@ Because each sub‑agent operates in isolation with a customised tool set and sy
 
 ## Domain‑specific extensions
 
-If your project involves specialised domains—such as machine learning, bioinformatics or control theory—you can extend SciAgent with custom tools and services.  For example, create a tool that interfaces with a remote API (e.g. protein structure prediction) or add a new container image to the service registry for your favourite simulation engine.  Once registered, these extensions become first‑class citizens in the agent’s reasoning, enabling bespoke workflows tailored to your needs.
+If your project involves specialised domains—such as machine learning, bioinformatics or control theory—you can extend SciAgent with custom tools and services.  For example, create a tool that interfaces with a remote API (e.g. protein structure prediction) or add a new container image to the service registry for your favourite simulation engine.  Once registered, these extensions become first‑class citizens in the agent's reasoning, enabling bespoke workflows tailored to your needs.
+
+## Case studies
+
+For detailed worked examples showing real prompts and verified results, see the [Case Studies](case_studies.md) page.
