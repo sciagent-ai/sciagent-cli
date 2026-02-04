@@ -20,6 +20,7 @@ from .tools import ToolRegistry, create_default_registry
 from .subagent import create_agent_with_subagents
 from .state import StateManager
 from .defaults import DEFAULT_MODEL
+from .startup import show_startup_banner, check_configuration_ready, check_optional_keys
 
 # Suppress warnings early before any other imports trigger them
 _display = create_display(verbose=False)
@@ -202,8 +203,7 @@ def main():
     # Create project directory if it doesn't exist
     project_dir.mkdir(parents=True, exist_ok=True)
 
-    if verbose:
-        print(f"Project directory: {project_dir}")
+    # Project directory is shown in startup banner
 
     # Load custom system prompt if provided
     system_prompt = None
@@ -216,9 +216,29 @@ def main():
     # Load additional tools if specified
     if args.load_tools:
         tools.load_from_module(args.load_tools)
-        if verbose:
-            print(f"Loaded tools from: {args.load_tools}")
-    
+
+    # Show startup banner with configuration status
+    show_startup_banner(
+        model=args.model,
+        project_dir=project_dir,
+        interactive=args.interactive,
+        verbose=verbose,
+        tools_loaded=tools.list_tools(),
+        subagents=args.subagents,
+    )
+
+    # Check configuration and warn about issues
+    is_ready, issues = check_configuration_ready(args.model)
+    if not is_ready and not args.quiet:
+        for issue in issues:
+            print(f"Error: {issue}")
+        print()
+
+    # Show optional key recommendations
+    if verbose and not args.quiet:
+        recommendations = check_optional_keys()
+        # Only show on first run or interactive - don't spam every time
+
     # Create the agent
     if args.subagents:
         agent = create_agent_with_subagents(

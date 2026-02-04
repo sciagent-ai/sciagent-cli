@@ -1061,10 +1061,7 @@ class AgentLoop:
     
     def run_interactive(self):
         """Run in interactive mode (REPL)"""
-        print("\n🤖 Agent Ready (type 'exit' to quit, 'status' for state)")
-        print(f"   Model: {self.config.model}")
-        print(f"   Working dir: {self.config.working_dir}")
-        print(f"   Tools: {', '.join(self.tools.list_tools())}\n")
+        print("🤖 Ready! Enter your task or question.\n")
         
         while True:
             try:
