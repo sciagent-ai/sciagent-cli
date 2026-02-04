@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-SWE Agent - A Software Engineering Agent Framework
+SciAgent - A Software Engineering Agent Framework
 
 Usage:
-    python main.py "Your task here"
-    python main.py --interactive
-    python main.py --model openai/gpt-4o "Your task"
-    python main.py --load-tools ./my_tools.py "Your task"
+    sciagent "Your task here"
+    sciagent --interactive
+    sciagent --model openai/gpt-4o "Your task"
+    sciagent --load-tools ./my_tools.py "Your task"
 """
 import os
 import sys
@@ -28,30 +28,30 @@ _display.setup()
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="SWE Agent - Software Engineering Agent Framework",
+        description="SciAgent - Software Engineering Agent Framework",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
     # Run a task in a specific project directory
-    python main.py --project-dir ~/my-project "Create a Python script that fetches weather data"
+    sciagent --project-dir ~/my-project "Create a Python script that fetches weather data"
 
-    # Run in current directory (if not sweagent's own directory)
-    python main.py "Fix the bug in main.py"
+    # Run in current directory (if not sciagent's own directory)
+    sciagent "Fix the bug in main.py"
 
     # Interactive mode
-    python main.py --project-dir ~/my-project --interactive
+    sciagent --project-dir ~/my-project --interactive
 
     # Use a different model
-    python main.py --project-dir ~/my-project --model openai/gpt-4o "Analyze this code"
+    sciagent --project-dir ~/my-project --model openai/gpt-4o "Analyze this code"
 
     # Load custom tools
-    python main.py --project-dir ~/my-project --load-tools ./my_tools.py "Use my custom tool"
+    sciagent --project-dir ~/my-project --load-tools ./my_tools.py "Use my custom tool"
 
     # Enable sub-agents
-    python main.py --project-dir ~/my-project --subagents "Research this codebase and write tests"
+    sciagent --project-dir ~/my-project --subagents "Research this codebase and write tests"
 
     # Resume a session
-    python main.py --resume abc123def456
+    sciagent --resume abc123def456
 """
     )
     
@@ -140,7 +140,7 @@ Examples:
 
 
 def get_package_dir() -> Path:
-    """Get the directory where the sweagent package is installed."""
+    """Get the directory where the sciagent package is installed."""
     return Path(__file__).parent.resolve()
 
 
@@ -154,17 +154,17 @@ def validate_project_dir(project_dir: str) -> Path:
 
     # Block if project dir is the package directory
     if project_path == package_dir:
-        print(f"Error: Cannot use sweagent's own directory as project directory.")
+        print(f"Error: Cannot use sciagent's own directory as project directory.")
         print(f"  Package location: {package_dir}")
         print(f"  Requested project dir: {project_path}")
         print()
         print("Please specify a different directory with --project-dir:")
-        print("  sweagent --project-dir ~/my-project \"your task\"")
+        print("  sciagent --project-dir ~/my-project \"your task\"")
         sys.exit(1)
 
     # Warn if package is inside project dir (but allow it)
     if package_dir.is_relative_to(project_path) and project_path != Path.home():
-        print(f"Warning: Project directory contains sweagent package at {package_dir}")
+        print(f"Warning: Project directory contains sciagent package at {package_dir}")
         print("         Be careful not to modify agent source files.")
         print()
 
