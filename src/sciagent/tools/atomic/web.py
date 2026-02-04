@@ -11,10 +11,13 @@ IMPROVEMENTS:
 5. Retrieved date tracking per result
 6. Better HTML-to-text conversion with html2text
 7. Prompt parameter for fetch to indicate analysis intent
+8. LLM-powered content extraction when prompt is provided
+9. PDF support for fetching academic papers
 """
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import time
@@ -23,6 +26,9 @@ from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 import requests
+
+# Import defaults for model configuration
+from ...defaults import FAST_MODEL, WEB_FETCH_MAX_CONTENT, WEB_FETCH_DISPLAY_LIMIT
 
 # Optional: DuckDuckGo fallback (try new package first, then old)
 try:
@@ -46,6 +52,17 @@ try:
     BS4_AVAILABLE = True
 except ImportError:
     BS4_AVAILABLE = False
+
+# Optional: PDF extraction support
+try:
+    import pypdf
+    PYPDF_AVAILABLE = True
+except ImportError:
+    try:
+        import PyPDF2 as pypdf
+        PYPDF_AVAILABLE = True
+    except ImportError:
+        PYPDF_AVAILABLE = False
 
 
 @dataclass
@@ -83,11 +100,24 @@ COMMANDS:
 QUALITY INDICATORS:
 📗 peer-reviewed | 📙 preprint | 📘 government | 📂 repository | 📖 encyclopedia | 📝 blog | 🌐 web
 
+CONTENT TYPES:
+- HTML pages: Converted to clean text
+- PDF documents: Text extracted from all pages (great for academic papers!)
+- Plain text: Returned as-is
+
+LLM EXTRACTION (IMPORTANT):
+When you provide a 'prompt' parameter, a fast LLM reads the FULL document and extracts
+exactly what you need. This prevents missing information due to truncation.
+
+Example: fetch(url="https://arxiv.org/pdf/...", prompt="extract wavelength and design parameters")
+→ Returns focused extraction from the entire PDF, not truncated content
+
 TIPS:
 - Use specific queries: "metasurface 1550nm efficiency 2023" not "metasurface info"
 - Search multiple times with different queries for thorough research
+- Use prompt parameter in fetch to focus content extraction
 - Prioritize 📗 and 📙 sources for academic citations
-- Use prompt parameter in fetch to focus content extraction"""
+- PDF URLs work directly - no need to find HTML versions"""
 
     parameters = {
         "type": "object",
@@ -448,7 +478,15 @@ TIPS:
             return []
 
     def _fetch(self, url: str, prompt: str = "") -> ToolResult:
-        """Fetch and process content from URL with improved HTML handling."""
+        """
+        Fetch and process content from URL.
+
+        When a prompt is provided, uses a fast LLM to extract relevant information
+        from the full content, avoiding truncation issues. This follows the pattern
+        used by Claude Code's WebFetch tool.
+
+        Supports HTML, plain text, and PDF content.
+        """
         fetch_date = datetime.now().strftime('%Y-%m-%d %H:%M')
         source_type = self._classify_source(url)
         quality = self._get_quality_emoji(source_type)
@@ -458,31 +496,49 @@ TIPS:
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
             }
 
-            response = requests.get(url, timeout=20, headers=headers, allow_redirects=True)
+            response = requests.get(url, timeout=30, headers=headers, allow_redirects=True)
             response.raise_for_status()
 
-            raw_content = response.text
-            content_type = response.headers.get('Content-Type', '')
+            content_type = response.headers.get('Content-Type', '').lower()
             final_url = response.url  # Capture final URL after redirects
+            title = ""
+            is_pdf = False
 
-            # Process content based on type
-            if 'html' in content_type.lower() or '<html' in raw_content[:1000].lower():
-                content = self._html_to_text(raw_content)
+            # Determine content type and extract text accordingly
+            if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
+                # PDF content
+                is_pdf = True
+                content = self._pdf_to_text(response.content)
+                title = url.split('/')[-1]  # Use filename as title for PDFs
+                print(f"📑 Extracted text from PDF ({len(response.content):,} bytes)")
+            elif 'html' in content_type or '<html' in response.text[:1000].lower():
+                # HTML content
+                content = self._html_to_text(response.text)
+                title = self._extract_title(response.text)
             else:
                 # Plain text or other - just clean up whitespace
-                content = re.sub(r'\s+', ' ', raw_content).strip()
+                content = re.sub(r'\s+', ' ', response.text).strip()
 
-            # Limit content size but keep more for comprehensive results
-            max_content = 15000
-            display_content = 8000
-            content = content[:max_content]
+            # Limit content for processing (but much higher than before for LLM extraction)
+            content = content[:WEB_FETCH_MAX_CONTENT]
 
-            # Extract title if available
-            title = self._extract_title(raw_content)
+            # If prompt is provided, use LLM to extract relevant information
+            # This is the key improvement - instead of truncating and hoping the
+            # agent sees what it needs, we have a fast LLM read the full content
+            # and extract exactly what's requested
+            if prompt:
+                print(f"🤖 Using LLM to extract: '{prompt[:50]}...' " if len(prompt) > 50 else f"🤖 Using LLM to extract: '{prompt}'")
+                extracted_content = self._extract_with_llm(content, prompt, url)
+                display_content = extracted_content
+                extraction_used = True
+            else:
+                # No prompt - return truncated content as before
+                display_content = content[:WEB_FETCH_DISPLAY_LIMIT]
+                extraction_used = False
 
             # Build comprehensive output
             lines = [
@@ -497,25 +553,27 @@ TIPS:
                 lines.append(f"**Title:** {title}")
 
             lines.extend([
-                f"**Type:** {source_type}",
+                f"**Type:** {source_type}" + (" (PDF)" if is_pdf else ""),
                 f"**Retrieved:** {fetch_date}",
-                f"**Length:** {len(content):,} chars",
+                f"**Content Length:** {len(content):,} chars",
                 f"**Status:** {response.status_code}",
             ])
 
             if prompt:
-                lines.append(f"**Analysis Focus:** {prompt}")
+                lines.append(f"**Extraction Prompt:** {prompt}")
+                lines.append(f"**Processing:** LLM-extracted (full document analyzed)")
 
             lines.extend([
                 "",
                 "---",
-                "### Content",
+                "### " + ("Extracted Information" if extraction_used else "Content"),
                 "",
-                content[:display_content],
+                display_content,
             ])
 
-            if len(content) > display_content:
-                lines.append(f"\n... [truncated {len(content) - display_content:,} chars]")
+            # Only show truncation notice if we didn't use LLM extraction
+            if not extraction_used and len(content) > WEB_FETCH_DISPLAY_LIMIT:
+                lines.append(f"\n... [truncated {len(content) - WEB_FETCH_DISPLAY_LIMIT:,} chars - use 'prompt' parameter for targeted extraction]")
 
             # Add citation helper
             lines.extend([
@@ -529,7 +587,8 @@ TIPS:
             if title:
                 lines.append(f"- **Title:** {title}")
 
-            print(f"✅ Fetched {len(content):,} chars from {source_type} source")
+            print(f"✅ Fetched {len(content):,} chars from {source_type} source" +
+                  (f" (LLM-extracted)" if extraction_used else ""))
 
             return ToolResult(
                 success=True,
@@ -544,6 +603,8 @@ TIPS:
                     "status_code": response.status_code,
                     "retrieved": fetch_date,
                     "prompt": prompt,
+                    "extraction_used": extraction_used,
+                    "is_pdf": is_pdf,
                     "full_content": content,  # Include full content in metadata
                 }
             )
@@ -552,7 +613,7 @@ TIPS:
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Timeout fetching {url} (>20s)",
+                error=f"Timeout fetching {url} (>30s)",
                 metadata={"url": url}
             )
         except requests.exceptions.HTTPError as e:
@@ -639,6 +700,79 @@ TIPS:
                 pass
 
         return ""
+
+    def _pdf_to_text(self, pdf_bytes: bytes) -> str:
+        """Extract text from PDF bytes."""
+        if not PYPDF_AVAILABLE:
+            return "[PDF extraction unavailable - install pypdf: pip install pypdf]"
+
+        try:
+            pdf_file = io.BytesIO(pdf_bytes)
+            reader = pypdf.PdfReader(pdf_file)
+
+            text_parts = []
+            for page_num, page in enumerate(reader.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                except Exception as e:
+                    text_parts.append(f"--- Page {page_num + 1} ---\n[Error extracting: {e}]")
+
+            return "\n\n".join(text_parts)
+        except Exception as e:
+            return f"[PDF extraction failed: {e}]"
+
+    def _extract_with_llm(self, content: str, prompt: str, url: str) -> str:
+        """
+        Use a fast LLM to extract relevant information from content.
+
+        This allows the main agent to receive focused, relevant information
+        instead of truncated raw content that may miss important details.
+        """
+        try:
+            # Import here to avoid circular imports
+            from ...llm import LLMClient, Message
+
+            # Create client with fast model
+            client = LLMClient(
+                model=FAST_MODEL,
+                temperature=0.0,
+                max_tokens=2000
+            )
+
+            # Build extraction prompt
+            system_prompt = """You are a content extraction assistant. Your job is to extract specific information from documents based on the user's request.
+
+Rules:
+- Extract ONLY the information requested
+- Be precise and include exact values, numbers, and specifications
+- If the requested information is not found, say so clearly
+- Keep your response focused and concise
+- Include relevant context when it helps understand the extracted information"""
+
+            user_prompt = f"""From the following document fetched from {url}, please {prompt}
+
+---
+DOCUMENT CONTENT:
+---
+{content}
+---
+
+Extract the requested information:"""
+
+            messages = [
+                Message(role="system", content=system_prompt),
+                Message(role="user", content=user_prompt)
+            ]
+
+            response = client.chat(messages)
+            return response.content
+
+        except Exception as e:
+            # If LLM extraction fails, fall back to truncated content
+            print(f"⚠️ LLM extraction failed: {e}, falling back to truncated content")
+            return content[:WEB_FETCH_DISPLAY_LIMIT]
 
     def to_schema(self) -> Dict:
         """Convert to OpenAI-style tool schema."""
