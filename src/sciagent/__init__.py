@@ -17,11 +17,20 @@ Quick Start:
     agent.run("Research this codebase and write tests")
 """
 # Suppress pydantic serialization warnings BEFORE any imports
+# These occur when litellm's pydantic models serialize LLM responses
+# with fields that don't match schema (e.g., thinking_blocks for Claude)
 import warnings
-warnings.filterwarnings("ignore", module="pydantic.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
-warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+
+# Filter by message content - catches the actual warning text
 warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Expected.*fields but got.*")
+warnings.filterwarnings("ignore", message=".*serialized value may not be as expected.*")
+
+# Filter by category and module - broad catch for pydantic warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.main")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 
 from .llm import LLMClient, Message, LLMResponse, ask
 from .tools import (

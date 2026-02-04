@@ -1,14 +1,35 @@
 """
 LLM Interface - Model-agnostic LLM calls via litellm
 """
-# Suppress pydantic warnings before importing litellm
+# Suppress pydantic serialization warnings BEFORE any imports
+# These warnings occur when litellm's pydantic models serialize responses
+# and fields don't match expected schema (e.g., thinking_blocks for Claude)
 import warnings
-warnings.filterwarnings("ignore", module="pydantic.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
-warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
-warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
-
 import os
+
+# Method 1: Comprehensive warning filters
+# Filter by message content (most reliable for runtime warnings)
+warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Expected.*fields but got.*")
+warnings.filterwarnings("ignore", message=".*serialized value may not be as expected.*")
+
+# Filter by category and module
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.main")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
+
+# Method 2: Monkey-patch pydantic's warning mechanism (backup)
+# This runs after pydantic loads but before serialization
+def _suppress_pydantic_serializer_warnings():
+    """Suppress pydantic's internal serializer warnings at the source."""
+    try:
+        import pydantic
+        if hasattr(pydantic, 'warnings'):
+            pydantic.warnings.filterwarnings = lambda *args, **kwargs: None
+    except Exception:
+        pass
+
 import json
 from typing import List, Dict, Any, Optional, Generator
 from dataclasses import dataclass, field
@@ -20,6 +41,9 @@ try:
     from litellm import completion
     from litellm.caching import Cache
     LITELLM_AVAILABLE = True
+
+    # Apply pydantic warning suppression after litellm loads
+    _suppress_pydantic_serializer_warnings()
 
     # Initialize LiteLLM's built-in response caching (cross-provider)
     # This caches entire LLM responses based on input hash

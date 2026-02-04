@@ -217,11 +217,19 @@ class Display:
             return
 
         # Suppress noisy warnings from pydantic and litellm
-        # Use regex pattern "pydantic.*" to match all pydantic submodules (pydantic.main, etc.)
-        warnings.filterwarnings("ignore", module="pydantic.*")
-        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
-        warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+        # These occur when litellm's pydantic models serialize LLM responses
+        # with fields that don't match schema (e.g., thinking_blocks for Claude)
+
+        # Filter by message content - catches the actual warning text
         warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+        warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+        warnings.filterwarnings("ignore", message=".*Expected.*fields but got.*")
+        warnings.filterwarnings("ignore", message=".*serialized value may not be as expected.*")
+
+        # Filter by category and module - broad catch for pydantic warnings
+        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.main")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 
         self._setup_done = True
 

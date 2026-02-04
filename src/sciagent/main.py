@@ -8,12 +8,21 @@ Usage:
     sciagent --model openai/gpt-4o "Your task"
     sciagent --load-tools ./my_tools.py "Your task"
 """
-# IMPORTANT: Suppress pydantic warnings BEFORE any imports that use pydantic/litellm
+# CRITICAL: Suppress pydantic serialization warnings BEFORE any imports
+# These warnings occur when litellm's pydantic models serialize LLM responses
+# and some fields (like thinking_blocks) don't match expected schema
 import warnings
-warnings.filterwarnings("ignore", module="pydantic.*")
-warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
-warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+
+# Filter by message content - catches the actual warning text
 warnings.filterwarnings("ignore", message=".*Pydantic serializer warnings.*")
+warnings.filterwarnings("ignore", message=".*PydanticSerializationUnexpectedValue.*")
+warnings.filterwarnings("ignore", message=".*Expected.*fields but got.*")
+warnings.filterwarnings("ignore", message=".*serialized value may not be as expected.*")
+
+# Filter by category and module - broad catch for pydantic warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.main")
+warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 
 import os
 import sys
