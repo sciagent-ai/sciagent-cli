@@ -20,7 +20,7 @@ from .state import (
     AgentState, ContextWindow, TodoList, StateManager,
     generate_session_id
 )
-from .display import Display, create_display
+from .display import Display, create_display, Spinner
 from .defaults import DEFAULT_MODEL
 
 
@@ -715,7 +715,13 @@ class AgentLoop:
 
         self.display.tool_start(tool_call.name, tool_call.arguments)
 
-        result = self.tools.execute(tool_call.name, **tool_call.arguments)
+        # Show spinner for potentially long-running tools (only if takes > 0.3s)
+        long_running_tools = {"bash", "shell", "web_search", "read_url", "http_request", "web", "service"}
+        if tool_call.name in long_running_tools:
+            with Spinner("Executing", quiet=self.display.quiet, delay=0.3):
+                result = self.tools.execute(tool_call.name, **tool_call.arguments)
+        else:
+            result = self.tools.execute(tool_call.name, **tool_call.arguments)
 
         if self._on_tool_end:
             self._on_tool_end(tool_call.name, result)
@@ -841,7 +847,9 @@ class AgentLoop:
         messages = self.state.context.get_messages()
         tool_schemas = self.tools.get_schemas()
 
-        response = self.llm.chat(messages, tools=tool_schemas)
+        # Show spinner while waiting for LLM response (only if takes > 0.5s)
+        with Spinner("Thinking", quiet=self.display.quiet, delay=0.5):
+            response = self.llm.chat(messages, tools=tool_schemas)
 
         # Track usage
         self.total_tokens += response.usage.get("prompt_tokens", 0)

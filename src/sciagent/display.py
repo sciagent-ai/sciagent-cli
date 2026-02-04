@@ -5,6 +5,8 @@ Handles all terminal output, warning suppression, and tool message formatting.
 """
 import sys
 import warnings
+import threading
+import time
 from typing import Dict, Any, Optional
 
 
@@ -80,6 +82,111 @@ ICONS_PLAIN = {
     "thinking": "💭",
     "tool": "→",
 }
+
+
+# =============================================================================
+# Spinner - Visual feedback for long-running operations
+# =============================================================================
+
+class Spinner:
+    """
+    Animated spinner for long-running operations.
+
+    Usage:
+        with Spinner("Thinking"):
+            result = slow_operation()
+
+        # Or with custom spinner style:
+        with Spinner("Processing", style="dots"):
+            result = slow_operation()
+
+        # With delay (only show spinner if operation takes longer than delay):
+        with Spinner("Working", delay=0.5):
+            result = maybe_slow_operation()  # No spinner if < 500ms
+    """
+
+    STYLES = {
+        "dots": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+        "braille": ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"],
+        "arrows": ["←", "↖", "↑", "↗", "→", "↘", "↓", "↙"],
+        "simple": ["-", "\\", "|", "/"],
+    }
+
+    def __init__(self, message: str = "Working", style: str = "dots", quiet: bool = False, delay: float = 0.0):
+        """
+        Args:
+            message: Text to display next to spinner
+            style: Animation style (dots, braille, arrows, simple)
+            quiet: If True, suppress all output
+            delay: Seconds to wait before showing spinner. If operation completes
+                   before delay, no spinner is shown. Default 0 (immediate).
+        """
+        self.message = message
+        self.frames = self.STYLES.get(style, self.STYLES["dots"])
+        self.quiet = quiet
+        self.delay = delay
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._last_line_len = 0
+        self._started_display = False  # Track if we've shown anything
+
+    def _spin(self):
+        """Animation loop running in background thread."""
+        # Wait for delay before starting animation
+        if self.delay > 0:
+            # Use small increments so we can respond to stop signal quickly
+            elapsed = 0.0
+            while elapsed < self.delay and not self._stop.is_set():
+                time.sleep(0.05)
+                elapsed += 0.05
+            if self._stop.is_set():
+                return  # Operation finished before delay - show nothing
+
+        self._started_display = True
+        i = 0
+        while not self._stop.is_set():
+            frame = self.frames[i % len(self.frames)]
+            line = f"\r{Colors.CYAN}{frame}{Colors.RESET} {Colors.DIM}{self.message}...{Colors.RESET}"
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            self._last_line_len = len(self.message) + 10
+            i += 1
+            time.sleep(0.1)
+
+    def _clear_line(self):
+        """Clear the spinner line."""
+        if self._started_display:
+            sys.stdout.write("\r" + " " * self._last_line_len + "\r")
+            sys.stdout.flush()
+
+    def update(self, message: str):
+        """Update the spinner message while running."""
+        self.message = message
+
+    def __enter__(self):
+        if self.quiet:
+            return self
+        # Only animate spinner in interactive terminals (not when output is piped/captured)
+        if not sys.stdout.isatty():
+            # Non-TTY: show simple static message (but respect delay)
+            if self.delay == 0:
+                print(f"{Colors.DIM}{self.message}...{Colors.RESET}")
+                self._started_display = True
+            # For delayed spinners in non-TTY, we skip the message entirely
+            # since we can't clear it if the operation finishes quickly
+            return self
+        self._stop.clear()
+        self._started_display = False
+        self._thread = threading.Thread(target=self._spin, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, *args):
+        if self.quiet or self._thread is None:
+            return
+        self._stop.set()
+        self._thread.join(timeout=0.5)
+        self._clear_line()
 
 
 # =============================================================================
