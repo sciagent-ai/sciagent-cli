@@ -266,6 +266,71 @@ ask_user(
 )
 ```
 
+## Simulation Services (Docker)
+
+Containerized simulation tools are available via Docker. See `services/registry.yaml` for the full list.
+
+### Available Services (examples)
+- scipy-base: NumPy, SciPy, Matplotlib, Pandas
+- rcwa: Electromagnetic simulations (S4/RCWA)
+- meep: FDTD electromagnetic simulations
+- openfoam: Computational Fluid Dynamics
+- gromacs: Molecular dynamics
+- qiskit: Quantum computing
+- (see registry.yaml for 20+ more)
+
+### Usage Pattern
+
+1. **Write script to file first** (always - don't use inline code):
+```
+file_ops(action="write", path="simulation.py", content="import numpy as np\n...")
+```
+
+2. **Run in Docker container**:
+```
+bash(command='docker run --rm -v "$(pwd):/workspace" ghcr.io/sciagent-ai/<service> python3 /workspace/simulation.py')
+```
+
+3. **Read outputs** (files written to /workspace appear locally):
+```
+file_ops(action="read", path="_outputs/results.json")
+```
+
+### Key Points
+- Mount pattern: `-v "$(pwd):/workspace"` makes current dir available as /workspace
+- Scripts in current dir → /workspace/script.py in container
+- Outputs to _outputs/ persist after container exits
+- Images auto-pull from ghcr.io/sciagent-ai/ on first use
+
+### Example: RCWA Simulation
+```python
+# 1. Write the script
+file_ops(action="write", path="rcwa_sim.py", content='''
+import S4
+import json
+
+S = S4.New(Lattice=1.0, NumBasis=20)
+S.SetMaterial('Air', 1.0)
+S.SetMaterial('Si', 12.0)
+S.AddLayer('top', 0, 'Air')
+S.AddLayer('slab', 0.5, 'Si')
+S.AddLayerCopy('bottom', 0, 'top')
+S.SetExcitationPlanewave((0, 0), (1, 0), (0, 0))
+S.SetFrequency(1.0)
+
+result = {"R": S.GetPowerFlux('top')[1], "T": S.GetPowerFlux('bottom')[0]}
+with open("_outputs/rcwa_result.json", "w") as f:
+    json.dump(result, f)
+print(f"R={result['R']:.4f}, T={result['T']:.4f}")
+''')
+
+# 2. Run it
+bash(command='docker run --rm -v "$(pwd):/workspace" ghcr.io/sciagent-ai/rcwa python3 /workspace/rcwa_sim.py')
+
+# 3. Read results
+file_ops(action="read", path="_outputs/rcwa_result.json")
+```
+
 ## Error Recovery
 
 - Same error 3+ times → STOP. Try different approach.

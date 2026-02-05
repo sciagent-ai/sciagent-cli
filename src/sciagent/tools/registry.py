@@ -193,25 +193,26 @@ class ToolRegistry:
 
 def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     """
-    Create registry with the 7 atomic tools.
+    Create registry with the 6 atomic tools.
 
     This is the minimal tool set for scientific/engineering tasks:
-    - bash: Shell execution
+    - bash: Shell execution (including Docker commands for simulation services)
     - file_ops: Read/write/edit files (filesystem is memory)
     - search: Find files (glob) and content (grep)
     - web: Search and fetch web content
     - todo: Track task progress
-    - service: Run code in containerized simulation environments (RCWA, MEEP, etc.)
     - ask_user: Request user input for decisions/clarifications
 
-    Total: 7 tools
+    For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
+    Docker directly via bash. See services/registry.yaml for available images.
+
+    Total: 6 tools
     """
     from .atomic.shell import ShellTool
     from .atomic.file_ops import FileOpsTool
     from .atomic.search import SearchTool
     from .atomic.web import WebTool
     from .atomic.todo import TodoTool
-    from .atomic.service import ServiceTool
     from .atomic.ask_user import AskUserTool
 
     registry = ToolRegistry()
@@ -221,7 +222,6 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     registry.register(SearchTool(working_dir))
     registry.register(WebTool())
     registry.register(TodoTool())
-    registry.register(ServiceTool(working_dir))
     registry.register(AskUserTool())
 
     return registry
