@@ -29,12 +29,13 @@ class AgentConfig:
     """Configuration for the agent"""
     model: str = DEFAULT_MODEL
     temperature: float = 0.0
-    max_tokens: int = 16384  # Increased to prevent truncation of large code generation
+    max_tokens: int = 32768  # Large limit for thorough code generation
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
     working_dir: str = "."
     verbose: bool = True
     auto_save: bool = True
     state_dir: str = ".agent_states"
+    reasoning_effort: str = "medium"  # Extended thinking: "low", "medium", "high", or None to disable
 
 
 DEFAULT_SYSTEM_PROMPT = """You are a software engineering agent.
@@ -63,6 +64,29 @@ Create todos IMMEDIATELY when you receive:
 - Mark completed IMMEDIATELY after finishing (don't batch)
 - One in_progress at a time
 - If stuck 3+ attempts on same task → add new todo "Try alternative approach for X"
+
+## Exploration - CRITICAL
+
+Before implementing anything non-trivial, THOROUGHLY explore and understand the context.
+
+### ALWAYS Do This First
+- Read ALL relevant files before modifying any code
+- Search the codebase for related patterns, similar implementations
+- Understand existing conventions, naming patterns, architecture
+- Don't assume file contents - READ them
+
+### Exploration Triggers
+When the task involves:
+- Modifying existing code → read the file AND its imports/dependencies
+- Adding a feature → find similar features, follow the pattern
+- Fixing a bug → understand the full code path, not just the error line
+- Integration work → read both sides of the integration
+
+### Anti-Pattern
+```
+❌ User asks to modify auth.py → immediately start editing
+✅ User asks to modify auth.py → read auth.py, read files that import it, understand the auth flow, THEN edit
+```
 
 ## Research - Use Web Search
 
@@ -108,10 +132,10 @@ For tasks requiring external knowledge, USE THE WEB TOOL. Don't fabricate inform
 ## Phases
 
 ### 1. Understand
-- Read relevant files/context first
+- Read relevant files/context first - this is NOT optional
 - Use web search for external knowledge (don't fabricate)
-- Use sub-agents (researcher, explorer) for large codebases
-- Don't assume - verify
+- For large codebases, explore systematically
+- Don't assume - verify by reading
 
 ### 2. Plan
 - Use todo tool to list ALL components/steps
@@ -120,6 +144,7 @@ For tasks requiring external knowledge, USE THE WEB TOOL. Don't fabricate inform
 
 ### 3. Execute
 - One component at a time
+- Write COMPLETE implementations - not stubs or placeholders
 - Test each piece before moving on (run it, check output)
 - Mark todos complete as you go
 
@@ -127,6 +152,35 @@ For tasks requiring external knowledge, USE THE WEB TOOL. Don't fabricate inform
 - Verify all todos completed
 - Test integration
 - If unstable: create simplified working version
+
+## Code Quality
+
+Write complete, production-ready code. Not sketches or outlines.
+
+### Implementation Standards
+- Write FULL implementations, not TODO comments or placeholders
+- Include proper error handling for realistic failure modes
+- Follow existing code conventions in the project
+- Reference code locations as `file_path:line_number` when discussing code
+
+### Security Awareness
+Be careful not to introduce vulnerabilities:
+- Command injection: sanitize inputs to shell commands
+- Path traversal: validate file paths
+- Injection attacks: parameterize queries, escape outputs
+- Secrets: never hardcode credentials, use environment variables
+
+### When Results Include Data
+- Create visualizations when data can be graphed (matplotlib, plotly)
+- Save plots and figures to `_outputs/` directory
+- Include summary statistics in output
+- Export data in reusable formats (JSON, CSV)
+
+### What NOT To Do
+- Don't add features beyond what was requested
+- Don't refactor unrelated code while fixing a bug
+- Don't add comments/docstrings to code you didn't change
+- Don't create abstractions for one-time operations
 
 ## Verification Before Completion - CRITICAL
 
@@ -224,12 +278,24 @@ ask_user(
 - Imports/dependencies: verify modules exist before using them
 - Async issues: handle promises/callbacks properly (JS), use await (Python/JS)
 
-## Guidelines
+## Output Quality
 
-- Read before modifying
-- Be concise
-- Don't over-engineer
-- If blocked: ask user or pivot strategy
+Provide clear, well-structured outputs.
+
+### Formatting
+- Use markdown for readability (headers, code blocks, tables)
+- For numerical results, include key statistics
+- When referencing code, use `file_path:line_number` format
+
+### Artifacts
+- Save generated files to `_outputs/` directory
+- Use descriptive filenames: `optimization_results.json` not `out.json`
+- Include metadata (timestamps, parameters used) in output files
+
+### Communication Style
+- Focus on facts and technical accuracy
+- Be direct - state findings without hedging
+- If uncertain, say so explicitly and explain why
 
 ## Task Data Flow - CRITICAL
 
@@ -316,7 +382,8 @@ class AgentLoop:
         self.llm = llm or LLMClient(
             model=self.config.model,
             temperature=self.config.temperature,
-            max_tokens=self.config.max_tokens
+            max_tokens=self.config.max_tokens,
+            reasoning_effort=self.config.reasoning_effort
         )
 
         # Display management
@@ -479,9 +546,70 @@ class AgentLoop:
         signal.signal(signal.SIGINT, self._original_sigint)
 
     # =========================================================================
+    # Context Management
+    # =========================================================================
+
+    def _summarize_context(self, messages: List) -> str:
+        """
+        Use LLM to summarize a section of conversation context.
+
+        This preserves important information when compressing context,
+        rather than simply truncating and losing information.
+        """
+        # Format messages for summarization
+        formatted = []
+        for msg in messages:
+            role = msg.role if hasattr(msg, 'role') else msg.get('role', 'unknown')
+            content = msg.content if hasattr(msg, 'content') else msg.get('content', '')
+
+            if role == "tool":
+                name = msg.name if hasattr(msg, 'name') else msg.get('name', 'tool')
+                # Truncate long tool outputs for summary
+                if len(content) > 500:
+                    content = content[:500] + "... [truncated]"
+                formatted.append(f"[Tool: {name}] {content}")
+            elif role == "assistant":
+                # Check for tool calls
+                tool_calls = msg.tool_calls if hasattr(msg, 'tool_calls') else msg.get('tool_calls')
+                if tool_calls:
+                    tools_used = [tc.get('function', {}).get('name', 'unknown')
+                                  if isinstance(tc, dict) else getattr(tc, 'name', 'unknown')
+                                  for tc in tool_calls]
+                    formatted.append(f"[Assistant used tools: {', '.join(tools_used)}]")
+                if content:
+                    formatted.append(f"[Assistant] {content[:300]}..." if len(content) > 300 else f"[Assistant] {content}")
+            elif role == "user":
+                formatted.append(f"[User] {content[:200]}..." if len(content) > 200 else f"[User] {content}")
+
+        context_text = "\n".join(formatted)
+
+        # Use the LLM to summarize
+        summary_prompt = f"""Summarize the following conversation context concisely.
+Focus on:
+1. Key decisions made
+2. Important findings/results
+3. Files created or modified
+4. Current state of the task
+
+Context to summarize:
+{context_text}
+
+Provide a concise summary (max 500 words):"""
+
+        try:
+            from .llm import Message as LLMMessage
+            summary_response = self.llm.chat([
+                LLMMessage(role="user", content=summary_prompt)
+            ])
+            return summary_response.content
+        except Exception as e:
+            # Fallback: return a simple truncated version
+            return f"[Context summary failed: {str(e)}]\n\nRecent activity included: {context_text[:1000]}..."
+
+    # =========================================================================
     # Callback Registration
     # =========================================================================
-    
+
     def on_tool_start(self, callback: Callable[[str, Dict], None]):
         """Register callback for when a tool starts"""
         self._on_tool_start = callback
@@ -1000,9 +1128,9 @@ class AgentLoop:
                 self.iteration_count += 1
 
                 # Compress context if getting too large (don't stop, compress)
-                if self.state.context.token_estimate() > 80000:
+                if self.state.context.token_estimate() > 120000:
                     print("  📦 Compressing context...")
-                    self.state.context.compress_if_needed()
+                    self.state.context.compress_if_needed(summarizer=self._summarize_context)
 
                 try:
                     response = self._single_step()

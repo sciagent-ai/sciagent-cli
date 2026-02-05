@@ -54,8 +54,12 @@ Actions:
 Examples:
 - List services: action="list"
 - Check status: action="status"
-- Run RCWA simulation: action="run", service="rcwa", code="import S4; print(S4.__version__)"
+- Run script file: action="run", service="rcwa", script="simulation.py"
+- Run inline code: action="run", service="rcwa", code="import S4; print(S4.__version__)"
 - Run shell command: action="run", service="rcwa", command="python3 --version"
+
+IMPORTANT: For complex simulations, prefer using 'script' (run a .py file) over 'code' (inline string).
+Scripts can write outputs to _outputs/ which persists after container exits.
 """
 
     parameters = {
@@ -70,13 +74,17 @@ Examples:
                 "type": "string",
                 "description": "Service name (e.g., 'rcwa', 'meep', 'openfoam'). Required for run/ensure/info."
             },
+            "script": {
+                "type": "string",
+                "description": "Path to Python script file (relative to working dir) to run in container. Preferred for complex simulations. Example: 'simulation.py' or '_outputs/my_sim.py'"
+            },
             "code": {
                 "type": "string",
-                "description": "Python/script code to execute in the container. Used with action='run'."
+                "description": "Python/script code to execute. For complex code, prefer writing a script file and using 'script' parameter instead."
             },
             "command": {
                 "type": "string",
-                "description": "Shell command to execute in the container. Used with action='run'. If both code and command provided, code takes precedence."
+                "description": "Shell command to execute in the container. Used with action='run'."
             },
             "files": {
                 "type": "object",
@@ -267,14 +275,37 @@ Examples:
         self,
         image: str,
         service_config: Dict,
+        service_name: str = "service",
+        script: Optional[str] = None,
         code: Optional[str] = None,
         command: Optional[str] = None,
         files: Optional[Dict[str, str]] = None,
         timeout: int = 300
     ) -> tuple[bool, str]:
-        """Run code or command in a container."""
+        """Run code or command in a container.
+
+        Args:
+            image: Docker image to use
+            service_config: Service configuration from registry
+            service_name: Name of the service (for script naming)
+            script: Path to existing script file to run
+            code: Inline code (will be saved to a script file first)
+            command: Shell command to execute
+            files: Additional files to mount
+            timeout: Execution timeout in seconds
+
+        Returns:
+            Tuple of (success, output_message)
+        """
         runtime = service_config.get("runtime", "python3")
         workdir = service_config.get("workdir", "/workspace")
+
+        # Ensure _outputs directory exists
+        outputs_dir = self.working_dir / "_outputs"
+        outputs_dir.mkdir(exist_ok=True)
+
+        # Track existing files to detect new ones
+        existing_outputs = set(f.name for f in outputs_dir.iterdir()) if outputs_dir.exists() else set()
 
         docker_cmd = [
             "docker", "run", "--rm",
@@ -288,28 +319,53 @@ Examples:
         if files:
             for container_path, local_path_or_content in files.items():
                 if os.path.exists(local_path_or_content):
-                    # It's a file path, mount it
                     docker_cmd.extend(["-v", f"{local_path_or_content}:{container_path}:ro"])
                 else:
-                    # It's content, write to temp file and mount
                     with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.py') as f:
                         f.write(local_path_or_content)
                         docker_cmd.extend(["-v", f"{f.name}:{container_path}:ro"])
 
         docker_cmd.append(image)
 
-        # Determine what to run
-        if code:
-            # Run Python/script code
-            if runtime == "python3" or runtime == "python":
-                docker_cmd.extend(["python3", "-c", code])
+        # Track created script for reporting
+        created_script = None
+
+        # Determine what to run (priority: script > code > command)
+        if script:
+            # Run existing script file
+            script_path = self.working_dir / script
+            if not script_path.exists():
+                return False, f"Script not found: {script}"
+            if runtime in ("python3", "python"):
+                docker_cmd.extend(["python3", f"/workspace/{script}"])
             else:
-                # For other runtimes, write code to temp and execute
+                docker_cmd.extend(["bash", f"/workspace/{script}"])
+        elif code:
+            # Save code to a script file in the project folder (not temp)
+            from datetime import datetime
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            script_name = f"{service_name}_script_{timestamp}.py"
+            script_path = self.working_dir / script_name
+
+            # Write script with header
+            header = f'''#!/usr/bin/env python3
+"""
+Auto-generated script for {service_name} service
+Created: {datetime.now().isoformat()}
+Run with: docker run --rm -v "$(pwd):/workspace" <image> python3 /workspace/{script_name}
+"""
+
+'''
+            script_path.write_text(header + code)
+            created_script = script_name
+
+            if runtime in ("python3", "python"):
+                docker_cmd.extend(["python3", f"/workspace/{script_name}"])
+            else:
                 docker_cmd.extend(["bash", "-c", code])
         elif command:
             docker_cmd.extend(["bash", "-c", command])
         else:
-            # Interactive mode / default command
             docker_cmd.extend([runtime])
 
         try:
@@ -327,6 +383,17 @@ Examples:
             if result.stderr:
                 output += f"\n[stderr]\n{result.stderr}" if output else result.stderr
 
+            # Report created script
+            if created_script:
+                output = f"[Script saved: {created_script}]\n\n" + output
+
+            # Check for new files in _outputs
+            if outputs_dir.exists():
+                current_outputs = set(f.name for f in outputs_dir.iterdir())
+                new_outputs = sorted(current_outputs - existing_outputs)
+                if new_outputs:
+                    output += "\n\n[Files created in _outputs/]\n" + "\n".join(f"  - {f}" for f in new_outputs)
+
             if result.returncode == 0:
                 return True, output.strip() if output else "(no output)"
             else:
@@ -341,6 +408,7 @@ Examples:
         self,
         action: str,
         service: Optional[str] = None,
+        script: Optional[str] = None,
         code: Optional[str] = None,
         command: Optional[str] = None,
         files: Optional[Dict[str, str]] = None,
@@ -454,11 +522,11 @@ Examples:
                     error=f"Unknown service: {service}. Available: {list(services.keys())}"
                 )
 
-            if not code and not command:
+            if not script and not code and not command:
                 return ToolResult(
                     success=False,
                     output=None,
-                    error="Either 'code' or 'command' required for 'run' action"
+                    error="One of 'script', 'code', or 'command' required for 'run' action"
                 )
 
             config = services[service]
@@ -472,6 +540,8 @@ Examples:
             success, output = self._run_in_container(
                 image=image,
                 service_config=config,
+                service_name=service,
+                script=script,
                 code=code,
                 command=command,
                 files=files,

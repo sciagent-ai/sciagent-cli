@@ -117,10 +117,16 @@ class LLMResponse:
     finish_reason: str = "stop"
     usage: Dict[str, int] = field(default_factory=dict)
     cache_info: Dict[str, Any] = field(default_factory=dict)  # Cache metrics
+    reasoning_content: Optional[str] = None  # Extended thinking/reasoning from model
 
     @property
     def has_tool_calls(self) -> bool:
         return len(self.tool_calls) > 0
+
+    @property
+    def has_reasoning(self) -> bool:
+        """Check if response includes extended thinking/reasoning"""
+        return self.reasoning_content is not None and len(self.reasoning_content) > 0
 
     @property
     def cache_hit(self) -> bool:
@@ -149,14 +155,16 @@ class LLMClient:
         self,
         model: str = DEFAULT_MODEL,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int = 16384,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,  # "low", "medium", "high" or None
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        
+        self.reasoning_effort = reasoning_effort  # Extended thinking (Claude, Gemini, OpenAI o-series)
+
         # Set API key if provided
         if api_key:
             # litellm auto-detects provider from model name
@@ -166,15 +174,15 @@ class LLMClient:
                 os.environ["OPENAI_API_KEY"] = api_key
             elif "gemini" in model.lower():
                 os.environ["GEMINI_API_KEY"] = api_key
-        
+
         if base_url:
             self.base_url = base_url
         else:
             self.base_url = None
-            
+
         # Configure litellm
         if LITELLM_AVAILABLE:
-            litellm.drop_params = True  # Ignore unsupported params
+            litellm.drop_params = True  # Ignore unsupported params (safe for reasoning_effort)
             
     def _is_anthropic_model(self) -> bool:
         """Check if current model is an Anthropic model"""
@@ -285,54 +293,71 @@ class LLMClient:
             "max_tokens": self.max_tokens,
             **kwargs
         }
-        
+
         if self.base_url:
             call_kwargs["base_url"] = self.base_url
-        
+
+        # Add reasoning_effort for extended thinking (works on Claude, Gemini, OpenAI o-series)
+        # litellm.drop_params=True ensures this is safely ignored on unsupported models
+        if self.reasoning_effort:
+            call_kwargs["reasoning_effort"] = self.reasoning_effort
+            # Anthropic requires temperature=1 when extended thinking is enabled
+            if self._is_anthropic_model():
+                call_kwargs["temperature"] = 1
+
         # Add tools if provided
         if tools:
             call_kwargs["tools"] = self._format_tools(tools)
             call_kwargs["tool_choice"] = tool_choice
-        
-        # Make the call
-        response = completion(**call_kwargs)
-        
-        # Parse response
-        choice = response.choices[0]
-        message = choice.message
-        
-        # Extract tool calls if present
-        tool_calls = []
-        if hasattr(message, 'tool_calls') and message.tool_calls:
-            for tc in message.tool_calls:
-                tool_calls.append(ToolCall.from_response(tc.model_dump()))
-        
-        # Extract usage info
-        usage = {
-            "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
-            "completion_tokens": response.usage.completion_tokens if response.usage else 0,
-        }
 
-        # Extract Anthropic prompt caching metrics if available
-        cache_info = {}
-        if response.usage:
-            # Anthropic returns these fields for prompt caching
-            if hasattr(response.usage, "cache_read_input_tokens"):
-                cache_info["cache_read_input_tokens"] = response.usage.cache_read_input_tokens or 0
-            if hasattr(response.usage, "cache_creation_input_tokens"):
-                cache_info["cache_creation_input_tokens"] = response.usage.cache_creation_input_tokens or 0
-            # Also check _hidden_params for litellm's cache info
-            if hasattr(response, "_hidden_params"):
-                hidden = response._hidden_params or {}
-                if hidden.get("cache_hit"):
-                    cache_info["litellm_cache_hit"] = True
+        # Make the call - wrap in warnings context to suppress pydantic serialization warnings
+        # These warnings occur when litellm's response models have extra/missing fields
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            response = completion(**call_kwargs)
+
+            # Parse response (also under warnings suppression as model_dump triggers them)
+            choice = response.choices[0]
+            message = choice.message
+
+            # Extract tool calls if present
+            tool_calls = []
+            if hasattr(message, 'tool_calls') and message.tool_calls:
+                for tc in message.tool_calls:
+                    tool_calls.append(ToolCall.from_response(tc.model_dump()))
+
+            # Extract usage info
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens if response.usage else 0,
+                "completion_tokens": response.usage.completion_tokens if response.usage else 0,
+            }
+
+            # Extract Anthropic prompt caching metrics if available
+            cache_info = {}
+            if response.usage:
+                # Anthropic returns these fields for prompt caching
+                if hasattr(response.usage, "cache_read_input_tokens"):
+                    cache_info["cache_read_input_tokens"] = response.usage.cache_read_input_tokens or 0
+                if hasattr(response.usage, "cache_creation_input_tokens"):
+                    cache_info["cache_creation_input_tokens"] = response.usage.cache_creation_input_tokens or 0
+                # Also check _hidden_params for litellm's cache info
+                if hasattr(response, "_hidden_params"):
+                    hidden = response._hidden_params or {}
+                    if hidden.get("cache_hit"):
+                        cache_info["litellm_cache_hit"] = True
+
+            # Extract reasoning/thinking content (works for Claude, Gemini, OpenAI o-series)
+            reasoning_content = None
+            if hasattr(message, 'reasoning_content') and message.reasoning_content:
+                reasoning_content = message.reasoning_content
 
         return LLMResponse(
             content=message.content or "",
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
-            cache_info=cache_info
+            cache_info=cache_info,
+            reasoning_content=reasoning_content
         )
     
     def chat_stream(
@@ -366,16 +391,19 @@ class LLMClient:
         if tools:
             call_kwargs["tools"] = self._format_tools(tools)
 
-        response = completion(**call_kwargs)
+        # Suppress pydantic serialization warnings during streaming
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning)
+            response = completion(**call_kwargs)
 
-        full_content = ""
-        tool_calls = []
+            full_content = ""
+            tool_calls = []
 
-        for chunk in response:
-            if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_content += content
-                yield content
+            for chunk in response:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    full_content += content
+                    yield content
 
         return LLMResponse(
             content=full_content,
