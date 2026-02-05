@@ -11,7 +11,7 @@ DEFAULT_MODEL = "anthropic/claude-sonnet-4-20250514"
 # Fast model for content processing (web fetch extraction, summarization)
 # This model is used for processing large documents before returning to main agent
 # Should be cheap and fast - Haiku is ideal
-FAST_MODEL = "xai/grok-4-1-fast-reasoning"
+FAST_MODEL = "anthropic/claude-sonnet-4-20250514"
 #FAST_MODEL = "anthropic/claude-3-haiku-20240307"
 #FAST_MODEL = "openai/gpt-4.1-mini"
 

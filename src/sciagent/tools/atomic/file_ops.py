@@ -2,14 +2,28 @@
 File operations tool - unified read/write/edit/list.
 
 This tool IS the memory system. The filesystem persists data.
+Supports text files and PDFs (with pypdf).
 """
 
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
+
+# Optional: PDF extraction support
+try:
+    import pypdf
+    PYPDF_AVAILABLE = True
+except ImportError:
+    try:
+        import PyPDF2 as pypdf
+        PYPDF_AVAILABLE = False  # Mark as available via fallback
+        PYPDF_AVAILABLE = True
+    except ImportError:
+        PYPDF_AVAILABLE = False
 
 
 @dataclass
@@ -24,7 +38,7 @@ class FileOpsTool:
     """Unified file operations - read, write, edit, list."""
 
     name = "file_ops"
-    description = "File operations: read, write, edit, list. Use command parameter to select operation."
+    description = "File operations: read, write, edit, list. Supports text files and PDFs. Use command parameter to select operation."
 
     parameters = {
         "type": "object",
@@ -111,7 +125,7 @@ class FileOpsTool:
             return ToolResult(success=False, output=None, error=f"Unknown command: {command}")
 
     def _read(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
-        """Read file contents."""
+        """Read file contents. Supports text files and PDFs."""
         try:
             p = self._resolve_path(path)
 
@@ -120,6 +134,10 @@ class FileOpsTool:
 
             if p.is_dir():
                 return self._list(path, recursive=False, show_hidden=False)
+
+            # Handle PDF files specially
+            if p.suffix.lower() == '.pdf':
+                return self._read_pdf(p, start_line, end_line)
 
             content = p.read_text(encoding="utf-8")
             lines = content.splitlines()
@@ -147,6 +165,56 @@ class FileOpsTool:
 
         except Exception as e:
             return ToolResult(success=False, output=None, error=str(e))
+
+    def _read_pdf(self, path: Path, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
+        """Extract text from PDF file."""
+        if not PYPDF_AVAILABLE:
+            return ToolResult(
+                success=False,
+                output=None,
+                error="PDF reading requires pypdf. Install with: pip install pypdf"
+            )
+
+        try:
+            pdf_bytes = path.read_bytes()
+            pdf_file = io.BytesIO(pdf_bytes)
+            reader = pypdf.PdfReader(pdf_file)
+
+            text_parts = []
+            for page_num, page in enumerate(reader.pages):
+                try:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                except Exception as e:
+                    text_parts.append(f"--- Page {page_num + 1} ---\n[Error extracting: {e}]")
+
+            content = "\n\n".join(text_parts)
+            lines = content.splitlines()
+
+            # Apply line range if specified
+            if start_line is not None:
+                start_idx = max(0, start_line - 1)
+                end_idx = len(lines) if (end_line == -1 or end_line is None) else end_line
+                lines = lines[start_idx:end_idx]
+                line_offset = start_idx
+            else:
+                line_offset = 0
+
+            # Add line numbers
+            numbered = []
+            for i, line in enumerate(lines):
+                line_num = i + line_offset + 1
+                numbered.append(f"{line_num:4d} | {line}")
+
+            return ToolResult(
+                success=True,
+                output="\n".join(numbered),
+                error=None
+            )
+
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=f"Failed to read PDF: {str(e)}")
 
     def _write(self, path: str, content: str) -> ToolResult:
         """Write content to file."""

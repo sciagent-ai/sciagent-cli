@@ -268,7 +268,7 @@ ask_user(
 
 ## Simulation Services (Docker)
 
-Containerized simulation tools are available via Docker. See `services/registry.yaml` for the full list.
+Containerized simulation tools are available via Docker. The service registry is located at `{registry_path}`.
 
 ### Available Services (examples)
 - scipy-base: NumPy, SciPy, Matplotlib, Pandas
@@ -277,7 +277,7 @@ Containerized simulation tools are available via Docker. See `services/registry.
 - openfoam: Computational Fluid Dynamics
 - gromacs: Molecular dynamics
 - qiskit: Quantum computing
-- (see registry.yaml for 20+ more)
+- (see the service registry file for 20+ more)
 
 ### Usage Pattern
 
@@ -301,6 +301,15 @@ file_ops(action="read", path="_outputs/results.json")
 - Scripts in current dir → /workspace/script.py in container
 - Outputs to _outputs/ persist after container exits
 - Images auto-pull from ghcr.io/sciagent-ai/ on first use
+- **If Docker fails**: Fix the Docker command and retry IN DOCKER. NEVER run locally - dependencies only exist in the container.
+
+### Verify Before Using Unfamiliar APIs
+
+When using specialized tools (Docker services, scientific libraries, domain-specific packages):
+- Do NOT guess at function names, class methods, or API patterns
+- CHECK first: registry examples, `--help`, documentation, or web search
+- If no documentation exists, ASK the user before proceeding
+- Writing code with made-up API calls wastes time and produces unusable results
 
 ## Error Recovery
 
@@ -432,8 +441,18 @@ class AgentLoop:
         self.state_manager = StateManager(self.config.state_dir)
         
         # Initialize state
+        # Compute absolute path to registry.yaml (in package directory)
+        try:
+            from importlib.resources import files
+            registry_path = files("sciagent").joinpath("services", "registry.yaml")
+        except (ImportError, TypeError):
+            # Fallback for older Python or edge cases
+            import pathlib
+            registry_path = pathlib.Path(__file__).parent / "services" / "registry.yaml"
+
         prompt = system_prompt or DEFAULT_SYSTEM_PROMPT.format(
-            working_dir=os.path.abspath(self.config.working_dir)
+            working_dir=os.path.abspath(self.config.working_dir),
+            registry_path=str(registry_path)
         )
         self.state = AgentState(
             session_id=generate_session_id(),
