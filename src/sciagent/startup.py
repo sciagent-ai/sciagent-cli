@@ -28,6 +28,11 @@ API_KEYS = {
         "url": "https://aistudio.google.com/apikey",
         "name": "Google AI",
     },
+    "xai": {
+        "env": "XAI_API_KEY",
+        "url": "https://console.x.ai/",
+        "name": "xAI (Grok)",
+    },
     "brave": {
         "env": "BRAVE_SEARCH_API_KEY",
         "url": "https://brave.com/search/api/",
@@ -45,6 +50,8 @@ def detect_provider_from_model(model: str) -> str:
         return "openai"
     elif "gemini" in model_lower:
         return "gemini"
+    elif "xai" in model_lower or "grok" in model_lower:
+        return "xai"
     return "unknown"
 
 
@@ -182,6 +189,10 @@ def show_getting_started() -> None:
     print("   # Google AI (Gemini models)")
     print(f"   export GEMINI_API_KEY='...'")
     print(f"     → {API_KEYS['gemini']['url']}")
+    print()
+    print("   # xAI (Grok models)")
+    print(f"   export XAI_API_KEY='xai-...'")
+    print(f"     → {API_KEYS['xai']['url']}")
     print()
     print("   Tip: SciAgent uses LiteLLM - see https://docs.litellm.ai/docs/providers")
     print("        for 100+ supported providers and model formats.")
