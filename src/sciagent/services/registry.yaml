@@ -570,6 +570,76 @@ services:
               for alignment in record.alignments:
                   print(f"Hit: {alignment.title}")
 
+  pyoptools:
+    description: "pyOpTools - Optical design and ray tracing simulation library"
+    image: ghcr.io/sciagent-ai/pyoptools
+    dockerfile: pyoptools/Dockerfile
+    license: GPL-3.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "3D non-sequential ray tracing"
+      - "Optical system design and simulation"
+      - "Lens and mirror modeling"
+      - "Wavefront analysis"
+      - "Optical field propagation"
+      - "Component library (lenses, prisms, gratings)"
+    example: |
+      from pyoptools.raytrace.ray import Ray
+      from pyoptools.raytrace.system import System
+      from pyoptools.raytrace.comp_lib import SphericalLens
+      from pyoptools.raytrace.surface import Plane
+      from pyoptools.raytrace.component import Component
+      import numpy as np
+
+      # Create a simple spherical lens
+      lens = SphericalLens(radius=25, curvature_s1=0.02, curvature_s2=-0.02,
+                           thickness=5, material="N-BK7")
+
+      # Create a ray
+      ray = Ray(pos=(0, 0, -50), dir=(0, 0, 1), wavelength=0.55)
+
+      # Create optical system
+      system = System(complist=[(lens, (0, 0, 0), (0, 0, 0))],
+                      n=1.0)
+
+      # Propagate rays through the system
+      system.propagate()
+      print("Ray tracing complete")
+
+  optuna:
+    description: "Optuna - Hyperparameter optimization framework for machine learning"
+    image: ghcr.io/sciagent-ai/optuna
+    dockerfile: optuna/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Automatic hyperparameter optimization"
+      - "Define-by-run API for search spaces"
+      - "Pruning of unpromising trials"
+      - "Distributed optimization across workers"
+      - "Visualization of optimization history"
+      - "Integration with ML frameworks (scikit-learn, PyTorch, etc.)"
+    example: |
+      import optuna
+
+      # Define objective function
+      def objective(trial):
+          x = trial.suggest_float("x", -10, 10)
+          y = trial.suggest_float("y", -10, 10)
+          return (x - 2) ** 2 + (y + 3) ** 2
+
+      # Create study and optimize
+      study = optuna.create_study(direction="minimize")
+      study.optimize(objective, n_trials=100)
+
+      print(f"Best params: {study.best_params}")
+      print(f"Best value: {study.best_value:.4f}")
+
+      # Visualize optimization history
+      # optuna.visualization.plot_optimization_history(study)
+
   sciml-julia:
     description: "Julia SciML ecosystem - differential equations, optimization, and scientific machine learning"
     image: ghcr.io/sciagent-ai/sciml-julia
