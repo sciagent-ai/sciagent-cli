@@ -302,35 +302,6 @@ file_ops(action="read", path="_outputs/results.json")
 - Outputs to _outputs/ persist after container exits
 - Images auto-pull from ghcr.io/sciagent-ai/ on first use
 
-### Example: RCWA Simulation
-```python
-# 1. Write the script
-file_ops(action="write", path="rcwa_sim.py", content='''
-import S4
-import json
-
-S = S4.New(Lattice=1.0, NumBasis=20)
-S.SetMaterial('Air', 1.0)
-S.SetMaterial('Si', 12.0)
-S.AddLayer('top', 0, 'Air')
-S.AddLayer('slab', 0.5, 'Si')
-S.AddLayerCopy('bottom', 0, 'top')
-S.SetExcitationPlanewave((0, 0), (1, 0), (0, 0))
-S.SetFrequency(1.0)
-
-result = {"R": S.GetPowerFlux('top')[1], "T": S.GetPowerFlux('bottom')[0]}
-with open("_outputs/rcwa_result.json", "w") as f:
-    json.dump(result, f)
-print(f"R={result['R']:.4f}, T={result['T']:.4f}")
-''')
-
-# 2. Run it
-bash(command='docker run --rm -v "$(pwd):/workspace" ghcr.io/sciagent-ai/rcwa python3 /workspace/rcwa_sim.py')
-
-# 3. Read results
-file_ops(action="read", path="_outputs/rcwa_result.json")
-```
-
 ## Error Recovery
 
 - Same error 3+ times → STOP. Try different approach.
