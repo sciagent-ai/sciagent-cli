@@ -38,7 +38,7 @@ class FileOpsTool:
     """Unified file operations - read, write, edit, list."""
 
     name = "file_ops"
-    description = "File operations: read, write, edit, list. Supports text files and PDFs. Use command parameter to select operation."
+    description = "File operations: read, write, edit, list. Read supports text files, PDFs, and common code formats."
 
     parameters = {
         "type": "object",
@@ -98,6 +98,8 @@ class FileOpsTool:
 
     def __init__(self, working_dir: str = "."):
         self.working_dir = Path(working_dir).resolve()
+        # Track files that have been read in this session (for read-before-write warnings)
+        self._read_files: set = set()
 
     def _resolve_path(self, path: str) -> Path:
         """Resolve path relative to working directory."""
@@ -131,6 +133,9 @@ class FileOpsTool:
 
             if not p.exists():
                 return ToolResult(success=False, output=None, error=f"File not found: {path}")
+
+            # Track that this file has been read
+            self._read_files.add(str(p))
 
             if p.is_dir():
                 return self._list(path, recursive=False, show_hidden=False)
@@ -251,6 +256,15 @@ class FileOpsTool:
             if not p.exists():
                 return ToolResult(success=False, output=None, error=f"File not found: {path}")
 
+            # Check if file was read first (warn but don't block)
+            was_read = str(p) in self._read_files
+            warning_prefix = ""
+            if not was_read:
+                warning_prefix = (
+                    "[WARNING] Editing file without reading it first. "
+                    "Consider reading files before editing to understand context.\n\n"
+                )
+
             content = p.read_text(encoding="utf-8")
             count = content.count(old_str)
 
@@ -264,7 +278,7 @@ class FileOpsTool:
 
             return ToolResult(
                 success=True,
-                output=f"Edited {path} (changed {len(old_str)} -> {len(new_str)} chars)",
+                output=f"{warning_prefix}Edited {path} (changed {len(old_str)} -> {len(new_str)} chars)",
                 error=None
             )
 

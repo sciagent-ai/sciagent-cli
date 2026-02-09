@@ -33,7 +33,8 @@ from typing import Optional
 from .display import create_display
 from .agent import AgentLoop, AgentConfig, create_agent
 from .tools import ToolRegistry, create_default_registry
-from .subagent import create_agent_with_subagents
+from .subagent import SubAgentOrchestrator, TaskTool, WorkflowTool
+from .prompts import build_system_prompt
 from .state import StateManager
 from .defaults import DEFAULT_MODEL
 from .startup import show_startup_banner, check_configuration_ready, check_optional_keys
@@ -101,7 +102,7 @@ Examples:
     parser.add_argument(
         "-s", "--subagents",
         action="store_true",
-        help="Enable sub-agent spawning capability"
+        help="Enable workflow tool for full DAG execution (TaskTool is always available)"
     )
     
     parser.add_argument(
@@ -148,7 +149,15 @@ Examples:
         metavar="PATH",
         help="Path to custom system prompt file"
     )
-    
+
+    parser.add_argument(
+        "--skills-dir",
+        metavar="PATH",
+        type=Path,
+        default=None,
+        help="Directory containing skill definitions (SKILL.md files)"
+    )
+
     return parser.parse_args()
 
 
@@ -221,9 +230,15 @@ def main():
     system_prompt = None
     if args.system_prompt:
         system_prompt = Path(args.system_prompt).read_text()
-    
-    # Create tool registry
-    tools = create_default_registry(str(project_dir))
+
+    # Validate skills directory if provided
+    skills_dir = args.skills_dir
+    if skills_dir and not skills_dir.exists():
+        print(f"Warning: Skills directory not found: {skills_dir}")
+        skills_dir = None
+
+    # Create tool registry (with skills if available)
+    tools = create_default_registry(str(project_dir), skills_dir=skills_dir)
     
     # Load additional tools if specified
     if args.load_tools:
@@ -251,22 +266,33 @@ def main():
         recommendations = check_optional_keys()
         # Only show on first run or interactive - don't spam every time
 
-    # Create the agent
+    # Always create orchestrator and register TaskTool (subagents always available)
+    orchestrator = SubAgentOrchestrator(
+        tools=tools,
+        working_dir=str(project_dir),
+        parent_model=args.model
+    )
+    tools.register(TaskTool(orchestrator))
+
+    # --subagents flag adds WorkflowTool for full DAG execution
     if args.subagents:
-        agent = create_agent_with_subagents(
-            model=args.model,
-            working_dir=str(project_dir),
-            verbose=verbose
-        )
-    else:
-        config = AgentConfig(
-            model=args.model,
-            working_dir=str(project_dir),
-            verbose=verbose,
-            max_iterations=args.max_iterations,
-            temperature=args.temperature
-        )
-        agent = AgentLoop(config=config, tools=tools, system_prompt=system_prompt)
+        tools.register(WorkflowTool(orchestrator, str(project_dir)))
+
+    # Build system prompt from modular files
+    final_system_prompt = system_prompt or build_system_prompt(
+        working_dir=str(project_dir),
+        registry_path=str(Path(__file__).parent / "services" / "registry.yaml"),
+    )
+
+    config = AgentConfig(
+        model=args.model,
+        working_dir=str(project_dir),
+        verbose=verbose,
+        max_iterations=args.max_iterations,
+        temperature=args.temperature
+    )
+
+    agent = AgentLoop(config=config, tools=tools, system_prompt=final_system_prompt)
     
     # Resume session if specified
     if args.resume:

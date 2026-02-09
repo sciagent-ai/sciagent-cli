@@ -191,9 +191,9 @@ class ToolRegistry:
             return ToolResult(success=True, output=result)
 
 
-def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
+def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegistry:
     """
-    Create registry with the 6 atomic tools.
+    Create registry with the 7 atomic tools.
 
     This is the minimal tool set for scientific/engineering tasks:
     - bash: Shell execution (including Docker commands for simulation services)
@@ -202,11 +202,12 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     - web: Search and fetch web content
     - todo: Track task progress
     - ask_user: Request user input for decisions/clarifications
+    - skill: Load specialized workflow skills (if skills exist)
 
     For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
     Docker directly via bash. See services/registry.yaml for available images.
 
-    Total: 6 tools
+    Total: 6-7 tools (skill tool only added if skills exist)
     """
     from .atomic.shell import ShellTool
     from .atomic.file_ops import FileOpsTool
@@ -224,12 +225,23 @@ def create_atomic_registry(working_dir: str = ".") -> ToolRegistry:
     registry.register(TodoTool())
     registry.register(AskUserTool())
 
+    # Add skill tool if skills exist
+    try:
+        from ..skills import SkillLoader
+        from .atomic.skill import SkillTool
+
+        loader = SkillLoader(skills_dir)
+        if loader.skills:
+            registry.register(SkillTool(loader))
+    except ImportError:
+        pass  # Skills module not available
+
     return registry
 
 
-def create_default_registry(working_dir: str = ".") -> ToolRegistry:
+def create_default_registry(working_dir: str = ".", skills_dir=None) -> ToolRegistry:
     """Alias for create_atomic_registry - backward compatibility."""
-    return create_atomic_registry(working_dir)
+    return create_atomic_registry(working_dir, skills_dir)
 
 
 # For testing

@@ -5,6 +5,18 @@
 # 1. Check local Docker images
 # 2. Pull from GHCR (ghcr.io/sciagent-ai/{name}:latest)
 # 3. Build from Dockerfile (services/{name}/Dockerfile)
+#
+# Execution pattern:
+#   docker run --rm -v <local_path>:/workspace <image> <runtime> /workspace/<script>
+#
+# Runtime conventions:
+#   python3 → python3 /workspace/script.py
+#   bash    → bash /workspace/script.sh  OR  bash -c "<commands>"
+#   julia   → julia /workspace/script.jl
+#
+# Special cases: If 'invoke' field is present, use it instead of runtime.
+#   Example: invoke: "--skip bash -c {cmd}" means run:
+#   docker run --rm -v <local_path>:/workspace <image> --skip bash -c "<commands>"
 
 defaults:
   organization: sciagent-ai
@@ -386,9 +398,9 @@ services:
       # 4. Post-process results (VTU files) with ParaView
 
   openroad:
-    description: "OpenROAD - Open-source RTL-to-GDS digital design flow"
+    description: "OpenROAD - RTL-to-GDS flow with ASAP7, SKY130, GF180, IHP-SG13G2 PDKs"
     image: ghcr.io/sciagent-ai/openroad
-    dockerfile: services/openroad/Dockerfile
+    dockerfile: openroad/Dockerfile
     license: BSD-3-Clause
     runtime: bash
     workdir: /workspace
@@ -401,31 +413,26 @@ services:
       - "Static timing analysis"
       - "Design rule checking"
       - "Power analysis and optimization"
+      - "ASAP7 7nm predictive PDK"
+      - "SKY130 130nm PDK"
+      - "GF180 180nm PDK"
+      - "IHP-SG13G2 130nm SiGe BiCMOS PDK"
     example: |
-      # OpenROAD TCL workflow example
-      # 1. Read design files
+      # Available platforms: asap7, sky130hd, sky130hs, gf180, ihp-sg13g2, nangate45
+
+      # Run ASAP7 flow with OpenROAD-flow-scripts:
+      cd /OpenROAD-flow-scripts/flow
+      make DESIGN_CONFIG=designs/asap7/minimal/config.mk
+
+      # Or use OpenROAD TCL directly:
       read_lef tech.lef
       read_def design.def
-
-      # 2. Initialize floorplan
       initialize_floorplan -die_area "0 0 100 100" -core_area "10 10 90 90"
-
-      # 3. Run global placement
       global_placement
-
-      # 4. Run detailed placement
       detailed_placement
-
-      # 5. Clock tree synthesis
       clock_tree_synthesis
-
-      # 6. Global routing
       global_route
-
-      # 7. Detailed routing
       detailed_route
-
-      # 8. Write output
       write_def output.def
 
   biopython:
@@ -639,6 +646,152 @@ services:
 
       # Visualize optimization history
       # optuna.visualization.plot_optimization_history(study)
+
+  dwsim:
+    description: "DWSIM - Open-source chemical process simulator for steady-state and dynamic modeling"
+    image: ghcr.io/sciagent-ai/dwsim
+    dockerfile: services/dwsim/Dockerfile
+    license: GPL-3.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Steady-state and dynamic process simulation"
+      - "Thermodynamic property calculations (NRTL, UNIQUAC, Peng-Robinson, SRK, etc.)"
+      - "Unit operations (heaters, coolers, pumps, compressors, valves)"
+      - "Separation processes (distillation, absorption, flash drums)"
+      - "Chemical reactors (conversion, equilibrium, Gibbs, CSTR, PFR)"
+      - "Heat exchangers and energy integration"
+      - "Python automation via pythonnet"
+      - "CAPE-OPEN compliant thermodynamic packages"
+    example: |
+      from init_dwsim import create_flowsheet, calculate_flowsheet, save_flowsheet
+      from init_dwsim import ObjectType, PropertyPackages
+
+      # Create new flowsheet
+      manager, sim = create_flowsheet()
+
+      # Add water compound
+      water = sim.AvailableCompounds["Water"]
+      sim.SelectedCompounds.Add(water.Name, water)
+
+      # Add property package (Steam Tables)
+      stables = PropertyPackages.SteamTablesPropertyPackage()
+      sim.AddPropertyPackage(stables)
+
+      # Create streams and heater
+      inlet = sim.AddObject(ObjectType.MaterialStream, 50, 50, "inlet").GetAsObject()
+      outlet = sim.AddObject(ObjectType.MaterialStream, 200, 50, "outlet").GetAsObject()
+      heater = sim.AddObject(ObjectType.Heater, 125, 50, "heater").GetAsObject()
+
+      # Connect objects
+      sim.ConnectObjects(inlet.GraphicObject, heater.GraphicObject, -1, -1)
+      sim.ConnectObjects(heater.GraphicObject, outlet.GraphicObject, -1, -1)
+
+      # Set inlet conditions
+      inlet.SetTemperature(300.0)  # K
+      inlet.SetPressure(101325.0)  # Pa
+      inlet.SetMassFlow(1.0)  # kg/s
+
+      # Configure heater
+      from DWSIM.UnitOperations import UnitOperations
+      heater.CalcMode = UnitOperations.Heater.CalculationMode.OutletTemperature
+      heater.OutletTemperature = 373.15  # K (100 C)
+
+      # Solve
+      errors = calculate_flowsheet(manager, sim)
+      print(f"Heater duty: {heater.DeltaQ:.2f} kW")
+
+  iic-osic-tools:
+    description: "IIC-OSIC-TOOLS - All-in-one open-source IC design environment with 80+ EDA tools"
+    image: ghcr.io/sciagent-ai/iic-osic-tools
+    dockerfile: iic-osic-tools/Dockerfile
+    license: Apache-2.0
+    runtime: bash
+    invoke: "--skip bash -c {cmd}"
+    workdir: /workspace
+    capabilities:
+      - "SPICE simulation (ngspice)"
+      - "Layout editing and DRC (Magic, KLayout)"
+      - "Schematic capture (xschem)"
+      - "RTL synthesis (Yosys)"
+      - "Digital place and route (OpenROAD)"
+      - "Verilog simulation (Verilator, Icarus)"
+      - "VHDL simulation (GHDL)"
+      - "Verification (cocotb)"
+      - "SKY130 PDK support"
+      - "GF180MCU PDK support"
+      - "IHP-SG13G2 PDK support"
+    example: |
+      # Switch PDK (sky130A, gf180mcuD, ihp-sg13g2)
+      sak-pdk sky130A
+
+      # Run SPICE simulation
+      ngspice -b circuit.spice
+
+      # View/edit layout with Magic
+      magic -T sky130A layout.mag
+
+      # Schematic capture with xschem
+      xschem schematic.sch
+
+      # Run synthesis with Yosys
+      yosys -p "read_verilog design.v; synth_sky130; write_verilog synth.v"
+
+      # Layout viewing with KLayout
+      klayout -e design.gds
+
+  lammps:
+    description: "LAMMPS - Large-scale Atomic/Molecular Massively Parallel Simulator for molecular dynamics"
+    image: ghcr.io/sciagent-ai/lammps
+    dockerfile: services/lammps/Dockerfile
+    license: GPL-2.0
+    runtime: python3
+    workdir: /workspace
+    capabilities:
+      - "Classical molecular dynamics simulations"
+      - "Soft matter simulations (polymers, biomolecules, colloids)"
+      - "Solid-state materials (metals, ceramics, semiconductors)"
+      - "Coarse-grained mesoscale simulations"
+      - "Interatomic potentials (EAM, Tersoff, ReaxFF, ML potentials)"
+      - "Monte Carlo simulations"
+      - "Energy minimization and geometry optimization"
+      - "Non-equilibrium molecular dynamics (NEMD)"
+      - "KIM interatomic models support"
+    example: |
+      from lammps import lammps
+
+      # Initialize LAMMPS
+      lmp = lammps()
+
+      # Create a simple Lennard-Jones simulation
+      lmp.commands_string("""
+          units lj
+          dimension 3
+          atom_style atomic
+          boundary p p p
+
+          lattice fcc 0.8442
+          region box block 0 4 0 4 0 4
+          create_box 1 box
+          create_atoms 1 box
+          mass 1 1.0
+
+          pair_style lj/cut 2.5
+          pair_coeff 1 1 1.0 1.0 2.5
+
+          velocity all create 1.44 87287 loop geom
+
+          fix 1 all nve
+          thermo 100
+          run 1000
+      """)
+
+      # Get thermodynamic info
+      temp = lmp.get_thermo("temp")
+      pe = lmp.get_thermo("pe")
+      print(f"Temperature: {temp:.3f}, Potential Energy: {pe:.3f}")
+
+      lmp.close()
 
   sciml-julia:
     description: "Julia SciML ecosystem - differential equations, optimization, and scientific machine learning"
