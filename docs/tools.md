@@ -170,6 +170,32 @@ search(command="grep", pattern="TODO", path="./src")
 
 ---
 
+### skill
+
+Load specialised workflows for complex multi-phase tasks.
+
+**Parameters:**
+- `name` (required): The name of the skill to load
+
+**Behavior:**
+- Loads a SKILL.md file from `src/sciagent/skills/{name}/`
+- Injects workflow instructions into the agent's context
+- Skills are also auto-triggered based on regex patterns in user input
+
+**Built-in Skills:**
+- `sci-compute` - Scientific simulations (MEEP, GROMACS, RDKit, RCWA, etc.)
+- `build-service` - Build and publish Docker services to GHCR
+- `code-review` - Comprehensive code review with security analysis
+
+**Examples:**
+```
+skill(name="sci-compute")
+skill(name="code-review")
+skill(name="build-service")
+```
+
+---
+
 ### ask_user
 
 Request user input during agent execution for decisions and clarifications.
