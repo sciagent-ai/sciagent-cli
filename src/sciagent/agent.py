@@ -248,6 +248,43 @@ class AgentLoop:
         signal.signal(signal.SIGINT, self._original_sigint)
 
     # =========================================================================
+    # Skill Auto-Injection
+    # =========================================================================
+
+    def _get_matching_skill_content(self, task: str) -> Optional[str]:
+        """
+        Check if task matches any skill triggers.
+        If so, return the skill workflow to inject into context.
+
+        This makes skills automatic rather than opt-in - the agent doesn't
+        need to explicitly call the skill tool to get workflow guidance.
+        """
+        try:
+            from .skills import SkillLoader
+
+            loader = SkillLoader()
+            skill = loader.match_skill(task)
+
+            if skill:
+                return f"""[SYSTEM] Matched skill: {skill.name}
+
+{skill.description}
+
+---
+
+**Follow this workflow:**
+
+{skill.workflow}
+
+---
+"""
+        except Exception:
+            # If skills can't be loaded, continue without injection
+            pass
+
+        return None
+
+    # =========================================================================
     # Context Management
     # =========================================================================
 
@@ -816,6 +853,11 @@ Provide a concise summary (max 500 words):"""
 
         max_iter = max_iterations or self.config.max_iterations
         self._iteration_limit_checked = False  # Track if we've already asked user
+
+        # Auto-inject matching skill workflow before the task
+        skill_content = self._get_matching_skill_content(task)
+        if skill_content:
+            self.state.context.add_user_message(skill_content)
 
         # Add user message
         self.state.context.add_user_message(task)

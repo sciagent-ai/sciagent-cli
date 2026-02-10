@@ -19,13 +19,61 @@ This skill enables the execution of scientific and engineering computations by l
 
 ## Workflow
 
+### Phase 0: Service Selection (BEFORE writing any code)
+
+**CRITICAL**: Each Docker service is an **isolated container** with its own packages. Do NOT assume a package exists—verify it.
+
+1. **Identify required packages** for your task:
+   - "optimize with Bayesian optimization" → needs `optuna` or `scipy`
+   - "RCWA simulation" → needs `S4`
+   - "molecular dynamics" → needs `gromacs` or `lammps`
+
+2. **Read registry and check `packages:` field**:
+   ```
+   file_ops(action="read", path="<registry_path>")
+   ```
+   Find a service whose `packages:` list contains ALL your requirements.
+
+3. **If no single service has all packages → ASK THE USER**:
+
+   Use `ask_user` to present options:
+   ```
+   ask_user(
+     question="Your task requires [X] and [Y], but no single container has both. How should we proceed?",
+     options=[
+       "Sequential: Run optimizer and simulator in separate containers, communicate via files",
+       "Build combined: Create a new container with both packages (takes a few minutes)",
+       "Other"
+     ]
+   )
+   ```
+
+   **Option A: Sequential execution**
+   - Optimizer writes to `_outputs/params.json`
+   - Simulator reads params, writes `_outputs/results.json`
+   - Optimizer reads results, continues
+
+   **Option B: Build combined container**
+   - Use `skill(skill_name="build-service")`
+   - Check `extends:` field for compatible bases
+
+4. **Verify before coding**:
+   ```bash
+   docker run --rm <image> python3 -c "import <package>; print('OK')"
+   ```
+
 ### Phase 1: Discovery
 
-1. **Locate the Service Registry**: The core of this skill is the `registry.yaml` file located in the `services` directory. This file contains the definitions for all available scientific computing services.
+1. **Locate the Service Registry**: The `registry.yaml` file in the `services` directory defines all available services.
 
-2. **Discover Services**: When the user requests a computation, parse the `registry.yaml` file to identify available services. Each service entry includes a description of its capabilities, the runtime (`python3` or `bash`), and an example of its usage.
+2. **Discover Services**: Each service entry includes:
+   - `packages`: Libraries installed (verify your needs here)
+   - `extends`: Base image (for composition decisions)
+   - `capabilities`: What it does
+   - `runtime`: How to run (`python3`, `bash`, `julia`)
+   - `example`: Sample code
 
-3. **Select a Service**: Based on the user's request, select the most appropriate service. The `description` and `capabilities` fields in the `registry.yaml` will help you make this decision.
+3. **Select a Service**: Based on Phase 0 analysis, select the service with all required packages.
 
 ### Phase 2: Research (IMPORTANT - Do this before writing code)
 

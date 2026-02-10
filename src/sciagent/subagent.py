@@ -169,8 +169,16 @@ class SubAgentRegistry:
         self._register_defaults()
 
     def _register_defaults(self):
-        """Register built-in sub-agent types."""
-        from .defaults import FAST_MODEL
+        """Register built-in sub-agent types.
+
+        Model selection:
+        - explore: FAST_MODEL (Haiku) - just reading files, quick searches
+        - debug: CODING_MODEL (Sonnet) - error tracing, log reading
+        - research: CODING_MODEL (Sonnet) - web search, doc reading
+        - plan: SCIENTIFIC_MODEL (Opus) - architecture needs deep reasoning
+        - general: CODING_MODEL (Sonnet) - implementation tasks
+        """
+        from .defaults import FAST_MODEL, CODING_MODEL, SCIENTIFIC_MODEL
 
         # Explore agent - fast, read-only, for quick codebase searches
         # Uses FAST_MODEL (Haiku) for speed and cost efficiency
@@ -197,11 +205,12 @@ Do NOT make changes. Only explore and report.""",
         ))
 
         # Debug agent - capable, read-only, for error investigation
-        # Uses DEFAULT_MODEL for thorough debugging
+        # Uses CODING_MODEL (Sonnet) - good enough for tracing errors
         # Has web access to research error solutions
         self.register(SubAgentConfig(
             name="debug",
             description="Investigate errors, trace root causes, research solutions. Use when fixing errors.",
+            model=CODING_MODEL,
             system_prompt="""You are a debugging agent. Thoroughly investigate errors and find solutions.
 
 ## What You Do
@@ -231,10 +240,11 @@ Do NOT make changes. Only investigate and report.""",
         ))
 
         # Research agent - for web-based research and documentation
-        # Uses DEFAULT_MODEL for thorough research
+        # Uses CODING_MODEL (Sonnet) - sufficient for web search and reading docs
         self.register(SubAgentConfig(
             name="research",
             description="Web research, documentation lookup, literature review. Use for external knowledge.",
+            model=CODING_MODEL,
             system_prompt="""You are a research agent. Find and synthesize information from the web.
 
 ## What You Do
@@ -261,10 +271,11 @@ Always cite sources. Do NOT fabricate information.""",
         ))
 
         # Plan agent - for breaking down complex problems
-        # Inherits model from parent, read-only
+        # Uses SCIENTIFIC_MODEL (Opus) - architecture needs deep reasoning
         self.register(SubAgentConfig(
             name="plan",
             description="Break down complex tasks into steps. Use before implementing anything non-trivial.",
+            model=SCIENTIFIC_MODEL,
             system_prompt="""You are a planning agent. Analyze problems and create actionable plans.
 
 ## Process
@@ -298,9 +309,11 @@ Do NOT execute. Only plan.""",
         ))
 
         # General agent - full capability for complex tasks
+        # Uses CODING_MODEL (Sonnet) - good for implementation tasks
         self.register(SubAgentConfig(
             name="general",
             description="Complex multi-step tasks requiring exploration AND action.",
+            model=CODING_MODEL,
             system_prompt="""You are a capable agent for complex tasks.
 
 Think step by step:
@@ -343,13 +356,11 @@ class SubAgentOrchestrator:
         self,
         tools: Optional[ToolRegistry] = None,
         working_dir: str = ".",
-        max_workers: int = 4,
-        parent_model: Optional[str] = None
+        max_workers: int = 4
     ):
         self.tools = tools or create_default_registry(working_dir)
         self.working_dir = working_dir
         self.max_workers = max_workers
-        self.parent_model = parent_model  # Model to inherit for subagents
         self.registry = SubAgentRegistry()
         
         # Track active sub-agents
@@ -374,19 +385,6 @@ class SubAgentOrchestrator:
             SubAgentResult with output
         """
         config = custom_config or self.registry.get(agent_name)
-
-        # Inherit parent's model for registry configs (not custom configs)
-        if config and not custom_config and self.parent_model:
-            # Create a copy to avoid mutating registry
-            config = SubAgentConfig(
-                name=config.name,
-                description=config.description,
-                system_prompt=config.system_prompt,
-                model=self.parent_model,
-                max_iterations=config.max_iterations,
-                allowed_tools=config.allowed_tools,
-                temperature=config.temperature
-            )
 
         if not config:
             return SubAgentResult(
@@ -536,7 +534,7 @@ def create_agent_with_subagents(
     """
     # Create tools with sub-agent support
     tools = create_default_registry(working_dir)
-    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir, parent_model=model)
+    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir)
     tools.register(TaskTool(orchestrator))
     
     config = AgentConfig(
@@ -742,7 +740,7 @@ def create_agent_with_orchestration(
     """
     # Create tools with orchestration support
     tools = create_default_registry(working_dir)
-    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir, parent_model=model)
+    orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir)
 
     # Register both task and workflow tools
     tools.register(TaskTool(orchestrator))

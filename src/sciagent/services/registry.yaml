@@ -17,6 +17,13 @@
 # Special cases: If 'invoke' field is present, use it instead of runtime.
 #   Example: invoke: "--skip bash -c {cmd}" means run:
 #   docker run --rm -v <local_path>:/workspace <image> --skip bash -c "<commands>"
+#
+# Package fields (for multi-service workflows):
+#   packages: List of key importable packages in the container
+#   extends: The base sciagent service this was built on (null if external base)
+#
+# Use 'packages' to determine if a container has the libraries you need.
+# Use 'extends' to find compatible bases for building combined containers.
 
 defaults:
   organization: sciagent-ai
@@ -31,6 +38,13 @@ services:
     license: MIT
     runtime: python3
     workdir: /workspace
+    packages:
+      - numpy
+      - scipy
+      - pandas
+      - matplotlib
+      - pint
+    extends: null
     capabilities:
       - "Numerical computing (numpy)"
       - "Scientific algorithms (scipy)"
@@ -58,6 +72,12 @@ services:
     license: MIT
     runtime: python3
     workdir: /workspace
+    packages:
+      - rdkit
+      - numpy
+      - pandas
+      - matplotlib
+    extends: null
     capabilities:
       - "Molecular structure parsing and manipulation (SMILES, SDF, MOL)"
       - "Molecular fingerprint generation (Morgan, MACCS, etc.)"
@@ -130,6 +150,14 @@ services:
     license: MIT
     runtime: python3
     workdir: /workspace
+    packages:
+      - cvxpy
+      - numpy
+      - scipy
+      - osqp
+      - ecos
+      - scs
+    extends: null
     capabilities:
       - "Convex optimization problem modeling"
       - "Linear and quadratic programming"
@@ -171,6 +199,11 @@ services:
     license: GPL-2.0
     runtime: python3
     workdir: /workspace
+    packages:
+      - S4
+      - numpy
+      - matplotlib
+    extends: null
     capabilities:
       - "Photonic crystal simulations"
       - "Diffraction grating analysis"
@@ -195,6 +228,12 @@ services:
     license: GPL-2.0
     runtime: python3
     workdir: /workspace
+    packages:
+      - meep
+      - numpy
+      - matplotlib
+      - h5py
+    extends: null
     capabilities:
       - "Time-domain electromagnetic simulations"
       - "Waveguide design and analysis"
@@ -341,6 +380,11 @@ services:
     license: LGPL-2.1
     runtime: bash
     workdir: /workspace
+    packages:
+      - gromacs-cli
+      - MDAnalysis
+      - numpy
+    extends: null
     capabilities:
       - "Molecular dynamics simulations"
       - "Energy minimization"
@@ -621,6 +665,13 @@ services:
     license: MIT
     runtime: python3
     workdir: /workspace
+    packages:
+      - optuna
+      - numpy
+      - scipy
+      - scikit-learn
+      - plotly
+    extends: null
     capabilities:
       - "Automatic hyperparameter optimization"
       - "Define-by-run API for search spaces"

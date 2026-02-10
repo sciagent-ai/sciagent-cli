@@ -21,6 +21,18 @@ sciagent --model anthropic/claude-sonnet-4-20250514 "Fix the bug in main.py"
 
 Supported providers (via [litellm](https://github.com/BerriAI/litellm)): OpenAI, Anthropic, Google, and custom endpoints.
 
+### Model Tiers
+
+SciAgent uses three model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
+
+| Tier | Variable | Purpose |
+|------|----------|---------|
+| Scientific | `SCIENTIFIC_MODEL` | Main agent, planning (best quality) |
+| Coding | `CODING_MODEL` | Debug, research, general sub-agents |
+| Fast | `FAST_MODEL` | Explore sub-agent (speed/cost) |
+
+The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). Sub-agents use tier-appropriate models automatically.
+
 ### Model Parameters
 
 ```bash
@@ -67,16 +79,17 @@ Enable specialized agents for research, review, and testing:
 sciagent --subagents "Research this codebase and write tests"
 ```
 
-Built-in sub-agents:
+Built-in sub-agents (each uses a cost-optimised model tier):
 
-| Name | Purpose |
-|------|---------|
-| `researcher` | Web and code research |
-| `reviewer` | Code review |
-| `test_writer` | Generate tests |
-| `general` | General tasks |
+| Name | Model Tier | Purpose |
+|------|------------|---------|
+| `explore` | Fast | Quick codebase searches and file lookups |
+| `debug` | Coding | Error investigation with web research |
+| `research` | Coding | Web research, documentation lookup |
+| `plan` | Scientific | Break down complex problems |
+| `general` | Coding | Complex multi-step tasks |
 
-Sub-agents inherit the parent's model. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
+Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
 
 ## Scientific Services
 

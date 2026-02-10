@@ -16,7 +16,7 @@ The debug agent will:
 
 | Agent | Model | Use For |
 |-------|-------|---------|
-| explore | fast (Haiku) | Quick file searches, codebase navigation |
+| explore | fast | Quick file searches, codebase navigation |
 | debug | inherit | Error investigation + web research for solutions |
 | research | inherit | Documentation, API lookup, scientific methods |
 | plan | inherit | Break down complex tasks before implementing |

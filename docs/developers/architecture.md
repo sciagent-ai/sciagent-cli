@@ -106,37 +106,44 @@ Built-in skills:
 
 ## Sub-agents
 
-Sub-agents are isolated agents with their own context and tool set. Defined by `SubAgentConfig`:
+Sub-agents are isolated agents with their own context and tool set. Each uses a cost-optimised model tier defined in `src/sciagent/defaults.py`:
+
+- **Scientific (SCIENTIFIC_MODEL)**: Best quality for scientific code and deep reasoning
+- **Coding (CODING_MODEL)**: Good for implementation, debugging, research
+- **Fast (FAST_MODEL)**: Quick/cheap for exploration and extraction
+
+Defined by `SubAgentConfig`:
 
 ```python
 SubAgentConfig(
-    name="researcher",
-    description="Research specialist",
+    name="explore",
+    description="Fast codebase exploration",
     system_prompt="...",
-    model=None,  # Inherits parent model
-    max_iterations=20,
-    allowed_tools=["file_ops", "search", "web"]
+    model=FAST_MODEL,  # Uses tiered model
+    max_iterations=15,
+    allowed_tools=["file_ops", "search", "bash"]
 )
 ```
 
 Built-in sub-agents:
-| Name | Purpose | Tools |
-|------|---------|-------|
-| researcher | Code/web research | file_ops, search, web, bash |
-| reviewer | Code review | file_ops, search, bash |
-| test_writer | Generate tests | file_ops, search, bash |
-| general | General tasks | all |
+| Name | Model Tier | Purpose | Tools |
+|------|------------|---------|-------|
+| explore | Fast | Quick codebase searches | file_ops, search, bash |
+| debug | Coding | Error investigation | file_ops, search, bash, web, skill |
+| research | Coding | Web/doc research | web, file_ops, search |
+| plan | Scientific | Break down problems | file_ops, search, bash, web, skill, todo |
+| general | Coding | Multi-step tasks | all |
 
 ### Orchestration
 
 `SubAgentOrchestrator` manages spawning and parallel execution:
 
 ```python
-orch = SubAgentOrchestrator(tools=registry, parent_model="anthropic/claude-sonnet-4-20250514")
-result = orch.spawn("researcher", "Find API endpoints")
+orch = SubAgentOrchestrator(tools=registry, working_dir=".")
+result = orch.spawn("explore", "Find API endpoints")
 results = orch.spawn_parallel([
-    {"agent_name": "researcher", "task": "..."},
-    {"agent_name": "test_writer", "task": "..."}
+    {"agent_name": "research", "task": "Find documentation for S4 library"},
+    {"agent_name": "debug", "task": "Investigate build error in logs"}
 ])
 ```
 

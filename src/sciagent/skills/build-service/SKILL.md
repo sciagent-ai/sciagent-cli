@@ -116,10 +116,42 @@ Execute these steps in order, using the TodoWrite tool to track progress:
    docker rmi ghcr.io/sciagent-ai/{package}:latest
    ```
 
-## 6. Report Results
+## 6. Capture Package Manifest
+
+After successful build and verification, record installed packages in the registry.
+
+**For Python runtimes:**
+```bash
+docker run --rm ghcr.io/sciagent-ai/{package}:latest pip list --format=freeze | cut -d= -f1
+```
+
+**For Julia runtimes:**
+```bash
+docker run --rm ghcr.io/sciagent-ai/{package}:latest julia -e 'using Pkg; for (k,v) in Pkg.dependencies(); println(k); end'
+```
+
+**Update registry.yaml** with the key packages (not every transitive dependency, just the main ones):
+
+```yaml
+{package-name}:
+  # ... existing fields ...
+  packages:
+    - main-package
+    - numpy
+    - scipy
+  extends: scipy-base  # if Dockerfile uses FROM ghcr.io/sciagent-ai/scipy-base
+```
+
+- `packages`: List of key importable packages in the container
+- `extends`: The base sciagent service this was built on (null if external base like python:slim)
+
+This enables the agent to determine which container has the libraries needed for a task.
+
+## 7. Report Results
 
 Summarize:
 - Image location: `ghcr.io/sciagent-ai/{package}:latest`
 - Files created
+- Packages captured
 - Verification status
 - Any issues encountered

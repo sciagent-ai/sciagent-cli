@@ -269,8 +269,7 @@ def main():
     # Always create orchestrator and register TaskTool (subagents always available)
     orchestrator = SubAgentOrchestrator(
         tools=tools,
-        working_dir=str(project_dir),
-        parent_model=args.model
+        working_dir=str(project_dir)
     )
     tools.register(TaskTool(orchestrator))
 

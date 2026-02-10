@@ -10,7 +10,7 @@ SciAgent is a modular agent framework for software engineering and scientific co
 - **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria.
 - **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
 - **Multi-model support** – Choose between Anthropic Claude, OpenAI GPT-4, Google Gemini or local models via LiteLLM. Caching reduces cost and latency.
-- **Sub-agents** – Spawn specialised agents for research, code review, test writing and other roles to keep contexts focused. Sub-agents automatically inherit the parent's model.
+- **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning and general tasks. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
 
 ## Quick start
 
@@ -149,6 +149,23 @@ SciAgent uses a skill-based workflow system for complex, multi-phase tasks. Skil
 | `code-review` | Comprehensive code review with security analysis |
 
 The `sci-compute` skill implements a five-phase workflow: Discovery → Research → Code Generation → Execution → Debug. This ensures correct API usage by researching official documentation before writing simulation code.
+
+## Sub-agents
+
+SciAgent uses a tiered model system for cost-effective sub-agent delegation:
+
+| Agent | Model Tier | Purpose |
+|-------|------------|---------|
+| `explore` | Fast | Quick codebase searches and file lookups |
+| `debug` | Coding | Error investigation with web research |
+| `research` | Coding | Web research, documentation, literature review |
+| `plan` | Scientific | Break down complex problems (needs deep reasoning) |
+| `general` | Coding | Complex multi-step implementation tasks |
+
+Model tiers are defined in `src/sciagent/defaults.py`:
+- **Scientific**: Best quality for scientific code and planning
+- **Coding**: Good for implementation, debugging, research
+- **Fast**: Quick/cheap for exploration and extraction
 
 ## Architecture
 
