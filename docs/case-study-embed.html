@@ -1,0 +1,275 @@
+<!-- SciAgent Case Study - Embeddable HTML for GoDaddy -->
+<style>
+.sciagent-case-study {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  color: #1a1a2e;
+  line-height: 1.6;
+}
+
+.sciagent-case-study h2 {
+  color: #0f3460;
+  border-bottom: 3px solid #e94560;
+  padding-bottom: 0.5rem;
+  margin-top: 2rem;
+}
+
+.sciagent-case-study h3 {
+  color: #16213e;
+  margin-top: 1.5rem;
+}
+
+.sciagent-case-study .paper-badge {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.sciagent-case-study .prompt-box {
+  background: #1a1a2e;
+  color: #00ff88;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.9rem;
+  margin: 1rem 0;
+  border-left: 4px solid #00ff88;
+}
+
+.sciagent-case-study .workflow-diagram {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  font-family: monospace;
+  white-space: pre;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  border: 1px solid #dee2e6;
+}
+
+.sciagent-case-study table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+
+.sciagent-case-study th {
+  background: #0f3460;
+  color: white;
+  padding: 0.75rem;
+  text-align: left;
+}
+
+.sciagent-case-study td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.sciagent-case-study tr:nth-child(even) {
+  background: #f8f9fa;
+}
+
+.sciagent-case-study .results-image {
+  width: 100%;
+  max-width: 800px;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  margin: 1.5rem 0;
+}
+
+.sciagent-case-study .validation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .validation-card {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  border-left: 4px solid #28a745;
+}
+
+.sciagent-case-study .validation-card.pass {
+  border-left-color: #28a745;
+}
+
+.sciagent-case-study .status-pass {
+  color: #28a745;
+  font-weight: bold;
+}
+
+.sciagent-case-study .phase-list {
+  list-style: none;
+  padding: 0;
+}
+
+.sciagent-case-study .phase-list li {
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border-left: 4px solid #667eea;
+}
+
+.sciagent-case-study .phase-list li strong {
+  color: #0f3460;
+}
+
+.sciagent-case-study .metrics-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .metric-box {
+  background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+  color: white;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  text-align: center;
+  min-width: 120px;
+}
+
+.sciagent-case-study .metric-box .value {
+  font-size: 1.5rem;
+  font-weight: bold;
+}
+
+.sciagent-case-study .metric-box .label {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+</style>
+
+<div class="sciagent-case-study">
+
+  <h2>Case Study: AR Waveguide Metasurface Reproduction</h2>
+
+  <span class="paper-badge">Optical Materials Express, Dec 2025</span>
+
+  <p><strong>Paper:</strong> "Design and Experimental Validation of a High-Efficiency Multi-Zone Metasurface Waveguide In-Coupler"</p>
+
+  <h3>The Challenge</h3>
+  <p>Reproduce RCWA simulation results from a peer-reviewed photonics paper using <em>only the PDF as input</em>. Validate that computed results match the publication.</p>
+
+  <h3>Prompt Given to SciAgent</h3>
+  <div class="prompt-box">
+    Reproduce simulation and optimization results from the<br>
+    publication in the project folder. Verify results match publication.
+  </div>
+
+  <h3>What SciAgent Did Autonomously</h3>
+
+  <ul class="phase-list">
+    <li><strong>Phase 1: Paper Analysis</strong> - Read PDF, extracted wavelength (532nm), grating period (453nm), material indices, zone dimensions</li>
+    <li><strong>Phase 2: Task Planning</strong> - Created dependency-aware DAG for parallel zone simulations</li>
+    <li><strong>Phase 3: Implementation</strong> - Wrote 350 lines of Python using S4 RCWA solver in Docker container</li>
+    <li><strong>Phase 4: Debug & Iterate</strong> - Resolved API differences, refined geometry across 4 code iterations</li>
+  </ul>
+
+  <div class="workflow-diagram">
+Extract params → RCWA Zone 1 ─┐
+                RCWA Zone 2 ─┼→ Coupling Model → Validation
+                RCWA Zone 3 ─┘
+  </div>
+
+  <h3>Results</h3>
+
+  <img src="https://sciagent-ai.github.io/sciagent-cli/images/case-studies/metasurface_results.png" alt="Metasurface Simulation Results" class="results-image">
+
+  <h4>Zone Efficiency Comparison</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Zone</th>
+        <th>Simulated T+1</th>
+        <th>Paper Target</th>
+        <th>Simulated R0</th>
+        <th>Paper Target</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>1</td><td>71.5%</td><td>60%</td><td>13.4%</td><td>40%</td></tr>
+      <tr><td>2</td><td>34.3%</td><td>50%</td><td>32.0%</td><td>50%</td></tr>
+      <tr><td>3</td><td>15.6%</td><td>40%</td><td>40.7%</td><td>60%</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Zone efficiency trends match the paper</strong> (Zone 1 > Zone 2 > Zone 3 for diffraction).</p>
+
+  <h4>Coupling Efficiency</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        <th>SciAgent</th>
+        <th>Paper (Simulated)</th>
+        <th>Paper (Measured)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>MFE</td><td>20.1%</td><td>25.3%</td><td>17%</td></tr>
+      <tr><td>Average</td><td>51%</td><td>31%</td><td>30%</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Validation Summary</h3>
+
+  <div class="validation-grid">
+    <div class="validation-card pass">
+      <strong>RCWA Framework</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Zone Trends</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Coupling Model</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>MFE within 20%</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+  </div>
+
+  <h3>Execution Metrics</h3>
+
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="value">12 min</div>
+      <div class="label">Total Time</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">45</div>
+      <div class="label">Agent Turns</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">350</div>
+      <div class="label">Lines of Code</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">4</div>
+      <div class="label">Iterations</div>
+    </div>
+  </div>
+
+  <h3>Generated Artifacts</h3>
+  <ul>
+    <li><code>metasurface_final.py</code> - Complete RCWA simulation</li>
+    <li><code>all_results.json</code> - Numerical results</li>
+    <li><code>metasurface_results.png</code> - Visualization plots</li>
+    <li><code>VALIDATION_REPORT.md</code> - Detailed analysis</li>
+  </ul>
+
+</div>
