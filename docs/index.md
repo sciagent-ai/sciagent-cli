@@ -16,6 +16,7 @@ This site is organised into concise guides to help you get started and explore d
 | Page | Purpose |
 |---|---|
 | **[Getting Started](getting-started.md)** | Install SciAgent, run your first task and learn the basic command-line flags. |
+| **[Configuration](configuration.md)** | Customise the model, system prompt, caching, tool registry and sub-agents via the CLI or Python APIs. |
 
 ## Join the community
 

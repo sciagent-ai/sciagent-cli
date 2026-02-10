@@ -74,6 +74,7 @@ Common options (defaults from `AgentConfig`):
 |--------|---------|---------|
 | `--project-dir PATH` | Directory for reading/writing files | Required |
 | `--model NAME` | LLM to use (e.g. `openai/gpt-4o`) | `claude-opus-4-5` |
+| Fast model | Used for content processing (web extraction, summarization). See `defaults.py` | `claude-sonnet-4` |
 | `--interactive` | Multi-turn conversation mode | Off |
 | `--max-iterations N` | Max agent loop cycles | 120 |
 | `--temperature T` | LLM randomness (0 = deterministic) | 0.0 |
