@@ -11,12 +11,20 @@ SciAgent uses tools to interact with files, run commands, and search the web. Th
 ## File Operations
 
 ### view
-Read file contents or list directory entries.
+Read file contents, images, or list directory entries.
 
 ```
 view(path="src/main.py")
 view(path="src/main.py", start_line=10, end_line=50)
 view(path="./src")  # Lists directory
+```
+
+**Image support**: Read and analyse images (PNG, JPG, GIF, WebP). The image is automatically passed to the LLM for visual analysis:
+
+```
+view(path="./plots/results.png")      # Analyse a plot
+view(path="./data/microscopy.jpg")    # Examine microscopy
+view(path="./diagrams/architecture.png")  # Review diagrams
 ```
 
 ### write_file

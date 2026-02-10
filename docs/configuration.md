@@ -15,23 +15,49 @@ Configure SciAgent via command-line flags or Python.
 SciAgent uses Claude Opus as the default. Change it with `--model`:
 
 ```bash
-sciagent --model openai/gpt-4o "Summarize README.md"
-sciagent --model anthropic/claude-sonnet-4-20250514 "Fix the bug in main.py"
+sciagent --model openai/gpt-4.1 "Summarize README.md"
+sciagent --model gemini/gemini-3-pro-preview "Analyze this diagram"
+sciagent --model deepseek/deepseek-reasoner "Solve this physics problem"
 ```
 
 Supported providers (via [litellm](https://github.com/BerriAI/litellm)): OpenAI, Anthropic, Google, and custom endpoints.
 
 ### Model Tiers
 
-SciAgent uses three model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
+SciAgent uses four model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
 
 | Tier | Variable | Purpose |
 |------|----------|---------|
 | Scientific | `SCIENTIFIC_MODEL` | Main agent, planning (best quality) |
+| Vision | `VISION_MODEL` | Image and multimodal analysis |
 | Coding | `CODING_MODEL` | Debug, research, general sub-agents |
 | Fast | `FAST_MODEL` | Explore sub-agent (speed/cost) |
 
-The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). Sub-agents use tier-appropriate models automatically.
+The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The vision tier uses the same model as scientific for high-quality image analysis. Sub-agents use tier-appropriate models automatically.
+
+### Alternative Models by Provider
+
+SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriAI/litellm). Use `--model provider/model-name` to switch.
+
+> **Note**: Only Anthropic models are tested. Alternatives below are based on comparable capabilities but have NOT been validated. Your mileage may vary.
+
+| Tier | Anthropic (tested) | OpenAI | Google | xAI |
+|------|-------------------|--------|--------|-----|
+| **Scientific** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
+| **Vision** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
+| **Coding** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Fast** | `claude-3-haiku-20240307` | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
+
+**Open-Source alternatives** (via Together AI, Groq, or self-hosted):
+
+| Tier | Models |
+|------|--------|
+| Scientific | `deepseek/deepseek-reasoner`, `together_ai/Qwen/Qwen3-235B-A22B-Instruct` |
+| Vision | `together_ai/Qwen/Qwen2.5-VL-72B-Instruct`, `together_ai/meta-llama/Llama-3.2-90B-Vision-Instruct` |
+| Coding | `deepseek/deepseek-chat`, `together_ai/meta-llama/Llama-3.3-70B-Instruct` |
+| Fast | `groq/llama-3.3-70b-versatile`, `together_ai/Qwen/Qwen2.5-7B-Instruct` |
+
+See `src/sciagent/defaults.py` for the full list with notes.
 
 ### Model Parameters
 
@@ -90,6 +116,20 @@ Built-in sub-agents (each uses a cost-optimised model tier):
 | `general` | Coding | Complex multi-step tasks |
 
 Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
+
+## Image Analysis
+
+SciAgent can analyse images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.
+
+```bash
+# Analyse a scientific plot
+sciagent "Interpret the results in ./output/graph.png"
+
+# Review simulation output
+sciagent "What does the velocity field in ./cfd/velocity.png show?"
+```
+
+The agent reads images via the `file_ops` tool and passes them to the LLM for visual analysis. This uses the `VISION_MODEL` tier.
 
 ## Scientific Services
 

@@ -682,6 +682,7 @@ Provide a concise summary (max 500 words):"""
         """
         results = []
         deferred_spiral_checks = []  # Defer spiral warnings until after all tool_results
+        pending_images = []  # Collect images to inject as multimodal message
 
         for tc in tool_calls:
             try:
@@ -695,6 +696,25 @@ Provide a concise summary (max 500 words):"""
                 )
                 self.display.tool_end(tc.name, success=False, error=str(e))
 
+            # Check if this is an image result from file_ops
+            is_image_result = (
+                result.success and
+                isinstance(result.output, dict) and
+                result.output.get("type") == "image"
+            )
+
+            if is_image_result:
+                # Collect image for multimodal message
+                pending_images.append({
+                    "media_type": result.output["media_type"],
+                    "data": result.output["data"],
+                    "file_path": result.output.get("file_path", "unknown")
+                })
+                # Use display text for the tool result (don't send base64 as text)
+                tool_result_text = result.output.get("display_text", "[Image loaded]")
+            else:
+                tool_result_text = result.to_message()
+
             results.append({
                 "tool_call_id": tc.id,
                 "name": tc.name,
@@ -706,19 +726,28 @@ Provide a concise summary (max 500 words):"""
             self.state.context.add_tool_result(
                 tool_call_id=tc.id,
                 tool_name=tc.name,
-                result=result.to_message()
+                result=tool_result_text
             )
 
             # Collect errors for deferred spiral checking
             if result.error:
                 deferred_spiral_checks.append(result.error)
-            elif result.output and 'error' in str(result.output).lower():
+            elif result.output and not is_image_result and 'error' in str(result.output).lower():
                 deferred_spiral_checks.append(str(result.output))
 
         # Now that all tool_results are added, check for spirals
         # This adds user messages which must come AFTER all tool_results
         for error in deferred_spiral_checks:
             self._check_spiral(error)
+
+        # If images were loaded, inject them as a multimodal user message
+        # This allows the LLM to actually "see" the images
+        if pending_images:
+            image_paths = [img["file_path"] for img in pending_images]
+            self.state.context.add_multimodal_user_message(
+                text=f"[System: {len(pending_images)} image(s) loaded: {', '.join(image_paths)}. Please analyze the image(s) above.]",
+                images=pending_images
+            )
 
         return results
     

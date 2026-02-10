@@ -5,11 +5,12 @@ SciAgent is a modular agent framework for software engineering and scientific co
 ## Features
 
 - **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like scientific computing, code review, and service building. Skills auto-trigger based on user input patterns.
+- **Image & multimodal analysis** – Analyse scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
 - **Service isolation** – Run all scientific computations inside isolated Docker containers for reproducibility, security, and portability.
 - **Task DAG orchestration** – Define a graph of tasks with dependencies (`depends_on`), batch parallelisable steps and pass data between tasks via `result_key`.
 - **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria.
 - **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
-- **Multi-model support** – Choose between Anthropic Claude, OpenAI GPT-4, Google Gemini or local models via LiteLLM. Caching reduces cost and latency.
+- **Multi-model support** – Choose between Anthropic Claude, OpenAI (GPT-4.1, o3, o4-mini), Google Gemini 3, xAI Grok 4, DeepSeek, or open-source models via LiteLLM. Caching reduces cost and latency.
 - **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning and general tasks. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
 
 ## Quick start
@@ -52,11 +53,32 @@ sciagent --interactive
 Select a different model or enable sub-agents when needed:
 
 ```bash
-sciagent -m openai/gpt-4o "Analyse this codebase"
+sciagent -m openai/gpt-4.1 "Analyse this codebase"
+sciagent -m gemini/gemini-3-pro-preview "Explain this diagram"
 sciagent --subagents "Research and refactor this module"
 ```
 
 For more details on CLI flags see the [Configuration](docs/configuration.md) guide or run `sciagent --help`.
+
+## Image analysis examples
+
+SciAgent can analyse images including scientific plots, microscopy, diagrams, and data visualisations:
+
+```bash
+# Analyse a scientific plot
+sciagent "Read and interpret the graph at ./results/figure1.png"
+
+# Examine microscopy images
+sciagent "Analyse the cell structure in ./data/microscopy.jpg"
+
+# Interpret simulation output
+sciagent "What does the CFD velocity field in ./output/velocity.png show?"
+
+# Review data visualisation
+sciagent "Explain the trends in ./plots/timeseries.png and suggest improvements"
+```
+
+Supported formats: PNG, JPG/JPEG, GIF, WebP.
 
 ## Scientific computing examples
 
@@ -164,6 +186,7 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 
 Model tiers are defined in `src/sciagent/defaults.py`:
 - **Scientific**: Best quality for scientific code and planning
+- **Vision**: Image and multimodal analysis (uses Scientific tier)
 - **Coding**: Good for implementation, debugging, research
 - **Fast**: Quick/cheap for exploration and extraction
 

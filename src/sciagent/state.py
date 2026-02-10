@@ -5,7 +5,7 @@ import os
 import json
 import hashlib
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from enum import Enum
@@ -144,8 +144,24 @@ class ContextWindow:
     messages: List[Message] = field(default_factory=list)
     max_messages: int = 100  # Before compression
     
-    def add_user_message(self, content: str) -> Message:
+    def add_user_message(self, content: Union[str, List[Dict[str, Any]]]) -> Message:
+        """Add a user message. Content can be string or multimodal content blocks."""
         msg = Message(role="user", content=content)
+        self.messages.append(msg)
+        return msg
+
+    def add_multimodal_user_message(self, text: str, images: List[Dict[str, Any]]) -> Message:
+        """
+        Add a user message with text and images.
+
+        Args:
+            text: Text content
+            images: List of image dicts with keys: media_type, data (base64)
+
+        Returns:
+            Message with multimodal content blocks
+        """
+        msg = Message.create_multimodal(role="user", text=text, images=images)
         self.messages.append(msg)
         return msg
     
@@ -335,10 +351,26 @@ class ContextWindow:
         return issues
 
     def token_estimate(self) -> int:
-        """Rough token estimate (4 chars ≈ 1 token)"""
+        """
+        Rough token estimate (4 chars ≈ 1 token).
+
+        For multimodal content with images, estimates based on image size
+        (images are roughly 85 tokens per tile, ~765 tokens for small images).
+        """
         total_chars = len(self.system_prompt)
         for msg in self.messages:
-            total_chars += len(msg.content or "")
+            content = msg.content
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                # Multimodal content blocks
+                for block in content:
+                    if isinstance(block, dict):
+                        if block.get("type") == "text":
+                            total_chars += len(block.get("text", ""))
+                        elif block.get("type") == "image":
+                            # Estimate ~1000 tokens per image (conservative)
+                            total_chars += 4000  # 4 chars per token * 1000 tokens
         return total_chars // 4
 
 

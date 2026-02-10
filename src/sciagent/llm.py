@@ -31,7 +31,7 @@ def _suppress_pydantic_serializer_warnings():
         pass
 
 import json
-from typing import List, Dict, Any, Optional, Generator
+from typing import List, Dict, Any, Optional, Generator, Union
 from dataclasses import dataclass, field
 
 from .defaults import DEFAULT_MODEL
@@ -61,13 +61,24 @@ except ImportError:
 
 @dataclass
 class Message:
-    """Represents a message in the conversation"""
+    """
+    Represents a message in the conversation.
+
+    Supports multimodal content - can be a string or a list of content blocks
+    for images and text combined.
+
+    Content block format for images:
+    [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "..."}},
+        {"type": "text", "text": "Analyze this image..."}
+    ]
+    """
     role: str  # "system", "user", "assistant", "tool"
-    content: str
+    content: Union[str, List[Dict[str, Any]]]  # Text or multimodal content blocks
     tool_calls: Optional[List[Dict]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None  # For tool messages
-    
+
     def to_dict(self) -> Dict:
         msg = {"role": self.role, "content": self.content}
         if self.tool_calls:
@@ -77,7 +88,7 @@ class Message:
         if self.name:
             msg["name"] = self.name
         return msg
-    
+
     @classmethod
     def from_dict(cls, d: Dict) -> "Message":
         return cls(
@@ -87,6 +98,52 @@ class Message:
             tool_call_id=d.get("tool_call_id"),
             name=d.get("name")
         )
+
+    @property
+    def has_images(self) -> bool:
+        """Check if this message contains image content."""
+        if isinstance(self.content, list):
+            return any(
+                block.get("type") == "image"
+                for block in self.content
+                if isinstance(block, dict)
+            )
+        return False
+
+    @staticmethod
+    def create_multimodal(role: str, text: str, images: List[Dict[str, Any]]) -> "Message":
+        """
+        Create a multimodal message with text and images.
+
+        Args:
+            role: Message role (user, assistant, etc.)
+            text: Text content
+            images: List of image dicts with keys: media_type, data (base64)
+
+        Returns:
+            Message with multimodal content blocks
+        """
+        content_blocks = []
+
+        # Add images first
+        for img in images:
+            content_blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": img["media_type"],
+                    "data": img["data"]
+                }
+            })
+
+        # Add text
+        if text:
+            content_blocks.append({
+                "type": "text",
+                "text": text
+            })
+
+        return Message(role=role, content=content_blocks)
 
 
 @dataclass

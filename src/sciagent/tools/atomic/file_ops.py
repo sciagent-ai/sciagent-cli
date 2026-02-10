@@ -2,15 +2,16 @@
 File operations tool - unified read/write/edit/list.
 
 This tool IS the memory system. The filesystem persists data.
-Supports text files and PDFs (with pypdf).
+Supports text files, PDFs (with pypdf), and images (PNG, JPG, GIF, WebP).
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 from dataclasses import dataclass
 
 # Optional: PDF extraction support
@@ -38,7 +39,16 @@ class FileOpsTool:
     """Unified file operations - read, write, edit, list."""
 
     name = "file_ops"
-    description = "File operations: read, write, edit, list. Read supports text files, PDFs, and common code formats."
+    description = "File operations: read, write, edit, list. Read supports text files, PDFs, images (PNG, JPG, GIF, WebP), and common code formats."
+
+    # Supported image extensions and their media types
+    IMAGE_EXTENSIONS = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+    }
 
     parameters = {
         "type": "object",
@@ -127,7 +137,7 @@ class FileOpsTool:
             return ToolResult(success=False, output=None, error=f"Unknown command: {command}")
 
     def _read(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
-        """Read file contents. Supports text files and PDFs."""
+        """Read file contents. Supports text files, PDFs, and images."""
         try:
             p = self._resolve_path(path)
 
@@ -139,6 +149,10 @@ class FileOpsTool:
 
             if p.is_dir():
                 return self._list(path, recursive=False, show_hidden=False)
+
+            # Handle image files - return base64 encoded data for multimodal LLM
+            if p.suffix.lower() in self.IMAGE_EXTENSIONS:
+                return self._read_image(p)
 
             # Handle PDF files specially
             if p.suffix.lower() == '.pdf':
@@ -220,6 +234,40 @@ class FileOpsTool:
 
         except Exception as e:
             return ToolResult(success=False, output=None, error=f"Failed to read PDF: {str(e)}")
+
+    def _read_image(self, path: Path) -> ToolResult:
+        """
+        Read image file and return base64-encoded data for multimodal LLM.
+
+        Returns a structured output that can be used to create multimodal messages.
+        The output contains: type, media_type, data (base64), and file info.
+        """
+        try:
+            # Get media type from extension
+            media_type = self.IMAGE_EXTENSIONS.get(path.suffix.lower(), "image/png")
+
+            # Read and encode image
+            image_bytes = path.read_bytes()
+            b64_data = base64.b64encode(image_bytes).decode("utf-8")
+
+            # Get file size for display
+            size_kb = len(image_bytes) / 1024
+
+            return ToolResult(
+                success=True,
+                output={
+                    "type": "image",
+                    "media_type": media_type,
+                    "data": b64_data,
+                    "file_path": str(path),
+                    "size_kb": round(size_kb, 2),
+                    "display_text": f"[Image: {path.name} ({size_kb:.1f} KB, {media_type})]"
+                },
+                error=None
+            )
+
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=f"Failed to read image: {str(e)}")
 
     def _write(self, path: str, content: str) -> ToolResult:
         """Write content to file."""
