@@ -32,9 +32,31 @@ NEVER mark a task complete without verification. This is the #1 cause of failed 
    - If blocked -> note what's missing, ask user
 ```
 
-### Simulation Results
+### Simulation Results - PHYSICAL REASONING REQUIRED
 - Code that runs without errors != correct results
 - Validate outputs against expected ranges or reference values
+- **Simplified code that "works" but ignores physics = FAILURE**
+
+#### Scientific Validation Checklist
+Before marking a simulation task complete:
+1. **Physical units**: Are units consistent? (nm vs μm, Hz vs rad/s)
+2. **Sanity checks**: Do results make physical sense?
+   - Efficiencies > 100% = wrong
+   - Negative energies where impossible = wrong
+   - Phases outside expected range = wrong
+3. **Boundary conditions**: Are they physical?
+4. **Geometry**: Does the model match the physical system?
+   - Don't simplify geometry just to avoid errors
+   - If S4/MEEP throws errors, FIX THE SETUP, don't remove features
+5. **Convergence**: Have numerical parameters been validated?
+
+#### Anti-Pattern: Avoiding Physics
+```
+X Error in complex geometry → simplify to trivial case → "runs without errors" → complete
+✓ Error in complex geometry → debug root cause → fix API usage → validate physical results
+```
+
+**If you find yourself simplifying the physics to avoid errors, STOP and debug instead.**
 
 ### Common Verification Commands
 

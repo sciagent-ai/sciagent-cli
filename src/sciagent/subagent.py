@@ -114,7 +114,7 @@ class SubAgent:
             temperature=config.temperature,
             max_iterations=config.max_iterations,
             working_dir=working_dir,
-            verbose=False,
+            verbose=False,  # Keep output clean
             auto_save=False
         )
         
@@ -156,69 +156,161 @@ class SubAgent:
 
 
 class SubAgentRegistry:
-    """Registry of available sub-agent configurations"""
-    
+    """Registry of available sub-agent configurations.
+
+    Simplified to 3 core agents following Claude Code's pattern:
+    - explore: Fast, read-only - for codebase/log exploration
+    - plan: Inherit model, read-only - for breaking down problems
+    - general: Inherit model, all tools - for complex multi-step tasks
+    """
+
     def __init__(self):
         self._configs: Dict[str, SubAgentConfig] = {}
         self._register_defaults()
-    
+
     def _register_defaults(self):
-        """Register built-in sub-agent types"""
-        
-        # Research agent - with web search capability
-        self.register(SubAgentConfig(
-            name="researcher",
-            description="Research and explore codebases, search the web, gather information",
-            system_prompt="""You are a research assistant. Your job is to:
-1. Explore and understand codebases
-2. Find relevant files and functions
-3. Search the web for documentation, solutions, and context
-4. Summarize your findings concisely
-5. Do NOT make any changes - only read and report
+        """Register built-in sub-agent types."""
+        from .defaults import FAST_MODEL
 
-Use the web tool to search for relevant information online.
-Be thorough but concise. Focus on answering the specific question asked.""",
-            allowed_tools=["file_ops", "search", "web", "bash"]  # Read-only + web search
-        ))
-        
-        # Code reviewer
+        # Explore agent - fast, read-only, for quick codebase searches
+        # Uses FAST_MODEL (Haiku) for speed and cost efficiency
         self.register(SubAgentConfig(
-            name="reviewer",
-            description="Review code for bugs, style issues, and improvements",
-            system_prompt="""You are a code reviewer. Your job is to:
-1. Read and understand the code
-2. Identify bugs, security issues, and style problems
-3. Suggest specific improvements
-4. Do NOT make changes - only review and report
+            name="explore",
+            description="Fast codebase exploration. Use for quick searches and file lookups.",
+            model=FAST_MODEL,
+            system_prompt="""You are a fast exploration agent. Quickly find and report information.
 
-Format your review as:
-- Critical Issues: [list]
-- Warnings: [list]
-- Suggestions: [list]""",
-            allowed_tools=["file_ops", "search", "bash"]  # Read-only
+## What You Do
+- Search for files and patterns
+- Read files and summarize
+- List directory contents
+- Find relevant code
+
+## Output
+Be concise:
+1. **Found**: What you found
+2. **Location**: File paths and line numbers
+
+Do NOT make changes. Only explore and report.""",
+            allowed_tools=["file_ops", "search", "bash"],
+            max_iterations=15
         ))
-        
-        # Test writer
+
+        # Debug agent - capable, read-only, for error investigation
+        # Uses DEFAULT_MODEL for thorough debugging
+        # Has web access to research error solutions
         self.register(SubAgentConfig(
-            name="test_writer",
-            description="Write tests for code",
-            system_prompt="""You are a test writing specialist. Your job is to:
-1. Understand the code being tested
-2. Write comprehensive unit tests
-3. Cover edge cases and error conditions
-4. Follow testing best practices
+            name="debug",
+            description="Investigate errors, trace root causes, research solutions. Use when fixing errors.",
+            system_prompt="""You are a debugging agent. Thoroughly investigate errors and find solutions.
 
-Write clean, readable tests with good assertions.""",
-            allowed_tools=["file_ops", "search", "bash"]  # Can read and write files
+## What You Do
+- Read error logs completely
+- Trace errors to their source
+- Identify root causes
+- **Search online for solutions** when needed
+- Suggest specific fixes
+
+## Process
+1. Read the full error/log file
+2. Identify the actual error (not just symptoms)
+3. Trace back to the source
+4. If unfamiliar error: web(command="search", query="{package} {error message}")
+5. Report root cause and fix
+
+## Output
+1. **Error**: What went wrong
+2. **Root Cause**: Why it happened
+3. **Location**: File and line number
+4. **Fix**: How to resolve it (with code if applicable)
+5. **Source**: URL if you researched online
+
+Do NOT make changes. Only investigate and report.""",
+            allowed_tools=["file_ops", "search", "bash", "web", "skill"],
+            max_iterations=30
         ))
-        
-        # General purpose
+
+        # Research agent - for web-based research and documentation
+        # Uses DEFAULT_MODEL for thorough research
+        self.register(SubAgentConfig(
+            name="research",
+            description="Web research, documentation lookup, literature review. Use for external knowledge.",
+            system_prompt="""You are a research agent. Find and synthesize information from the web.
+
+## What You Do
+- Search for documentation, tutorials, examples
+- Find scientific papers and methods
+- Look up API references and best practices
+- Research libraries and their usage patterns
+
+## Process
+1. Search with specific queries: web(command="search", query="...")
+2. Fetch promising sources: web(command="fetch", url="...")
+3. Extract key information
+4. Save findings to _outputs/ if substantial
+
+## Output Format
+1. **Finding**: What you learned
+2. **Source**: URL or citation
+3. **Details**: Key facts, code examples, parameters
+4. **Recommendation**: How to apply this
+
+Always cite sources. Do NOT fabricate information.""",
+            allowed_tools=["web", "file_ops", "search"],
+            max_iterations=20
+        ))
+
+        # Plan agent - for breaking down complex problems
+        # Inherits model from parent, read-only
+        self.register(SubAgentConfig(
+            name="plan",
+            description="Break down complex tasks into steps. Use before implementing anything non-trivial.",
+            system_prompt="""You are a planning agent. Analyze problems and create actionable plans.
+
+## Process
+1. Understand the goal
+2. Explore what exists (use tools to read code/docs)
+3. Identify concrete steps
+4. Order by dependencies
+5. Output clear plan
+
+## Output Format
+```
+## Goal
+<one sentence>
+
+## Steps
+1. [id] Description
+   - What to do
+   - Expected outcome
+
+2. [id] Description (depends on: 1)
+   - What to do
+   - Expected outcome
+
+## Notes
+- Risks or considerations
+```
+
+Do NOT execute. Only plan.""",
+            allowed_tools=["file_ops", "search", "bash", "web", "skill", "todo"],
+            max_iterations=15
+        ))
+
+        # General agent - full capability for complex tasks
         self.register(SubAgentConfig(
             name="general",
-            description="General-purpose agent for complex tasks",
-            system_prompt="""You are a capable assistant. Complete the given task thoroughly.
-Think step by step and use tools as needed.""",
-            max_iterations=30
+            description="Complex multi-step tasks requiring exploration AND action.",
+            system_prompt="""You are a capable agent for complex tasks.
+
+Think step by step:
+1. Understand what's needed
+2. Explore to gather context
+3. Execute the task
+4. Verify the result
+
+Use all available tools as needed.""",
+            max_iterations=50
         ))
     
     def register(self, config: SubAgentConfig):
@@ -378,24 +470,30 @@ class SubAgentOrchestrator:
 
 class TaskTool(BaseTool):
     """Tool that allows the agent to spawn sub-agents"""
-    
+
     name = "task"
     description = """Delegate a task to a specialized sub-agent.
-Available agents:
-- researcher: Explore and understand code (read-only)
-- reviewer: Review code for issues
-- test_writer: Write tests
-- general: General purpose tasks
 
-Use this for tasks that benefit from isolated context or parallel execution."""
-    
+Available agents:
+- explore: Fast codebase search (uses Haiku). Quick file/pattern lookups.
+- debug: Error investigation with web research. Use when fixing errors.
+- research: Web research, documentation, literature review. Use for external knowledge.
+- plan: Break down complex problems into steps.
+- general: Complex multi-step tasks requiring both exploration AND action.
+
+Use 'explore' for quick local searches.
+Use 'debug' when investigating errors.
+Use 'research' for documentation, APIs, scientific methods.
+Use 'plan' before implementing anything non-trivial.
+Use 'general' for complex tasks that need to make changes."""
+
     parameters = {
         "type": "object",
         "properties": {
             "agent_name": {
                 "type": "string",
                 "description": "Name of the sub-agent to use",
-                "enum": ["researcher", "reviewer", "test_writer", "general"]
+                "enum": ["explore", "debug", "research", "plan", "general"]
             },
             "task": {
                 "type": "string",
@@ -544,8 +642,8 @@ Example workflow:
         self.working_dir = working_dir
 
     def execute(self, tasks: List[Dict[str, Any]], execute: bool = False) -> ToolResult:
-        from tools.atomic.todo import TodoTool
-        from orchestrator import TaskOrchestrator, OrchestratorConfig
+        from .tools.atomic.todo import TodoTool
+        from .orchestrator import TaskOrchestrator, OrchestratorConfig
 
         # Create todo with tasks
         todo = TodoTool()

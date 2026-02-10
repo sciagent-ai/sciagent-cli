@@ -204,6 +204,10 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     - ask_user: Request user input for decisions/clarifications
     - skill: Load specialized workflow skills (if skills exist)
 
+    Background tasks:
+    - Use bash(command="...", run_in_background=True) for long-running commands
+    - Use file_ops or bash("tail -f <output_file>") to check progress
+
     For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
     Docker directly via bash. See services/registry.yaml for available images.
 

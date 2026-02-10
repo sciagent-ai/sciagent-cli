@@ -6,7 +6,7 @@ These 7 tools handle 90% of scientific/engineering tasks:
 - file_ops: Read/write/edit files (filesystem is memory)
 - search: Find files (glob) and content (grep)
 - web: Search and fetch web content
-- todo: Track task progress
+- todo: Track task progress with DAG dependencies
 - ask_user: Request user input for decisions/clarifications
 - skill: Load specialized workflow skills
 

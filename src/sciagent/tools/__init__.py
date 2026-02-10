@@ -8,7 +8,7 @@ This package provides 7 atomic tools that handle 90% of tasks:
 - file_ops (file_ops.py): Read/write/edit files - THIS IS MEMORY
 - search (search.py): Find files (glob) and content (grep)
 - web (web.py): Search and fetch web content
-- todo (todo.py): Track task progress
+- todo (todo.py): Track task progress with DAG dependencies
 - ask_user (ask_user.py): Request user input for decisions/clarifications
 - skill (skill.py): Load specialized workflow skills
 

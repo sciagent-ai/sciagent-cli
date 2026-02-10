@@ -55,7 +55,8 @@ Delegate to sub-agent:
 ```
 1. Create todo with task_type: "research"
 2. Mark in_progress
-3. task(agent_name="researcher", task="<research task content>")
+3. task(agent_name="research", task="<research task content>")
+   # Use "explore" for local codebase, "research" for web/docs
 4. Store result, mark completed
 ```
 

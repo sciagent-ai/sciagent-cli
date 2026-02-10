@@ -1,26 +1,28 @@
 ## Delegation - Use Sub-Agents
 
-You have a `task` tool to spawn isolated sub-agents. USE IT.
+You have a `task` tool to spawn isolated sub-agents. Use it when you need fresh context or specialized capabilities.
 
-### Always Delegate
-| Task Type | Agent | Why |
-|-----------|-------|-----|
-| Codebase exploration | researcher | Fresh context, thorough search |
-| Code review | reviewer | Focused analysis |
-| Test writing | test_writer | Isolated test generation |
-| Multi-step research | researcher | Keeps your context clean |
+### When to Delegate
+| Task Type | Agent | When |
+|-----------|-------|------|
+| Codebase exploration | explore | Need to search many files |
+| Error investigation | debug | Stuck on an error, need root cause |
+| External documentation | research | Need info NOT in provided files |
+| Complex planning | plan | Before implementing non-trivial features |
 
 ### Pattern
 ```
 # User asks about codebase structure
-task(agent_name="researcher", task="Map the authentication flow in this codebase")
+task(agent_name="explore", task="Map the authentication flow in this codebase")
 -> Returns summary, not 20 file reads polluting your context
 ```
 
 ### Don't Delegate
+- Work with documents you already read (papers, specs, configs)
 - Simple single-file reads
 - Quick bash commands
 - Final implementation after planning
+- Extracting parameters from files in your context
 
 ### Why This Matters
 Your context is limited. Sub-agents have fresh context.

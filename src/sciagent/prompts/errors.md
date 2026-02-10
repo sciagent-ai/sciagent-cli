@@ -1,42 +1,37 @@
 ## Error Recovery
 
-### Spiral Detection
-System tracks repeated errors. After 3 of the same type:
-- You'll see: "[SYSTEM] DEBUGGING SPIRAL DETECTED"
-- You MUST try a completely different approach
-- Simplify until something works, then add complexity
+When an error occurs, use the **debug** sub-agent to investigate:
 
-### Response Strategy
-| Error Type | First Response | If Repeats |
-|------------|----------------|------------|
-| Import error | Install dep, check spelling | Try different library |
-| Type error | Check types, add conversion | Simplify data structures |
-| Timeout | Reduce scope | Break into smaller steps |
-| File not found | Check path | List directory first |
+```
+task(agent_name="debug", task="Read _logs/... and find root cause of: <error>")
+```
 
-### Preemptive Checks
-- Before editing: Have I read this file?
-- Before deleting: List the targets first
-- Before complex operation: Test with minimal input
+The debug agent will:
+- Read full log files
+- Trace errors to their source
+- Identify root causes
+- Suggest specific fixes
 
-### Preemptive Fixes
-- Type errors: check types match before operations
-- Serialization: ensure objects are serializable (convert arrays, handle special types)
-- Imports/dependencies: verify modules exist before using them
-- Async issues: handle promises/callbacks properly (JS), use await (Python/JS)
+### Sub-Agents
 
-### When Stuck
-1. Read FULL error message
-2. Search codebase for working patterns
-3. After 2 attempts: simplify drastically
-4. Still stuck: ask_user for guidance
+| Agent | Model | Use For |
+|-------|-------|---------|
+| explore | fast (Haiku) | Quick file searches, codebase navigation |
+| debug | inherit | Error investigation + web research for solutions |
+| research | inherit | Documentation, API lookup, scientific methods |
+| plan | inherit | Break down complex tasks before implementing |
+| general | inherit | Complex tasks needing exploration AND changes |
 
-### Error Response Pattern
+### Workflow
 
-**First occurrence**: Try the suggested fix
-**Second occurrence**: Try a DIFFERENT approach from suggestions
-**Third occurrence**: STOP. Completely change strategy.
+```
+Error occurs
+    ↓
+task(agent_name="debug", task="Investigate error: <error>. Read logs in _logs/ and trace root cause.")
+    ↓
+Read findings → Fix based on root cause
+```
 
-- Same error 3+ times -> STOP. Try different approach.
-- Timeout -> Start simpler, add complexity
-- Blocked -> Ask user or pivot
+### After 3 failures
+
+Use `ask_user` to get human guidance.

@@ -20,7 +20,6 @@ import subprocess
 import os
 import hashlib
 import platform
-import glob
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List
 from dataclasses import dataclass
@@ -69,7 +68,7 @@ class ShellTool:
         "cargo build", "cargo install",
         "apt-get", "apt install", "brew install",
         "make", "cmake", "ninja",
-        "docker build", "docker pull",
+        "docker build", "docker pull", "docker run",
         "go build", "go get",
         "mvn", "gradle",
         "composer install",
@@ -156,7 +155,7 @@ class ShellTool:
 
         Strategy:
         - Verbose + success: minimal summary
-        - Verbose + failure: last N lines with context
+        - ANY failure: save full log, show last N lines for debugging
         - Normal + long: head + tail
         - Normal + short: full output
         """
@@ -181,19 +180,22 @@ class ShellTool:
                 f"Full log: {log_path}"
             )
 
-        # Verbose command that failed - show tail for debugging
-        if is_verbose and not success:
+        # ANY failed command - always save full log and show tail for debugging
+        if not success:
             log_path = self._get_log_path(command)
             log_path.write_text(output)
 
-            tail = lines[-self.MAX_LINES_FAILURE:]
-            truncated = len(lines) > self.MAX_LINES_FAILURE
+            # Show more lines for failed commands (50 lines to capture full tracebacks)
+            tail_lines = 50
+            tail = lines[-tail_lines:]
+            truncated = len(lines) > tail_lines
 
             result = []
             if truncated:
-                result.append(f"... ({total_lines - self.MAX_LINES_FAILURE} lines omitted) ...")
+                result.append(f"... ({total_lines - tail_lines} lines omitted - see full log) ...")
             result.extend(tail)
-            result.append(f"\nFull log: {log_path}")
+            result.append(f"\n[Full log saved: {log_path}]")
+            result.append(f"[To see complete output: cat {log_path}]")
 
             return '\n'.join(result)
 
@@ -279,10 +281,22 @@ class ShellTool:
                         image_list = "\n".join(f"  📊 {img}" for img in opened_images)
                         truncated_output += f"\n\n[Visual Output - Opened {len(opened_images)} image(s)]\n{image_list}"
 
+            # Build informative error message for failures
+            error_msg = None
+            if not success:
+                error_msg = f"Exit code: {result.returncode}"
+                # Include first meaningful line of stderr in error for quick diagnosis
+                if result.stderr:
+                    stderr_lines = [l.strip() for l in result.stderr.strip().split('\n') if l.strip()]
+                    if stderr_lines:
+                        # Get first error line (skip empty lines, common prefixes)
+                        first_error = stderr_lines[0][:200]
+                        error_msg = f"Exit code: {result.returncode}. Error: {first_error}"
+
             return ToolResult(
                 success=success,
                 output=truncated_output,
-                error=None if success else f"Exit code: {result.returncode}"
+                error=error_msg
             )
 
         except subprocess.TimeoutExpired:

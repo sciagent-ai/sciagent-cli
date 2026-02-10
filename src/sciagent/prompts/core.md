@@ -63,6 +63,11 @@ Be careful not to introduce vulnerabilities:
 **IMPORTANT**: Running without errors != success.
 - Your code must FULLY address the objective, not just execute
 - Minimalistic "hello world" code that runs but ignores the task is a FAILURE
+- **Simplifying physics to avoid errors is CHEATING** - debug the real issue instead
+
+**WHEN ERRORS OCCUR**: Use `task(agent_name="debug", task="...")` to investigate.
+- Read full logs, trace root causes, understand the API
+- Do NOT simplify the geometry/physics just to make errors go away
 
 ### Usage Pattern
 

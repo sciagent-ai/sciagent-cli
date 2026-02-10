@@ -36,7 +36,7 @@ class AgentConfig:
     verbose: bool = True
     auto_save: bool = True
     state_dir: str = ".agent_states"
-    reasoning_effort: str = "medium"  # Extended thinking: "low", "medium", "high", or None to disable
+    reasoning_effort: str = "medium"  # Extended thinking enabled at medium level
 
 
 # DEFAULT_SYSTEM_PROMPT is now built dynamically from prompts/*.md files
@@ -126,9 +126,19 @@ class AgentLoop:
     # =========================================================================
 
     def _handle_interrupt(self, signum, frame):
-        """Handle Ctrl+C - pause and ask user what to do"""
+        """Handle Ctrl+C - just set flag, don't call input() here.
+
+        IMPORTANT: Signal handlers can interrupt at any point, including
+        during readline operations. Calling input() here causes
+        "can't re-enter readline" errors. The actual menu is handled
+        in _handle_pause_menu() which is called from the main loop.
+        """
         self._paused = True
-        print("\n\n⏸ Paused. What would you like to do?")
+        print("\n\n⏸ Paused. Processing...")
+
+    def _handle_pause_menu(self):
+        """Display pause menu and get user choice. Called from main loop."""
+        print("What would you like to do?")
         print("  [c] Continue")
         print("  [s] Stop")
         print("  [f] Give feedback/redirect")
@@ -494,13 +504,22 @@ Provide a concise summary (max 500 words):"""
             "4. Try an alternative approach"
         )
 
+    def _extract_log_path(self, error_output: str) -> Optional[str]:
+        """Extract log file path from error output if present."""
+        import re
+        # Look for patterns like "_logs/xxx.log" or "[Full log saved: path]"
+        match = re.search(r'_logs/[^\s\]]+\.log', error_output)
+        if match:
+            return match.group(0)
+        return None
+
     def _check_spiral(self, error: str):
         """Detect errors, provide fixes, and warn on debugging spirals.
 
         Three-stage escalation:
-        1. First occurrence: Provide helpful fix suggestions
-        2. Second occurrence: Stronger warning, suggest different approach
-        3. Third occurrence: Force complete strategy change
+        1. First occurrence: Provide helpful inline fix suggestions
+        2. Second occurrence: Suggest using debugger subagent to investigate
+        3. Third occurrence: Ask user for help
         """
         sig = self._error_signature(error)
         self._error_counts[sig] = self._error_counts.get(sig, 0) + 1
@@ -508,35 +527,32 @@ Provide a concise summary (max 500 words):"""
 
         fix_suggestion = self._get_fix_suggestion(sig, error)
 
+        # Try to extract log path from error (useful for 2nd stage)
+        log_path = self._extract_log_path(error)
+        log_ref = log_path or "_logs/"
+
         if count == 1:
-            # First occurrence: provide helpful fix suggestion
+            # First occurrence: provide helpful inline fix suggestion
             self.state.context.add_user_message(
                 f"[SYSTEM] Error detected: {sig}\n\n"
                 f"Suggested fixes:\n{fix_suggestion}\n\n"
                 f"Apply one of these fixes and retry."
             )
         elif count == 2:
-            # Second occurrence: stronger warning
+            # Second occurrence: suggest debug subagent
+            error_preview = error[:300] if len(error) > 300 else error
             self.state.context.add_user_message(
                 f"[SYSTEM] Same error occurred again: {sig}\n\n"
-                f"The previous fix didn't work. Try:\n"
-                f"1. A DIFFERENT approach from the suggestions below\n"
-                f"2. Simplify the code/operation first\n"
-                f"3. Use task(agent_name='researcher') to investigate the issue\n"
-                f"4. Search online for this specific error\n\n"
-                f"Suggestions:\n{fix_suggestion}"
+                f"The previous fix didn't work. Use the debug agent to investigate:\n"
+                f"task(agent_name=\"debug\", task=\"Read {log_ref} and find root cause of: {error_preview}\")\n\n"
+                f"Or try a different approach from:\n{fix_suggestion}"
             )
         elif count >= self._max_same_error:
-            # Third occurrence: force change
+            # Third occurrence: ask user for help
             self.state.context.add_user_message(
                 f"[SYSTEM] DEBUGGING SPIRAL DETECTED\n\n"
                 f"Error '{sig}' has occurred {count} times.\n\n"
-                f"You MUST:\n"
-                f"1. STOP the current approach entirely\n"
-                f"2. Try something COMPLETELY different\n"
-                f"3. Consider: Can you simplify? Is there a library for this?\n"
-                f"4. If stuck, use ask_user to get guidance\n\n"
-                f"Do NOT retry the same approach."
+                f"Please ask the user for guidance using ask_user tool."
             )
             self._error_counts[sig] = 0  # Reset after warning
 
@@ -574,8 +590,7 @@ Provide a concise summary (max 500 words):"""
                 # Replace the tool result with the user's response
                 result = ToolResult(
                     success=True,
-                    output=f"User responded: {user_response}",
-                    metadata={"user_response": user_response}
+                    output=f"User responded: {user_response}"
                 )
                 self.display.tool_end(tool_call.name, success=True, message=f"User: {user_response[:50]}...")
                 return result
@@ -711,7 +726,7 @@ Provide a concise summary (max 500 words):"""
             return None
 
         # Check if there are incomplete todos (use TodoStatus enum)
-        from state import TodoStatus
+        from .state import TodoStatus
         incomplete_todos = [t for t in self.state.todos.items if t.status != TodoStatus.DONE]
 
         if not incomplete_todos:
@@ -816,6 +831,13 @@ Provide a concise summary (max 500 words):"""
                     final_response = "(Stopped by user)"
                     break
 
+                # Handle pause menu (user pressed Ctrl+C)
+                if self._paused:
+                    self._handle_pause_menu()
+                    if self._cancelled:
+                        final_response = "(Stopped by user)"
+                        break
+
                 # Check if approaching limit with incomplete tasks (ask once)
                 if not self._iteration_limit_checked:
                     action = self._check_iteration_limit(max_iter)
@@ -845,11 +867,26 @@ Provide a concise summary (max 500 words):"""
 
                 try:
                     response = self._single_step()
+                except KeyboardInterrupt:
+                    # Handle Ctrl+C that escaped signal handler
+                    self._paused = True
+                    self._handle_pause_menu()
+                    if self._cancelled:
+                        final_response = "(Stopped by user)"
+                        break
+                    continue  # Retry the LLM call
                 except Exception as e:
                     error_msg = f"LLM Error: {str(e)}"
                     self.display.error(error_msg)
                     final_response = f"(Error: {str(e)})"
                     break
+
+                # Handle pause after LLM call
+                if self._paused:
+                    self._handle_pause_menu()
+                    if self._cancelled:
+                        final_response = "(Stopped by user)"
+                        break
 
                 # Handle assistant content (thinking)
                 if response.content:
@@ -879,6 +916,13 @@ Provide a concise summary (max 500 words):"""
 
                     # Execute tools
                     self._execute_tool_calls(response.tool_calls)
+
+                    # Handle pause after tool execution
+                    if self._paused:
+                        self._handle_pause_menu()
+                        if self._cancelled:
+                            final_response = "(Stopped by user)"
+                            break
 
                 else:
                     # No tool calls = done
