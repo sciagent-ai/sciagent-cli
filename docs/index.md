@@ -5,21 +5,35 @@ nav_order: 1
 permalink: /
 ---
 
-# Welcome to SciAgent
+# SciAgent
 
-**SciAgent** is a modular agent framework that pairs large‑language‑model reasoning with a rich set of external tools, that runs from terminal.  It automates many of the repetitive steps involved in software engineering, scientific computing and research—such as reading and writing files, searching code, running shell commands, executing simulations and performing web queries—so you can focus on higher‑level problem solving.
+A terminal-based AI agent for software engineering and scientific computing. SciAgent automates file operations, shell commands, web research, and simulations so you can focus on problem-solving.
 
-## What you can do with SciAgent
+## Quick Start
 
-This site is organised into concise guides to help you get started and explore deeper topics:
+```bash
+pip install -e .
+export ANTHROPIC_API_KEY="your-key"
+sciagent --project-dir ~/my-project "Create a Python script that fetches weather data"
+```
 
-| Page | Purpose |
-|---|---|
-| **[Getting Started](getting-started.md)** | Install SciAgent, run your first task and learn the basic command-line flags. |
-| **[Configuration](configuration.md)** | Customise the model, system prompt, caching, tool registry and sub-agents via the CLI or Python APIs. |
+## Documentation
 
-## Join the community
+| Guide | Description |
+|-------|-------------|
+| [Getting Started](getting-started.md) | Install, configure API keys, run your first task |
+| [Configuration](configuration.md) | Models, prompts, tools, sub-agents |
+| [Tools](tools.md) | Built-in tools reference |
+| [Use Cases](use-cases.md) | Examples for coding, research, and scientific computing |
+| [Comparison](comparison.md) | How SciAgent compares to other frameworks |
 
-SciAgent is released under the MIT License and welcomes contributions.  Visit our [GitHub repository](https://github.com/sciagent-ai/sciagent-cli) to report issues, suggest features or contribute new tools and services.  By participating you help build a community around AI‑powered scientific computing and engineering.
+## For Developers
 
----
+Building on SciAgent? See the [developer documentation](developers/):
+
+- [Architecture](developers/architecture.md) - Agent loop, context management, internals
+- [API Reference](developers/api-reference.md) - Python classes and functions
+
+## Community
+
+SciAgent is open source under the MIT License. [GitHub](https://github.com/sciagent-ai/sciagent-cli)

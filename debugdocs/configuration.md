@@ -51,7 +51,7 @@ config = AgentConfig(model="openai/gpt-4o", working_dir="./project")
 
 Use `--temperature` to control the randomness of the model’s responses.  A lower value (e.g. `0`) yields deterministic output, whereas higher values (up to `1`) encourage creativity.  `--max-iterations` sets a hard cap on the number of Think → Act → Observe cycles the agent will perform.  (default: 120).  Decrease it for simpler tasks to save tokens, or increase further for very complex multi‑step workflows.
 
-Note that sub‑agents use a lower default of 20 iterations since they handle focused, isolated tasks.
+Note that sub‑agents have their own iteration limits tailored to their task complexity: Explorer (15), Planner (15), Researcher (20), Debugger (30), and Worker (50).
 
 ### System prompts
 
