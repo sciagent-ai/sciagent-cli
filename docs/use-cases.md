@@ -40,22 +40,56 @@ sciagent "Compare React and Vue for building dashboards"
 SciAgent runs simulations in isolated Docker containers. Ask naturally:
 
 ```bash
+# Photonics & Electromagnetics
 sciagent "Simulate electromagnetic wave propagation through a metasurface using RCWA"
+sciagent "Design a photonic crystal waveguide with MEEP"
+sciagent "Trace rays through a lens system using pyoptools"
+
+# Chemistry & Materials
+sciagent "Analyze molecular properties of this compound from SMILES"
 sciagent "Run a molecular dynamics simulation of a protein-ligand complex"
+sciagent "Simulate a Lennard-Jones fluid with LAMMPS"
+
+# Math & Optimization
 sciagent "Solve this optimization problem using CVXPY"
+sciagent "Derive the symbolic integral of this expression with SymPy"
+sciagent "Tune hyperparameters for my ML model using Optuna"
+
+# Circuit & IC Design
+sciagent "Simulate this RC circuit with ngspice"
+sciagent "Run RTL-to-GDS flow for this Verilog design using OpenROAD"
+
+# Quantum Computing
+sciagent "Implement Grover's algorithm and simulate it with Qiskit"
+
+# Bioinformatics
+sciagent "Analyze this DNA sequence and find ORFs using Biopython"
+sciagent "Run BLAST search against a local database"
+
+# Network & Graph Analysis
+sciagent "Find communities in this social network using NetworkX"
+
+# Chemical Process Engineering
+sciagent "Simulate a distillation column using DWSIM"
+
+# Differential Equations (Julia)
+sciagent "Solve this system of ODEs using Julia's DifferentialEquations.jl"
 ```
 
 ### Available Services
 
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
-| **Math** | scipy-base, sympy, cvxpy | Numerical computing, symbolic math, optimization |
-| **Chemistry** | rdkit, gromacs, ase | Molecular analysis, MD simulations, atomistic modeling |
-| **Photonics** | rcwa, meep | RCWA for gratings, FDTD for electromagnetics |
-| **CFD** | openfoam, gmsh, elmer | Fluid dynamics, meshing, multiphysics FEM |
-| **Circuits** | ngspice | SPICE simulation |
-| **Quantum** | qiskit | Quantum circuit simulation |
-| **Bio** | biopython, blast | Sequence analysis, similarity search |
+| **Math & Optimization** | scipy-base, sympy, cvxpy, optuna | Numerical computing, symbolic math, convex optimization, hyperparameter tuning |
+| **Chemistry & Materials** | rdkit, ase, lammps, dwsim | Molecular analysis, atomistic simulations, MD, chemical process simulation |
+| **Molecular Dynamics** | gromacs, lammps | Biomolecular simulations, soft matter, solid-state materials |
+| **Photonics & Optics** | rcwa, meep, pyoptools | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
+| **CFD & FEM** | openfoam, gmsh, elmer | Fluid dynamics, mesh generation, multiphysics FEM |
+| **Circuits & EDA** | ngspice, openroad, iic-osic-tools | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
+| **Quantum Computing** | qiskit | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
+| **Bioinformatics** | biopython, blast | Sequence analysis, BLAST searching, phylogenetics |
+| **Network Analysis** | networkx | Graph algorithms, centrality, community detection |
+| **Scientific ML** | sciml-julia | Julia ODE/SDE solving, symbolic modeling, neural DEs |
 
 ## Multi-Step Workflows
 
@@ -73,33 +107,42 @@ sciagent "Optimize a metasurface unit cell for maximum transmission at 1550nm"
 # Chip analysis
 sciagent "Analyze power/performance/area for this RTL design"
 # Uses: openroad -> scipy-base
+
+# Protein structure pipeline
+sciagent "Find similar proteins to this sequence and run MD simulation"
+# Uses: blast -> biopython -> gromacs
+
+# Optical system design
+sciagent "Design a lens system and optimize for minimum aberration"
+# Uses: pyoptools (ray tracing) -> optuna (optimization) -> scipy-base (analysis)
+
+# Materials simulation pipeline
+sciagent "Build a crystal structure and run molecular dynamics"
+# Uses: ase (structure) -> lammps (MD) -> scipy-base (analysis)
+
+# Network-based drug discovery
+sciagent "Build protein interaction network and identify key drug targets"
+# Uses: biopython (sequences) -> networkx (graph analysis) -> scipy-base (statistics)
+
+# Chemical process optimization
+sciagent "Optimize reactor conditions for maximum yield"
+# Uses: dwsim (process sim) -> optuna (optimization)
+
+# Quantum chemistry workflow
+sciagent "Calculate ground state energy using VQE algorithm"
+# Uses: qiskit (quantum simulation) -> scipy-base (classical optimization)
 ```
 
-## Case Study: AR Waveguide Design
+### Example Pipeline: Multi-Service Workflows
 
-This example shows SciAgent supporting photonics research from simulation to publication (*Optical Materials Express*, Dec 2025).
+| Workflow | Services | Output |
+|----------|----------|--------|
+| Drug screening | rdkit → gromacs → scipy-base | Ranked molecules by binding affinity |
+| Metasurface design | scipy-base → rcwa | Optimized nano-structure geometry |
+| IC design flow | openroad → scipy-base | Power/performance/area report |
+| Protein pipeline | blast → biopython → gromacs | MD trajectory from sequence |
+| Optical design | pyoptools → optuna → scipy-base | Optimized lens parameters |
+| Materials modeling | ase → lammps → scipy-base | Thermodynamic properties |
+| Process engineering | dwsim → optuna | Optimal reactor conditions |
 
-### Problem
-Design a multi-zone metasurface in-coupler for AR waveguides with efficiency approaching theoretical limits.
-
-### SciAgent Workflow
-
-**1. Research** - Agent searched RCWA documentation and metasurface design papers
-
-**2. Simulation** - Ran RCWA simulations to optimize nano-beam geometries:
-```bash
-sciagent "Design a three-zone metasurface in-coupler for AR waveguide
-         with 453nm grating period, optimizing diffraction efficiencies"
-```
-
-**3. Evaluation** - Ray-tracing to assess full system performance
-
-### Results
-
-| Metric | Simulated | Measured |
-|--------|-----------|----------|
-| Average coupling efficiency | 31% | 30% |
-| Minimum field efficiency | 25.3% | 17% |
-| Theoretical limit | 29% | - |
-
-Close agreement validated the design approach. The research-first workflow ensured correct API usage and reproducible results.
+See [Case Studies](case-studies.md) for real-world examples of SciAgent in published research.
