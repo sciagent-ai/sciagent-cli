@@ -1,6 +1,7 @@
 ---
-title: Sub‑agents
- nav_order: 7
+layout: default
+title: Sub-agents
+nav_order: 9
 ---
 
 # Sub‑agent system

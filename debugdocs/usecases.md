@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Use Cases
-nav_order: 4
+nav_order: 5
 ---
 
 # Use Cases
@@ -99,6 +99,59 @@ Because each sub‑agent operates in isolation with a customised tool set and sy
 
 If your project involves specialised domains—such as machine learning, bioinformatics or control theory—you can extend SciAgent with custom tools and services.  For example, create a tool that interfaces with a remote API (e.g. protein structure prediction) or add a new container image to the service registry for your favourite simulation engine.  Once registered, these extensions become first‑class citizens in the agent's reasoning, enabling bespoke workflows tailored to your needs.
 
-## Case studies
+## Case study: AR Waveguide Metasurface Design
 
-For detailed worked examples showing real prompts and verified results, see the [Case Studies](case_studies.md) page.
+This case study demonstrates how SciAgent supports a complete photonics research workflow, from simulation to experimental validation. The work was published in *Optical Materials Express* (Vol. 15, No. 12, Dec 2025).
+
+### The Problem
+
+Augmented reality (AR) waveguide displays suffer from low efficiency due to multiple interactions of incoming light with the in-coupler. This fundamental limitation affects system brightness and causes field-dependent losses. The challenge: design a multi-zone metasurface in-coupler that approaches theoretical efficiency limits.
+
+### SciAgent Workflow
+
+**Phase 1: Discovery & Research**
+
+The `sci-compute` skill guided the research process:
+- Searched official RCWA documentation for rigorous coupled-wave analysis methods
+- Retrieved tutorials on metasurface design and TiO2 meta-atom optimization
+- Found relevant papers on waveguide combiner architectures
+
+**Phase 2: Simulation**
+
+Using the `rcwa` service for electromagnetic simulation:
+```bash
+sciagent "Design a three-zone metasurface in-coupler for AR waveguide with 453nm grating period, optimizing diffraction and reflection efficiencies"
+```
+
+SciAgent executed RCWA simulations to:
+- Optimize nano-beam widths and nano-pillar geometries for each zone
+- Calculate first-order diffraction and zeroth-order reflection efficiencies
+- Iterate on designs using a custom feedback loop with realistic efficiency targets
+
+**Phase 3: System Evaluation**
+
+Ray-tracing simulations evaluated the complete AR system:
+- Modeled display engine, in-coupler, expander, and out-coupler
+- Assessed coupling efficiency across the horizontal field of view
+- Achieved simulated MFE (Minimum Field Efficiency) of 25.3%
+
+### Results
+
+The three-zone metasurface design achieved:
+
+| Metric | Simulated | Measured |
+|--------|-----------|----------|
+| Average coupling efficiency | 31% | 30% |
+| MFE at -10° field | 25.3% | 17% |
+| Theoretical limit | 29% | - |
+
+The close agreement between simulation and measurement validated the multi-zone optimization strategy. Minor discrepancies at edge fields were attributed to fabrication tolerances and angular sensitivity.
+
+### Key Takeaways
+
+1. **Research-first approach** - The `sci-compute` skill ensured correct API usage by researching documentation before generating simulation code
+2. **Iterative optimization** - SciAgent's feedback loop incorporated realistic efficiency values, accounting for material loss and non-ideal sums
+3. **Multi-service pipelines** - Combined RCWA simulations with ray-tracing evaluation for end-to-end validation
+4. **Reproducibility** - Docker-based service isolation ensured consistent results across different machines
+
+This case study demonstrates SciAgent's ability to support cutting-edge photonics research from initial design through experimental validation.

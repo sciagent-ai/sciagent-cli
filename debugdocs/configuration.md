@@ -84,7 +84,7 @@ Authentication credentials for different providers should be exported as environ
 
 ## Managing the tool registry
 
-The default registry includes atomic tools such as `bash`, `file_ops`, `search`, `web`, `todo` and `service`.  You can load additional tools at runtime by writing a Python module that defines a `register_tools(registry)` function or exposes a `TOOLS` list.  Each tool must subclass `BaseTool` or be decorated with `@tool` from `sciagent.tools`.
+The default registry includes atomic tools such as `bash`, `file_ops`, `search`, `web`, `todo`, `skill` and `ask_user`. You can load additional tools at runtime by writing a Python module that defines a `register_tools(registry)` function or exposes a `TOOLS` list.  Each tool must subclass `BaseTool` or be decorated with `@tool` from `sciagent.tools`.
 
 Example of a custom tool module (`my_tools.py`):
 

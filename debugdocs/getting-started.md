@@ -32,9 +32,26 @@ The agent will read any existing files in the project, plan its work, call tools
 
 ### Interactive mode
 
-If you prefer to guide the agent step‑by‑step, run it with the `--interactive` flag.  This starts a REPL where you can enter tasks one at a time, view intermediate tool results and provide feedback.  Use `Ctrl+C` to interrupt and choose to continue, stop or give feedback.
+If you prefer to guide the agent step-by-step, run it with the `--interactive` flag. This starts a REPL where you can enter tasks one at a time, view intermediate tool results and provide feedback. Use `Ctrl+C` to interrupt and choose to continue, stop or give feedback.
 
-## Command‑line options
+### Skills for scientific computing
+
+When you ask SciAgent to run simulations, the `sci-compute` skill automatically activates. This skill guides the agent through a research-first workflow:
+
+1. **Discovery** - Identify the right service from the registry
+2. **Research** - Search official documentation before writing code
+3. **Execution** - Run simulations in isolated Docker containers
+4. **Debug** - Search for solutions when errors occur
+
+For example:
+
+```bash
+sciagent "Run an RCWA simulation for a photonic crystal grating"
+```
+
+The agent will research RCWA documentation, write correct simulation code, and execute it in a containerized environment.
+
+## Command-line options
 
 SciAgent’s CLI accepts several flags to tailor its behaviour.  The most common ones are:
 
