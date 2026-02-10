@@ -246,6 +246,70 @@ class LLMClient:
         model_lower = self.model.lower()
         return "anthropic" in model_lower or "claude" in model_lower
 
+    def _is_openai_model(self) -> bool:
+        """Check if current model is an OpenAI model"""
+        model_lower = self.model.lower()
+        return "gpt" in model_lower or "openai" in model_lower or "o1" in model_lower or "o3" in model_lower
+
+    def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
+        """
+        Convert image content blocks to OpenAI format for litellm.
+
+        IMPORTANT: litellm expects OpenAI-style multimodal format for ALL providers.
+        litellm then handles conversion to provider-specific formats internally.
+
+        Our internal format (Anthropic-style):
+            {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
+
+        litellm expected format (OpenAI-style):
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+        """
+        formatted = []
+        for msg in messages:
+            msg_copy = msg.copy()
+            content = msg_copy.get("content")
+
+            if isinstance(content, list):
+                new_content = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+
+                    block_type = block.get("type")
+
+                    if block_type == "image":
+                        # Convert Anthropic-style image format to OpenAI format for litellm
+                        source = block.get("source", {})
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        if data:  # Only add if there's actual data
+                            new_content.append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{media_type};base64,{data}"
+                                }
+                            })
+                    elif block_type == "text":
+                        # Keep text blocks, but strip any Anthropic-specific fields
+                        new_content.append({
+                            "type": "text",
+                            "text": block.get("text", "")
+                        })
+                    elif block_type == "image_url":
+                        # Already in OpenAI format, pass through
+                        new_content.append(block)
+                    else:
+                        # Unknown block type, pass through
+                        new_content.append(block)
+
+                # Only update if we have content
+                if new_content:
+                    msg_copy["content"] = new_content
+
+            formatted.append(msg_copy)
+
+        return formatted
+
     def _format_messages_with_prompt_caching(self, messages: List[Dict]) -> List[Dict]:
         """
         Format messages for Anthropic prompt caching.
@@ -338,6 +402,9 @@ class LLMClient:
 
         # Convert messages to dicts
         msg_dicts = [m.to_dict() for m in messages]
+
+        # Convert image blocks to provider-specific format
+        msg_dicts = self._format_images_for_provider(msg_dicts)
 
         # Apply Anthropic prompt caching if applicable
         msg_dicts = self._format_messages_with_prompt_caching(msg_dicts)
