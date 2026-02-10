@@ -80,16 +80,20 @@ See [Available Services](#available-services) below for the full list of contain
 
 ## Available services
 
-| Domain | Services |
-|---|---|
-| **Electromagnetics** | `rcwa` (S4/RCWA), `meep` (FDTD) |
-| **Chemistry & materials** | `rdkit`, `ase`, `gromacs` |
-| **Fluid dynamics & FEM** | `openfoam`, `elmer`, `gmsh` |
-| **Electronics & EDA** | `ngspice`, `openroad` |
-| **Math & optimisation** | `sympy`, `cvxpy`, `scipy-base` |
-| **Scientific ML** | `sciml-julia` |
+| Domain | Services | Capabilities |
+|--------|----------|--------------|
+| **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
+| **Chemistry & Materials** | `rdkit`, `ase`, `lammps`, `dwsim` | Molecular analysis, atomistic simulations, MD, chemical process simulation |
+| **Molecular Dynamics** | `gromacs`, `lammps` | Biomolecular simulations, soft matter, solid-state materials |
+| **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
+| **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
+| **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
+| **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
+| **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |
+| **Network Analysis** | `networkx` | Graph algorithms, centrality, community detection |
+| **Scientific ML** | `sciml-julia` | Julia ODE/SDE solving, symbolic modelling, neural DEs |
 
-Use the `service` tool to list available services, pull or build images and run code inside them. Refer to the [Architecture](docs/architecture.md#service-registry) page for details.
+Services are automatically selected and managed when you request scientific computations. Refer to the [Architecture](docs/developers/architecture.md#service-registry) page for details.
 
 ## CLI reference
 
@@ -98,10 +102,12 @@ sciagent [OPTIONS] [TASK]
 
 Options:
   -i, --interactive     Interactive REPL mode
-  -m, --model MODEL     LLM model (default: claude-sonnet-4)
+  -m, --model MODEL     LLM model (default: anthropic/claude-opus-4-5-20251101)
   -p, --project-dir     Working directory
   -t, --load-tools      Load custom tools from Python file
   -s, --subagents       Enable sub-agent spawning
+  --system-prompt PATH  Custom system prompt file
+  --temperature FLOAT   Model temperature (0.0-1.0)
   --resume SESSION_ID   Resume previous session
   --list-sessions       List available sessions
   --max-iterations N    Max agent iterations (default: 120)
@@ -181,10 +187,9 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 
 - **[Getting Started](docs/getting-started.md)** – installation, running your first task and CLI basics.
 - **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry and sub-agents.
-- **[Use Cases](docs/usecases.md)** – real-world examples of how to apply SciAgent to coding, research and simulation.
-- **[Architecture](docs/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, and sub-agent system.
-- **[Why SciAgent is Novel](docs/novelty.md)** – learn what sets SciAgent apart from other agent frameworks.
-- **[Sub-agents](docs/subagents.md)** – information on built-in sub-agents and how to create your own.
+- **[Use Cases](docs/use-cases.md)** – real-world examples of how to apply SciAgent to coding, research and simulation.
+- **[Architecture](docs/developers/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, and sub-agent system.
+- **[Comparison](docs/comparison.md)** – what sets SciAgent apart from other agent frameworks.
 
 ## Requirements
 
@@ -194,7 +199,7 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 
 ## License
 
-This project is released under the Apache 2.0 License.
+This project is released under the MIT License.
 
 ---
 
