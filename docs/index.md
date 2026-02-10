@@ -13,6 +13,9 @@ permalink: /
 
 This site is organised into concise guides to help you get started and explore deeper topics:
 
+| Page | Purpose |
+|---|---|
+| **[Getting Started](getting-started.md)** | Install SciAgent, run your first task and learn the basic command-line flags. |
 
 ## Join the community
 
