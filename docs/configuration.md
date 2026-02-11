@@ -135,21 +135,29 @@ The agent reads images via the `file_ops` tool and passes them to the LLM for vi
 
 SciAgent runs simulations in Docker containers. Available services:
 
-| Domain | Services |
-|--------|----------|
-| Math | scipy-base, sympy, cvxpy |
-| Chemistry | rdkit, gromacs, ase |
-| Photonics | rcwa, meep |
-| CFD | openfoam, gmsh, elmer |
-| Circuits | ngspice |
-| Quantum | qiskit |
-| Bio | biopython, blast |
+## Available services
+
+| Domain | Services | Capabilities |
+|--------|----------|--------------|
+| **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
+| **Chemistry & Materials** | `rdkit`, `ase`, `lammps`, `dwsim` | Molecular analysis, atomistic simulations, MD, chemical process simulation |
+| **Molecular Dynamics** | `gromacs`, `lammps` | Biomolecular simulations, soft matter, solid-state materials |
+| **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
+| **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
+| **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
+| **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
+| **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |
+| **Network Analysis** | `networkx` | Graph algorithms, centrality, community detection |
+| **Scientific ML** | `sciml-julia` | Julia ODE/SDE solving, symbolic modelling, neural DEs |
+
+The agent automatically researches documentation, writes code, and runs it in the appropriate container. You can also ask the agent to build a service and add to the registry.
 
 ```bash
-sciagent "Run an RCWA simulation for a photonic grating"
-```
+sciagent "Build a Docker service for the XYZ library and publish to GHCR"                           
+```                                                                                                
+This triggers the build-service skill which automates the entire workflow: researches the package, creates the Dockerfile, updates registry.yaml, and builds/pushes the image. 
 
-The agent automatically researches documentation, writes code, and runs it in the appropriate container.
+The full documentation is in src/sciagent/skills/build-service/SKILL.md.   
 
 ## Python Usage
 

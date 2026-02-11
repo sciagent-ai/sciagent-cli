@@ -5,12 +5,19 @@ SciAgent is a modular agent framework for software engineering and scientific co
 ## Features
 
 - **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like scientific computing, code review, and service building. Skills auto-trigger based on user input patterns.
+
 - **Image & multimodal analysis** – Analyse scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
+
 - **Service isolation** – Run all scientific computations inside isolated Docker containers for reproducibility, security, and portability.
+
 - **Task DAG orchestration** – Define a graph of tasks with dependencies (`depends_on`), batch parallelisable steps and pass data between tasks via `result_key`.
+
 - **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria.
+
 - **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
+
 - **Multi-model support** – Choose between Anthropic Claude, OpenAI (GPT-4.1, o3, o4-mini), Google Gemini 3, xAI Grok 4, DeepSeek, or open-source models via LiteLLM. Caching reduces cost and latency.
+
 - **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning and general tasks. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
 
 ## Quick start
@@ -117,48 +124,6 @@ See [Available Services](#available-services) below for the full list of contain
 
 Services are automatically selected and managed when you request scientific computations. Refer to the [Architecture](docs/developers/architecture.md#service-registry) page for details.
 
-## CLI reference
-
-```text
-sciagent [OPTIONS] [TASK]
-
-Options:
-  -i, --interactive     Interactive REPL mode
-  -m, --model MODEL     LLM model (default: anthropic/claude-opus-4-5-20251101)
-  -p, --project-dir     Working directory
-  -t, --load-tools      Load custom tools from Python file
-  -s, --subagents       Enable sub-agent spawning
-  --system-prompt PATH  Custom system prompt file
-  --temperature FLOAT   Model temperature (0.0-1.0)
-  --resume SESSION_ID   Resume previous session
-  --list-sessions       List available sessions
-  --max-iterations N    Max agent iterations (default: 120)
-  -v, --verbose         Verbose output (default)
-  -q, --quiet           Minimal output
-```
-
-## Python API
-
-SciAgent can also be embedded in your own Python code. Use the `create_agent()` factory to configure an agent and call `run()` or `run_interactive()`:
-
-```python
-from sciagent import create_agent, run_task, DEFAULT_MODEL
-
-# One-shot task
-result = run_task("Create a hello world script")
-
-# Custom configuration (uses DEFAULT_MODEL if not specified)
-agent = create_agent(
-    model=DEFAULT_MODEL,  # Or specify another model like "openai/gpt-4o"
-    working_dir="./my-project"
-)
-result = agent.run("Analyse this codebase")
-
-# Interactive session
-agent.run_interactive()
-```
-
-To change the default model globally, edit `src/sciagent/defaults.py`.
 
 ## Skills
 
@@ -239,7 +204,7 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 
 ## License
 
-This project is released under the MIT License.
+This project is released under the Apache 2.0 License.
 
 ---
 
