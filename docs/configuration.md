@@ -135,8 +135,6 @@ The agent reads images via the `file_ops` tool and passes them to the LLM for vi
 
 SciAgent runs simulations in Docker containers. Available services:
 
-## Available services
-
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
 | **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
