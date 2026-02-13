@@ -32,6 +32,45 @@ task(agent_name="debug", task="Investigate error: <error>. Read logs in _logs/ a
 Read findings → Fix based on root cause
 ```
 
-### After 3 failures
+## When to STOP and ASK
 
-Use `ask_user` to get human guidance.
+### IMMEDIATELY use `ask_user` (don't wait for failures):
+
+**Data/Resource Issues:**
+- External data source fails (403, 404, timeout, connection error)
+- Cannot access paper, supplementary materials, or documentation
+- Required package not available in any container
+- Data format differs significantly from expected
+
+**Approach Changes:**
+- Switching from real to synthetic data
+- Need to simplify problem/physics to make tractable
+- Changing methodology from what user requested
+- Using different data source than specified
+
+**Results Issues:**
+- Results differ >20% from reference/expected values
+- Convergence not achieved after reasonable iterations
+- Results violate physical constraints (conservation laws, bounds)
+- Results seem "too good to be true" (e.g., 99% accuracy on hard problem)
+
+**Resource Issues:**
+- Computation will exceed reasonable time (>10 min without progress)
+- Insufficient data for statistically robust analysis
+
+### ask_user Template
+```
+ask_user(
+    question="[What happened]. How should I proceed?",
+    options=[
+        "Try alternative: [specific alternative]",
+        "Continue with limitations (I'll document them)",
+        "Abort this task"
+    ],
+    context="[Why this matters for the task]"
+)
+```
+
+### After 3 technical failures
+
+Use `ask_user` to get human guidance on debugging approach.

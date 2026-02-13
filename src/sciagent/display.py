@@ -112,7 +112,7 @@ class Spinner:
         "simple": ["-", "\\", "|", "/"],
     }
 
-    def __init__(self, message: str = "Working", style: str = "dots", quiet: bool = False, delay: float = 0.0):
+    def __init__(self, message: str = "Working", style: str = "dots", quiet: bool = False, delay: float = 0.0, show_hint: bool = True):
         """
         Args:
             message: Text to display next to spinner
@@ -120,15 +120,26 @@ class Spinner:
             quiet: If True, suppress all output
             delay: Seconds to wait before showing spinner. If operation completes
                    before delay, no spinner is shown. Default 0 (immediate).
+            show_hint: If True, show "ctrl+c to interrupt" hint and elapsed time
         """
         self.message = message
         self.frames = self.STYLES.get(style, self.STYLES["dots"])
         self.quiet = quiet
         self.delay = delay
+        self.show_hint = show_hint
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_line_len = 0
         self._started_display = False  # Track if we've shown anything
+        self._start_time = None  # Track elapsed time
+
+    def _format_elapsed(self, seconds: float) -> str:
+        """Format elapsed time as human-readable string."""
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        minutes = int(seconds // 60)
+        secs = int(seconds % 60)
+        return f"{minutes}m {secs}s"
 
     def _spin(self):
         """Animation loop running in background thread."""
@@ -143,13 +154,23 @@ class Spinner:
                 return  # Operation finished before delay - show nothing
 
         self._started_display = True
+        self._start_time = time.time()
         i = 0
         while not self._stop.is_set():
             frame = self.frames[i % len(self.frames)]
-            line = f"\r{Colors.CYAN}{frame}{Colors.RESET} {Colors.DIM}{self.message}...{Colors.RESET}"
+
+            # Build status line with optional hint
+            if self.show_hint:
+                elapsed = time.time() - self._start_time
+                elapsed_str = self._format_elapsed(elapsed)
+                hint = f"{Colors.DIM}(ctrl+c to interrupt · {elapsed_str}){Colors.RESET}"
+                line = f"\r{Colors.CYAN}{frame}{Colors.RESET} {self.message}... {hint}"
+            else:
+                line = f"\r{Colors.CYAN}{frame}{Colors.RESET} {Colors.DIM}{self.message}...{Colors.RESET}"
+
             sys.stdout.write(line)
             sys.stdout.flush()
-            self._last_line_len = len(self.message) + 10
+            self._last_line_len = len(line) + 10  # Account for ANSI codes
             i += 1
             time.sleep(0.1)
 

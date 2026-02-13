@@ -9,6 +9,7 @@ This implements the classic agent loop:
 import os
 import json
 import signal
+import threading
 import traceback
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
@@ -115,29 +116,58 @@ class AgentLoop:
         self._error_counts: Dict[str, int] = {}
         self._max_same_error = 3
 
-        # User interrupt handling
+        # User interrupt handling - thread-safe for immediate response
         self._paused = False
         self._cancelled = False
         self._user_feedback = None
         self._original_sigint = signal.getsignal(signal.SIGINT)
+        self._interrupt_event = threading.Event()  # Signals blocking ops to check
+        self._menu_lock = threading.Lock()  # Prevents multiple menus
+        self._menu_shown = False  # Track if menu is currently displayed
+        self._interrupt_count = 0  # Track rapid Ctrl+C presses
 
     # =========================================================================
     # Interrupt Handling
     # =========================================================================
 
     def _handle_interrupt(self, signum, frame):
-        """Handle Ctrl+C - just set flag, don't call input() here.
+        """Handle Ctrl+C with immediate menu display.
 
-        IMPORTANT: Signal handlers can interrupt at any point, including
-        during readline operations. Calling input() here causes
-        "can't re-enter readline" errors. The actual menu is handled
-        in _handle_pause_menu() which is called from the main loop.
+        Uses threading to show menu immediately without waiting for
+        blocking operations to complete. This provides responsive UX.
         """
+        self._interrupt_count += 1
         self._paused = True
-        print("\n\n⏸ Paused. Processing...")
+        self._interrupt_event.set()  # Signal any blocking waits
+
+        # Force stop on 3 rapid interrupts (escape hatch)
+        if self._interrupt_count >= 3:
+            print("\n\n🛑 Force stopping...")
+            self._cancelled = True
+            return
+
+        # Show menu immediately in a thread (non-blocking)
+        if not self._menu_shown:
+            print("\n\n⏸ Paused.")
+            menu_thread = threading.Thread(target=self._show_menu_thread, daemon=True)
+            menu_thread.start()
+
+    def _show_menu_thread(self):
+        """Show pause menu in a separate thread for immediate response."""
+        with self._menu_lock:
+            if self._menu_shown:  # Another thread already showing
+                return
+            self._menu_shown = True
+
+        try:
+            self._handle_pause_menu()
+        finally:
+            with self._menu_lock:
+                self._menu_shown = False
+                self._interrupt_count = 0  # Reset after menu handled
 
     def _handle_pause_menu(self):
-        """Display pause menu and get user choice. Called from main loop."""
+        """Display pause menu and get user choice."""
         print("What would you like to do?")
         print("  [c] Continue")
         print("  [s] Stop")
@@ -154,9 +184,11 @@ class AgentLoop:
                     print(f"Got it. Will incorporate: {feedback[:50]}...")
             else:
                 print("Continuing...")
-        except EOFError:
+        except (EOFError, OSError):
+            # EOFError: stdin closed, OSError: terminal issues
             self._cancelled = True
         self._paused = False
+        self._interrupt_event.clear()  # Reset for next interrupt
 
     def _prompt_user_for_input(self, request: Dict[str, Any]) -> str:
         """
@@ -240,12 +272,38 @@ class AgentLoop:
                 return default or "No response provided"
 
     def _setup_interrupt_handler(self):
-        """Install our interrupt handler"""
+        """Install our interrupt handler and reset state"""
+        self._interrupt_event.clear()
+        self._menu_shown = False
+        self._interrupt_count = 0
         signal.signal(signal.SIGINT, self._handle_interrupt)
 
     def _restore_interrupt_handler(self):
-        """Restore original interrupt handler"""
+        """Restore original interrupt handler and cleanup"""
         signal.signal(signal.SIGINT, self._original_sigint)
+        self._interrupt_event.clear()
+        self._menu_shown = False
+
+    def _wait_for_menu_if_paused(self) -> bool:
+        """Wait for any active menu interaction to complete.
+
+        Returns True if cancelled, False otherwise.
+        """
+        if not self._paused:
+            return self._cancelled
+
+        # Wait for menu thread to finish (with timeout to avoid deadlock)
+        for _ in range(100):  # 10 second max wait
+            if not self._menu_shown:
+                break
+            import time
+            time.sleep(0.1)
+
+        # If menu wasn't shown in thread, show it now
+        if self._paused and not self._menu_shown:
+            self._handle_pause_menu()
+
+        return self._cancelled
 
     # =========================================================================
     # Skill Auto-Injection
@@ -610,7 +668,7 @@ Provide a concise summary (max 500 words):"""
         # Show spinner for potentially long-running tools (only if takes > 0.3s)
         long_running_tools = {"bash", "shell", "web_search", "read_url", "http_request", "web", "service"}
         if tool_call.name in long_running_tools:
-            with Spinner("Executing", quiet=self.display.quiet, delay=0.3):
+            with Spinner("Executing", quiet=self.display.quiet, delay=0.3, show_hint=True):
                 result = self.tools.execute(tool_call.name, **tool_call.arguments)
         else:
             result = self.tools.execute(tool_call.name, **tool_call.arguments)
@@ -903,11 +961,9 @@ Provide a concise summary (max 500 words):"""
                     break
 
                 # Handle pause menu (user pressed Ctrl+C)
-                if self._paused:
-                    self._handle_pause_menu()
-                    if self._cancelled:
-                        final_response = "(Stopped by user)"
-                        break
+                if self._wait_for_menu_if_paused():
+                    final_response = "(Stopped by user)"
+                    break
 
                 # Check if approaching limit with incomplete tasks (ask once)
                 if not self._iteration_limit_checked:
@@ -941,8 +997,8 @@ Provide a concise summary (max 500 words):"""
                 except KeyboardInterrupt:
                     # Handle Ctrl+C that escaped signal handler
                     self._paused = True
-                    self._handle_pause_menu()
-                    if self._cancelled:
+                    self._interrupt_event.set()
+                    if self._wait_for_menu_if_paused():
                         final_response = "(Stopped by user)"
                         break
                     continue  # Retry the LLM call
@@ -953,11 +1009,9 @@ Provide a concise summary (max 500 words):"""
                     break
 
                 # Handle pause after LLM call
-                if self._paused:
-                    self._handle_pause_menu()
-                    if self._cancelled:
-                        final_response = "(Stopped by user)"
-                        break
+                if self._wait_for_menu_if_paused():
+                    final_response = "(Stopped by user)"
+                    break
 
                 # Handle assistant content (thinking)
                 if response.content:
@@ -989,11 +1043,9 @@ Provide a concise summary (max 500 words):"""
                     self._execute_tool_calls(response.tool_calls)
 
                     # Handle pause after tool execution
-                    if self._paused:
-                        self._handle_pause_menu()
-                        if self._cancelled:
-                            final_response = "(Stopped by user)"
-                            break
+                    if self._wait_for_menu_if_paused():
+                        final_response = "(Stopped by user)"
+                        break
 
                 else:
                     # No tool calls = done

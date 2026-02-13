@@ -1,10 +1,27 @@
 ---
 name: sci-compute
-description: "Run scientific and engineering simulations using containerized services (MEEP, GROMACS, RDKit, etc.)"
+description: "Run scientific and engineering computations using containerized services"
 triggers:
+  # === DATA ACQUISITION (action-based) ===
+  - "download|fetch|retrieve|access.*(data|dataset)"
+  - "API|database|endpoint"
+
+  # === VERIFICATION/REPRODUCTION (action-based) ===
+  - "verify|validate|reproduce|replicate"
+  - "compare.*(results|paper|reference)"
+  - "paper|publication|supplementary"
+
+  # === ANALYSIS/COMPUTATION (action-based) ===
+  - "analyze|analysis|process"
+  - "compute|calculate|calculation"
+  - "run.*(script|simulation|model|analysis)"
+
+  # === CONTAINER/SERVICE USAGE ===
+  - "docker|container"
+  - "install.*(package|library)"
+
+  # === SIMULATION (legacy, keep for compatibility) ===
   - "simulat(e|ion)"
-  - "compute|calculation"
-  - "run.*(meep|gromacs|openfoam|rcwa|rdkit|ase)"
   - "scientific.*(python|computation)"
   - "molecular dynamics"
   - "electromagnetic"
