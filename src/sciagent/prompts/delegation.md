@@ -2,7 +2,16 @@
 
 You have a `task` tool to spawn isolated sub-agents. Use it when you need fresh context or specialized capabilities.
 
-### When to Delegate
+### When to Use Skills vs Sub-Agents
+
+| Need | Use |
+|------|-----|
+| Scientific computation | `skill(skill_name="sci-compute")` |
+| Build a container | `skill(skill_name="build-service")` |
+| Code review | `skill(skill_name="code-review")` |
+
+### When to Delegate (Sub-Agents)
+
 | Task Type | Agent | When |
 |-----------|-------|------|
 | Codebase exploration | explore | Need to search many files |

@@ -2,30 +2,23 @@
 name: sci-compute
 description: "Run scientific and engineering computations using containerized services"
 triggers:
-  # === DATA ACQUISITION (action-based) ===
-  - "download|fetch|retrieve|access.*(data|dataset)"
-  - "API|database|endpoint"
+  # === BROAD INTENT (catch any computational task) ===
+  - "run|execute|compute|calculate|simulate|analyze|process|optimize|solve|model"
+  - "plot|visualize|graph|figure"
+  - "service|registry|container|docker|package|library|install"
+  - "scientific|engineering|numerical|mathematical"
+  - "data|dataset|download|fetch"
 
-  # === VERIFICATION/REPRODUCTION (action-based) ===
-  - "verify|validate|reproduce|replicate"
-  - "compare.*(results|paper|reference)"
-  - "paper|publication|supplementary"
-
-  # === ANALYSIS/COMPUTATION (action-based) ===
-  - "analyze|analysis|process"
-  - "compute|calculate|calculation"
-  - "run.*(script|simulation|model|analysis)"
-
-  # === CONTAINER/SERVICE USAGE ===
-  - "docker|container"
-  - "install.*(package|library)"
-
-  # === SIMULATION (legacy, keep for compatibility) ===
-  - "simulat(e|ion)"
-  - "scientific.*(python|computation)"
-  - "molecular dynamics"
-  - "electromagnetic"
-  - "quantum|chemistry"
+  # === GENERAL SCIENCE/ENGINEERING ===
+  - "simulat|analys|optimi|minimi|maximi"
+  - "equation|formula|algorithm|method"
+  - "physics|chemistry|biology|materials"
+  - "molecule|protein|sequence|structure"
+  - "circuit|chip|semiconductor|VLSI"
+  - "mesh|grid|element|solver"
+  - "wave|field|particle|atom"
+  - "network|graph|path|flow"
+  - "signal|spectrum|frequency|filter"
 ---
 
 # Scientific Computing

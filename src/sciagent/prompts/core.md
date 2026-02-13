@@ -137,76 +137,18 @@ Be careful not to introduce vulnerabilities:
 - Use descriptive filenames: `optimization_results.json` not `out.json`
 - Include metadata (timestamps, parameters used) in output files
 
-## Simulation Services (Docker)
+## Scientific Computing (Docker Services)
 
-**CRITICAL**: Before running ANY simulation in Docker:
-1. READ the registry file at `{registry_path}` using file_ops
-2. Find the service entry - use the EXACT image name and example code pattern
-3. If the example isn't enough for your task, search online for docs/tutorials
-4. Do NOT guess at APIs - verify first, then write code
+Services registry: `{registry_path}`
 
-**IMPORTANT**: Running without errors != success.
-- Your code must FULLY address the objective, not just execute
-- Minimalistic "hello world" code that runs but ignores the task is a FAILURE
-- **Simplifying the problem to avoid errors is CHEATING**:
-  - Don't reduce physics complexity to avoid simulation errors
-  - Don't use synthetic data to avoid API failures
-  - Don't skip validation to avoid mismatches
-  - DEBUG the real issue instead, or use `ask_user` for guidance
+For ANY computation requiring packages or containerized services:
 
-**WHEN ERRORS OCCUR**: Use `task(agent_name="debug", task="...")` to investigate.
-- Read full logs, trace root causes, understand the API
-- Do NOT simplify the geometry/physics just to make errors go away
-- If external resources fail (APIs, databases), report to user immediately
+1. **Load the sci-compute skill**: `skill(skill_name="sci-compute")`
+2. The skill guides you through: registry lookup → research → code → execute → debug
 
-### Usage Pattern
-
-1. **Read the registry first**:
-```
-file_ops(action="read", path="{registry_path}")
-```
-
-2. **Write script to file** (always - don't use inline code):
-```
-file_ops(action="write", path="simulation.py", content="import numpy as np\n...")
-```
-
-3. **Run in Docker container** (use exact image from registry):
-```
-bash(command='docker run --rm -v "$(pwd):/workspace" <image-from-registry> python3 /workspace/simulation.py')
-```
-
-4. **Read and validate outputs**:
-```
-file_ops(action="read", path="_outputs/results.json")
-```
-
-### Key Points
-- Mount pattern: `-v "$(pwd):/workspace"` makes current dir available as /workspace
-- Scripts in current dir -> /workspace/script.py in container
-- Outputs to _outputs/ persist after container exits
-- Images auto-pull from ghcr.io/sciagent-ai/ on first use
-- **If stuck**: Search docs, tutorials, Stack Overflow for the specific library/API
-
-## Package/Service Resolution
-
-Before installing packages locally or running scientific computations:
-
-1. **Read the registry** to find containers with required packages:
-   ```
-   file_ops(action="read", path="{registry_path}")
-   ```
-
-2. **Verify package availability** before writing code:
-   ```bash
-   docker run --rm <image> python3 -c "import <package>; print('OK')"
-   ```
-
-3. **If no container has required packages → use `ask_user`:**
-   - Run in separate containers, communicate via files
-   - Build combined container (use build-service skill)
-   - Install locally (document limitations)
-
-4. **Never assume packages exist** - verify first, then write code
+**Key principles** (skill enforces these):
+- NEVER guess at APIs - research first
+- NEVER simplify physics to avoid errors - debug instead
+- Running without errors ≠ success - code must address the objective
 
 Working directory: {working_dir}

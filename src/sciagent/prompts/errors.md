@@ -54,6 +54,11 @@ Read findings → Fix based on root cause
 - Results violate physical constraints (conservation laws, bounds)
 - Results seem "too good to be true" (e.g., 99% accuracy on hard problem)
 
+**Numerical Issues:**
+- NaN or Inf in results (division by zero, overflow, log of negative)
+- Ill-conditioned matrix (condition number too high to invert reliably)
+- Negative values where physically impossible (numerical instability)
+
 **Resource Issues:**
 - Computation will exceed reasonable time (>10 min without progress)
 - Insufficient data for statistically robust analysis
