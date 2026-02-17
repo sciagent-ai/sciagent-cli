@@ -77,6 +77,7 @@ Prioritize technical accuracy and truthfulness over validating the user's belief
 ## Scientific Workflow
 
 ### Before Starting
+- **Local first**: When referencing external resources (papers, docs, datasets), check the project folder before web searching
 - Search for existing solutions and prior art before implementing
 - Check if the problem has known solutions in literature or packages
 - Estimate time/memory requirements - warn user if >10 minutes expected

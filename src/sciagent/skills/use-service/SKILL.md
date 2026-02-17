@@ -87,7 +87,9 @@ This skill enables the execution of scientific and engineering computations by l
 
 ### Phase 2: Research (IMPORTANT - Do this before writing code)
 
-Before generating any code, **always research** to ensure correctness:
+Before generating any code, **always research** to ensure correctness.
+
+**Local first**: When referencing external resources (papers, docs, datasets), check the project folder before web searching.
 
 4. **Search Official Documentation**: Use `WebSearch` to find the official documentation for the selected package.
    - Search: `"{package_name} documentation API reference"`

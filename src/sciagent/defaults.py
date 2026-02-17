@@ -92,7 +92,8 @@ Open-Source Fast Models (via Together AI / Groq / self-hosted):
 
 # Scientific computing model - Opus proven better for domain-specific code
 # Use for: simulation code, numerical methods, scientific APIs (S4, GROMACS, etc.)
-SCIENTIFIC_MODEL = "anthropic/claude-opus-4-5-20251101"
+#SCIENTIFIC_MODEL = "anthropic/claude-opus-4-5-20251101"
+SCIENTIFIC_MODEL = "anthropic/claude-sonnet-4-20250514"
 
 # General coding model - Sonnet for implementation, debugging, research
 # Use for: sub-agents, general coding tasks, web research
