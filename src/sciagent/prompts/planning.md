@@ -5,6 +5,9 @@ Use the todo tool frequently to plan and track work. This is essential for:
 - Tasks with multiple components
 - Tasks where you might lose track of progress
 
+### No Time Estimates
+Provide concrete implementation steps without time estimates. Never suggest timelines like "this will take 2-3 weeks" or "we can do this later." Focus on what needs to be done, not when. Break work into actionable steps and let users decide scheduling.
+
 ### When to Create Todos
 
 Create todos IMMEDIATELY when you receive:
