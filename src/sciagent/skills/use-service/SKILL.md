@@ -51,21 +51,29 @@ This skill enables the execution of scientific and engineering computations by l
    ask_user(
      question="Your task requires [X] and [Y], but no single container has both. How should we proceed?",
      options=[
-       "Sequential: Run optimizer and simulator in separate containers, communicate via files",
-       "Build combined: Create a new container with both packages (takes a few minutes)",
+       "Sequential: Run in separate containers, communicate via files (fastest)",
+       "Build container: Create new image with all packages via build-service skill (reusable)",
+       "Install at runtime: pip install in container (slower each run, not persistent)",
        "Other"
-     ]
+     ],
+     context="Building a new container takes a few minutes but is reusable. Sequential is fastest for one-off tasks."
    )
    ```
 
-   **Option A: Sequential execution**
-   - Optimizer writes to `_outputs/params.json`
-   - Simulator reads params, writes `_outputs/results.json`
-   - Optimizer reads results, continues
+   **Option A: Sequential execution** (fastest for one-off)
+   - Container A writes to `_outputs/params.json`
+   - Container B reads params, writes `_outputs/results.json`
+   - Container A reads results, continues
 
-   **Option B: Build combined container**
-   - Use `skill(skill_name="build-service")`
-   - Check `extends:` field for compatible bases
+   **Option B: Build combined container** (recommended for repeated use)
+   - Use `skill(skill_name="build-service")` to create a new container
+   - Check `extends:` field in registry for compatible base images
+   - New image is pushed to GHCR and available for future use
+
+   **Option C: Install at runtime** (quick but not persistent)
+   - Add `pip install <package>` before main script
+   - Slower on each run, not saved to image
+   - Use only for quick tests, not production workflows
 
 4. **Verify before coding**:
    ```bash

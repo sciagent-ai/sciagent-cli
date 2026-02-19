@@ -67,6 +67,9 @@ class OrchestratorConfig:
     verification_strict: bool = True  # True = block on verification failure; False = warn only
     verification_threshold: float = 0.7  # Minimum confidence for "verified" verdict to pass
 
+    # OUTCOME VERIFICATION: Pass original goal to verifier for scientific validation
+    original_request: Optional[str] = None  # Original user request/goal for outcome verification
+
 
 class TaskOrchestrator:
     """
@@ -877,8 +880,14 @@ class TaskOrchestrator:
         """
         import json
 
-        # Build claim summary
-        claim_parts = [f"Task: {task.content}"]
+        # Build claim summary - start with original goal for outcome verification
+        claim_parts = []
+
+        # Add original request/goal if available (critical for outcome verification)
+        if self.config.original_request:
+            claim_parts.append(f"ORIGINAL USER GOAL: {self.config.original_request}\n")
+
+        claim_parts.append(f"Task: {task.content}")
 
         if task.result:
             result_str = str(task.result)

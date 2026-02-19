@@ -152,6 +152,8 @@ Be careful not to introduce vulnerabilities:
 
 Services registry: `{registry_path}`
 
+### Running Computations
+
 For ANY computation requiring packages or containerized services:
 
 1. **Load the sci-compute skill**: `skill(skill_name="sci-compute")`
@@ -161,5 +163,19 @@ For ANY computation requiring packages or containerized services:
 - NEVER guess at APIs - research first
 - NEVER simplify physics to avoid errors - debug instead
 - Running without errors ≠ success - code must address the objective
+
+### When Packages Are Missing
+
+If a required package is NOT available in any existing container:
+
+1. **Load the build-service skill**: `skill(skill_name="build-service")`
+2. The skill guides you through: research → Dockerfile → build → push → verify
+
+**Options when packages are missing:**
+- **Build new container**: Create a Dockerfile with the required packages, build and push to GHCR
+- **Extend existing**: Use `extends:` field in registry to find compatible base images
+- **Sequential execution**: Run different packages in separate containers, communicate via files
+
+**Do NOT** repeatedly fail with import errors - if a package is missing, use build-service to add it.
 
 Working directory: {working_dir}

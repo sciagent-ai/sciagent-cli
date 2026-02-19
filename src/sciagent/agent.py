@@ -216,47 +216,82 @@ class AgentLoop:
         default = request.get("default")
 
         if options:
-            print("\nOptions:")
-            for i, opt in enumerate(options, 1):
-                default_marker = " (default)" if opt == default else ""
-                print(f"  [{i}] {opt}{default_marker}")
-            print(f"  [0] Other (type your own response)")
+            max_attempts = 5  # Prevent infinite loops on bad input
 
-            # Get choice
-            prompt = f"\nYour choice [1-{len(options)}, or 0 for other]"
-            if default:
-                prompt += f" (Enter for '{default}')"
-            prompt += ": "
+            for attempt in range(max_attempts):
+                # Show options on first attempt or after invalid input
+                if attempt == 0:
+                    print("\nOptions:")
+                    for i, opt in enumerate(options, 1):
+                        default_marker = " (default)" if opt == default else ""
+                        print(f"  [{i}] {opt}{default_marker}")
+                    print(f"  [0] Other (type your own response)")
 
-            try:
-                choice = input(prompt).strip()
+                # Get choice
+                prompt = f"\nYour choice [1-{len(options)}, or 0 for other]"
+                if default:
+                    prompt += f" (Enter for '{default}')"
+                prompt += ": "
 
-                if not choice and default:
-                    print(f"Using default: {default}")
-                    return default
+                try:
+                    choice = input(prompt).strip()
 
-                if choice.isdigit():
-                    idx = int(choice)
-                    if 1 <= idx <= len(options):
-                        selected = options[idx - 1]
-                        print(f"Selected: {selected}")
-                        return selected
-                    elif idx == 0:
-                        custom = input("Your response: ").strip()
-                        return custom if custom else (default or options[0])
+                    # Empty input with default available
+                    if not choice and default:
+                        print(f"Using default: {default}")
+                        return default
 
-                # If input matches an option directly, use it
-                if choice in options:
-                    return choice
+                    # Empty input with no default - re-prompt
+                    if not choice:
+                        print("⚠️  Please enter a choice (1-{} or 0 for other)".format(len(options)))
+                        continue
 
-                # Otherwise treat as custom response
-                return choice if choice else (default or options[0])
+                    # Numeric input - validate it's in range
+                    if choice.isdigit():
+                        idx = int(choice)
+                        if 1 <= idx <= len(options):
+                            selected = options[idx - 1]
+                            print(f"✓ Selected: {selected}")
+                            return selected
+                        elif idx == 0:
+                            # User explicitly chose "Other" - get custom response
+                            custom = input("Your response: ").strip()
+                            if custom:
+                                print(f"✓ Custom response: {custom}")
+                                return custom
+                            elif default:
+                                print(f"Using default: {default}")
+                                return default
+                            else:
+                                print("⚠️  Empty response. Please try again.")
+                                continue
+                        else:
+                            # Number out of range
+                            print(f"⚠️  Invalid choice '{idx}'. Please enter 1-{len(options)} or 0 for other.")
+                            continue
 
-            except (EOFError, KeyboardInterrupt):
-                print(f"\nUsing default: {default or options[0]}")
-                return default or options[0]
+                    # Check if input matches an option text exactly (case-insensitive)
+                    choice_lower = choice.lower()
+                    for i, opt in enumerate(options):
+                        if opt.lower() == choice_lower or opt.lower().startswith(choice_lower):
+                            print(f"✓ Selected: {opt}")
+                            return opt
+
+                    # Input doesn't match any option - this is likely an error
+                    # Don't auto-accept arbitrary text as a response
+                    print(f"⚠️  '{choice}' is not a valid option.")
+                    print(f"    Enter a number (1-{len(options)}) or 0 to provide a custom response.")
+
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\nUsing default: {default or options[0]}")
+                    return default or options[0]
+
+            # Exhausted attempts - use default or first option
+            fallback = default or options[0]
+            print(f"\n⚠️  Max attempts reached. Using: {fallback}")
+            return fallback
         else:
-            # Free-form response
+            # Free-form response (no options)
             prompt = "\nYour response"
             if default:
                 prompt += f" (Enter for '{default}')"
@@ -304,6 +339,77 @@ class AgentLoop:
             self._handle_pause_menu()
 
         return self._cancelled
+
+    # =========================================================================
+    # Interruptible LLM Calls
+    # =========================================================================
+
+    def _interruptible_llm_call(
+        self,
+        messages,
+        tools=None,
+        poll_interval: float = 0.2
+    ):
+        """
+        Execute LLM call in a way that can be interrupted by Ctrl+C.
+
+        Runs the actual HTTP call in a background thread and polls for
+        completion while checking the interrupt event. This allows the
+        user to stop long-running LLM calls immediately.
+
+        Args:
+            messages: Messages to send to LLM
+            tools: Tool schemas
+            poll_interval: How often to check for interrupts (seconds)
+
+        Returns:
+            LLMResponse from the model
+
+        Raises:
+            InterruptedError: If user cancelled during the call
+        """
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+        # Container for result/exception from background thread
+        result_container = {"response": None, "error": None}
+
+        def _run_llm():
+            try:
+                result_container["response"] = self.llm.chat(messages, tools=tools)
+            except Exception as e:
+                result_container["error"] = e
+
+        # Start LLM call in background thread
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_llm)
+
+            # Poll for completion while checking interrupt flag
+            while not future.done():
+                # Check if user requested stop
+                if self._cancelled:
+                    # Can't actually cancel the HTTP request, but we can return early
+                    # The background thread will complete eventually but we ignore it
+                    raise InterruptedError("LLM call cancelled by user")
+
+                # Check if user paused (Ctrl+C pressed)
+                if self._interrupt_event.is_set():
+                    # Wait for menu interaction to complete
+                    if self._wait_for_menu_if_paused():
+                        raise InterruptedError("LLM call cancelled by user")
+                    # User chose to continue - keep polling
+
+                # Wait briefly before next check
+                try:
+                    future.result(timeout=poll_interval)
+                    break  # Completed successfully
+                except FuturesTimeoutError:
+                    continue  # Not done yet, keep polling
+
+        # Check for errors from the background thread
+        if result_container["error"]:
+            raise result_container["error"]
+
+        return result_container["response"]
 
     # =========================================================================
     # Skill Auto-Injection
@@ -814,7 +920,10 @@ Provide a concise summary (max 500 words):"""
     # =========================================================================
     
     def _single_step(self) -> LLMResponse:
-        """Execute a single iteration of the agent loop"""
+        """Execute a single iteration of the agent loop.
+
+        Uses interruptible LLM call so user can stop with Ctrl+C.
+        """
         # Validate and repair message structure before LLM call
         # This prevents Anthropic API errors about orphaned tool_use blocks
         issues = self.state.context.validate_and_repair()
@@ -825,9 +934,10 @@ Provide a concise summary (max 500 words):"""
         messages = self.state.context.get_messages()
         tool_schemas = self.tools.get_schemas()
 
-        # Show spinner while waiting for LLM response (only if takes > 0.5s)
-        with Spinner("Thinking", quiet=self.display.quiet, delay=0.5):
-            response = self.llm.chat(messages, tools=tool_schemas)
+        # Use interruptible LLM call - allows Ctrl+C to stop immediately
+        # The spinner runs in the main thread while LLM call runs in background
+        with Spinner("Thinking", quiet=self.display.quiet, delay=0.5, interrupt_event=self._interrupt_event):
+            response = self._interruptible_llm_call(messages, tools=tool_schemas)
 
         # Track usage
         self.total_tokens += response.usage.get("prompt_tokens", 0)
@@ -994,6 +1104,14 @@ Provide a concise summary (max 500 words):"""
 
                 try:
                     response = self._single_step()
+                except InterruptedError:
+                    # LLM call was interrupted by user (via our interruptible wrapper)
+                    # Check if they want to stop or continue
+                    if self._cancelled:
+                        final_response = "(Stopped by user)"
+                        break
+                    # User chose to continue after pause - retry the LLM call
+                    continue
                 except KeyboardInterrupt:
                     # Handle Ctrl+C that escaped signal handler
                     self._paused = True

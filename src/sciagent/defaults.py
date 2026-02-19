@@ -94,27 +94,29 @@ Open-Source Fast Models (via Together AI / Groq / self-hosted):
 # Use for: simulation code, numerical methods, scientific APIs (S4, GROMACS, etc.)
 #SCIENTIFIC_MODEL = "anthropic/claude-opus-4-5-20251101"
 SCIENTIFIC_MODEL = "anthropic/claude-sonnet-4-20250514"
+#SCIENTIFIC_MODEL = "xai/grok-4-1-fast-reasoning"
 
 # General coding model - Sonnet for implementation, debugging, research
 # Use for: sub-agents, general coding tasks, web research
 CODING_MODEL = "anthropic/claude-sonnet-4-20250514"
+#CODING_MODEL = "xai/grok-code-fast-1"
 
 # Fast model for simple tasks - Haiku for speed and cost
 # Use for: file exploration, extraction, summarization, simple queries
 FAST_MODEL = "anthropic/claude-3-haiku-20240307"
+#FAST_MODEL = "xai/grok-3-mini"
 
 # Vision/Multimodal model for image analysis
 # Use for: scientific plots, microscopy, diagrams, data visualization analysis
 VISION_MODEL = "anthropic/claude-opus-4-5-20251101"
 
-# Default for main agent - Opus for scientific work quality
-DEFAULT_MODEL = SCIENTIFIC_MODEL
-
 # Verification model - Used by the independent verifier subagent
 # This model has FRESH CONTEXT (no conversation history) and acts as a skeptical auditor.
-# User can change this to a different model for cost/quality tradeoffs.
-# Sonnet provides good balance of capability and cost for verification tasks.
+# User can change this to a different model for provider/bias and cost/quality tradeoffs.
 VERIFICATION_MODEL = "anthropic/claude-sonnet-4-20250514"
+
+# Default for main agent - Opus for scientific work quality
+DEFAULT_MODEL = SCIENTIFIC_MODEL
 
 # =============================================================================
 # CONTENT LIMITS

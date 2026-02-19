@@ -112,7 +112,15 @@ class Spinner:
         "simple": ["-", "\\", "|", "/"],
     }
 
-    def __init__(self, message: str = "Working", style: str = "dots", quiet: bool = False, delay: float = 0.0, show_hint: bool = True):
+    def __init__(
+        self,
+        message: str = "Working",
+        style: str = "dots",
+        quiet: bool = False,
+        delay: float = 0.0,
+        show_hint: bool = True,
+        interrupt_event: Optional[threading.Event] = None
+    ):
         """
         Args:
             message: Text to display next to spinner
@@ -121,6 +129,8 @@ class Spinner:
             delay: Seconds to wait before showing spinner. If operation completes
                    before delay, no spinner is shown. Default 0 (immediate).
             show_hint: If True, show "ctrl+c to interrupt" hint and elapsed time
+            interrupt_event: Optional threading.Event that signals an interrupt.
+                   When set, the spinner stops immediately and clears its line.
         """
         self.message = message
         self.frames = self.STYLES.get(style, self.STYLES["dots"])
@@ -128,6 +138,7 @@ class Spinner:
         self.delay = delay
         self.show_hint = show_hint
         self._stop = threading.Event()
+        self._interrupt_event = interrupt_event
         self._thread: Optional[threading.Thread] = None
         self._last_line_len = 0
         self._started_display = False  # Track if we've shown anything
@@ -141,22 +152,30 @@ class Spinner:
         secs = int(seconds % 60)
         return f"{minutes}m {secs}s"
 
+    def _should_stop(self) -> bool:
+        """Check if spinner should stop (internal stop or external interrupt)."""
+        if self._stop.is_set():
+            return True
+        if self._interrupt_event and self._interrupt_event.is_set():
+            return True
+        return False
+
     def _spin(self):
         """Animation loop running in background thread."""
         # Wait for delay before starting animation
         if self.delay > 0:
             # Use small increments so we can respond to stop signal quickly
             elapsed = 0.0
-            while elapsed < self.delay and not self._stop.is_set():
+            while elapsed < self.delay and not self._should_stop():
                 time.sleep(0.05)
                 elapsed += 0.05
-            if self._stop.is_set():
+            if self._should_stop():
                 return  # Operation finished before delay - show nothing
 
         self._started_display = True
         self._start_time = time.time()
         i = 0
-        while not self._stop.is_set():
+        while not self._should_stop():
             frame = self.frames[i % len(self.frames)]
 
             # Build status line with optional hint
@@ -173,6 +192,10 @@ class Spinner:
             self._last_line_len = len(line) + 10  # Account for ANSI codes
             i += 1
             time.sleep(0.1)
+
+        # Clear line immediately when stopped by interrupt
+        if self._interrupt_event and self._interrupt_event.is_set():
+            self._clear_line()
 
     def _clear_line(self):
         """Clear the spinner line."""
