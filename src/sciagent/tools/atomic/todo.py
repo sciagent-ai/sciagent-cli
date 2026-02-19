@@ -12,11 +12,275 @@ FEATURES:
 
 from __future__ import annotations
 
+import csv
 import os
+import re
 from typing import Dict, Any, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime
 import uuid
+
+
+# =============================================================================
+# CONTENT VALIDATION - Detect fabricated/error data
+# =============================================================================
+
+class ContentValidator:
+    """
+    Validates file content to detect fabrication or error pages.
+
+    This provides external evidence that cannot be fabricated by the model.
+    Checks include:
+    - HTML/error page detection (suggests 404 or wrong content)
+    - CSV structure validation
+    - Row count verification
+    - Common error patterns
+    """
+
+    # Error page indicators
+    ERROR_PATTERNS = [
+        r"404\s*not\s*found",
+        r"page\s*not\s*found",
+        r"file\s*not\s*found",
+        r"access\s*denied",
+        r"403\s*forbidden",
+        r"500\s*internal\s*server",
+        r"502\s*bad\s*gateway",
+        r"503\s*service\s*unavailable",
+        r"error\s*loading",
+        r"failed\s*to\s*load",
+        r"could\s*not\s*be\s*found",
+        r"the\s*requested\s*url\s*was\s*not\s*found",
+    ]
+
+    # HTML structure indicators
+    HTML_PATTERNS = [
+        r"<!doctype\s+html",
+        r"<html[\s>]",
+        r"<head[\s>]",
+        r"<body[\s>]",
+        r"<script[\s>]",
+        r"<style[\s>]",
+        r"<meta[\s>]",
+        r"<link[\s>]",
+    ]
+
+    @classmethod
+    def is_error_content(cls, content: str) -> Tuple[bool, List[str]]:
+        """
+        Check if content appears to be an error page.
+
+        Returns (is_error, list of matched patterns).
+        """
+        content_lower = content.lower()[:5000]  # Check first 5KB
+        matched = []
+
+        for pattern in cls.ERROR_PATTERNS:
+            if re.search(pattern, content_lower, re.IGNORECASE):
+                matched.append(pattern)
+
+        return len(matched) > 0, matched
+
+    @classmethod
+    def is_html_content(cls, content: str, expected_type: str = None) -> Tuple[bool, List[str]]:
+        """
+        Check if content is HTML when it shouldn't be.
+
+        Args:
+            content: File content
+            expected_type: Expected content type (e.g., 'csv', 'json', 'data')
+
+        Returns (is_html, list of matched patterns).
+        """
+        content_lower = content.lower()[:2000]
+        matched = []
+
+        for pattern in cls.HTML_PATTERNS:
+            if re.search(pattern, content_lower, re.IGNORECASE):
+                matched.append(pattern)
+
+        # Only flag if we expected non-HTML content
+        if expected_type and expected_type.lower() in ('csv', 'json', 'data', 'txt', 'xml'):
+            return len(matched) > 0, matched
+
+        # If no expected type, be conservative - only flag if multiple HTML indicators
+        return len(matched) >= 3, matched
+
+    @classmethod
+    def validate_csv_file(
+        cls,
+        file_path: str,
+        min_rows: int = None,
+        max_rows: int = None,
+        expected_rows: int = None,
+        required_columns: List[str] = None
+    ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """
+        Validate a CSV file structure and content.
+
+        Returns (is_valid, error_message, metadata).
+        """
+        metadata = {
+            "row_count": 0,
+            "column_count": 0,
+            "columns": [],
+            "has_header": False,
+        }
+
+        try:
+            with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                # Read first 1000 chars to check for HTML
+                sample = f.read(1000)
+                f.seek(0)
+
+                # Check for HTML content
+                is_html, html_patterns = cls.is_html_content(sample, expected_type='csv')
+                if is_html:
+                    return False, f"CSV file contains HTML content (patterns: {html_patterns[:3]})", metadata
+
+                # Check for error page content
+                is_error, error_patterns = cls.is_error_content(sample)
+                if is_error:
+                    return False, f"CSV file contains error page content (patterns: {error_patterns[:3]})", metadata
+
+                # Parse CSV
+                f.seek(0)
+                reader = csv.reader(f)
+                rows = list(reader)
+
+                if not rows:
+                    return False, "CSV file is empty", metadata
+
+                # Assume first row is header
+                header = rows[0]
+                data_rows = rows[1:]
+
+                metadata["has_header"] = True
+                metadata["columns"] = header
+                metadata["column_count"] = len(header)
+                metadata["row_count"] = len(data_rows)
+
+                # Validate required columns
+                if required_columns:
+                    missing = [col for col in required_columns if col not in header]
+                    if missing:
+                        return False, f"Missing required columns: {missing}", metadata
+
+                # Validate row count
+                if expected_rows is not None:
+                    if metadata["row_count"] != expected_rows:
+                        return False, f"Expected {expected_rows} rows, found {metadata['row_count']}", metadata
+
+                if min_rows is not None:
+                    if metadata["row_count"] < min_rows:
+                        return False, f"Expected at least {min_rows} rows, found {metadata['row_count']}", metadata
+
+                if max_rows is not None:
+                    if metadata["row_count"] > max_rows:
+                        return False, f"Expected at most {max_rows} rows, found {metadata['row_count']}", metadata
+
+                return True, None, metadata
+
+        except csv.Error as e:
+            return False, f"CSV parsing error: {e}", metadata
+        except Exception as e:
+            return False, f"Error reading CSV file: {e}", metadata
+
+    @classmethod
+    def validate_json_file(cls, file_path: str) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """Validate a JSON file."""
+        import json
+        metadata = {"type": None, "size": 0}
+
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                sample = f.read(1000)
+                f.seek(0)
+
+                # Check for HTML
+                is_html, _ = cls.is_html_content(sample, expected_type='json')
+                if is_html:
+                    return False, "JSON file contains HTML content", metadata
+
+                # Check for error page
+                is_error, _ = cls.is_error_content(sample)
+                if is_error:
+                    return False, "JSON file contains error page content", metadata
+
+                # Parse JSON
+                f.seek(0)
+                data = json.load(f)
+                metadata["type"] = type(data).__name__
+                metadata["size"] = len(data) if hasattr(data, '__len__') else 1
+
+                return True, None, metadata
+
+        except json.JSONDecodeError as e:
+            return False, f"Invalid JSON: {e}", metadata
+        except Exception as e:
+            return False, f"Error reading JSON file: {e}", metadata
+
+    @classmethod
+    def validate_file_content(
+        cls,
+        file_path: str,
+        expected_type: str = None,
+        **kwargs
+    ) -> Tuple[bool, Optional[str], Dict[str, Any]]:
+        """
+        Validate file content based on type.
+
+        Args:
+            file_path: Path to file
+            expected_type: Expected file type ('csv', 'json', 'data', etc.)
+            **kwargs: Type-specific validation options
+                - min_rows, max_rows, expected_rows: For CSV
+                - required_columns: For CSV
+
+        Returns (is_valid, error_message, metadata).
+        """
+        if not os.path.exists(file_path):
+            return False, f"File not found: {file_path}", {}
+
+        # Determine type from extension if not specified
+        if expected_type is None:
+            ext = os.path.splitext(file_path)[1].lower()
+            expected_type = {
+                '.csv': 'csv',
+                '.json': 'json',
+                '.txt': 'text',
+                '.xml': 'xml',
+            }.get(ext, 'data')
+
+        # Type-specific validation
+        if expected_type == 'csv':
+            return cls.validate_csv_file(
+                file_path,
+                min_rows=kwargs.get('min_rows'),
+                max_rows=kwargs.get('max_rows'),
+                expected_rows=kwargs.get('expected_rows'),
+                required_columns=kwargs.get('required_columns'),
+            )
+        elif expected_type == 'json':
+            return cls.validate_json_file(file_path)
+        else:
+            # Generic validation - just check for HTML/error content
+            try:
+                with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                    content = f.read(5000)
+
+                is_html, html_patterns = cls.is_html_content(content, expected_type=expected_type)
+                if is_html:
+                    return False, f"File contains HTML content when {expected_type} expected", {"html_patterns": html_patterns}
+
+                is_error, error_patterns = cls.is_error_content(content)
+                if is_error:
+                    return False, f"File contains error page content", {"error_patterns": error_patterns}
+
+                return True, None, {"size": os.path.getsize(file_path)}
+
+            except Exception as e:
+                return False, f"Error reading file: {e}", {}
 
 
 @dataclass
@@ -683,17 +947,76 @@ COMMANDS:
         return True, None
 
     def _validate_artifact(self, item: TodoItem, result: Any) -> Optional[str]:
-        """Validate that the declared artifact exists."""
+        """
+        Validate that the declared artifact exists AND contains valid content.
+
+        This provides external validation that cannot be fabricated:
+        1. File existence check
+        2. Content validation (not HTML/error page)
+        3. Structure validation for known types (CSV, JSON)
+        4. Row count validation if specified
+        5. Execution validation (command must run and succeed)
+        6. Metric validation (check specific values in output files)
+
+        The 'produces' field supports extended format:
+        - "file:<path>" - basic file existence
+        - "file:<path>:csv" - CSV with content validation
+        - "file:<path>:csv:100" - CSV with exactly 100 data rows expected
+        - "file:<path>:csv:100+" - CSV with at least 100 rows
+        - "file:<path>:json" - JSON with validation
+        - "exec:<command>" - command must run and exit with code 0
+        - "metric:<file>:<field>:<op><value>" - check field in JSON/CSV file
+          Examples: "metric:results.json:accuracy:>=0.95"
+                    "metric:results.json:error:<0.01"
+                    "metric:output.csv:row_count:>=100"
+        """
         if not item.produces:
             return None
 
         produces = item.produces
 
-        # Handle file artifacts: "file:<path>"
+        # Handle execution validation: "exec:<command>"
+        if produces.startswith("exec:"):
+            command = produces[5:]  # Remove "exec:" prefix
+            return self._validate_exec(command)
+
+        # Handle metric validation: "metric:<file>:<field>:<op><value>"
+        if produces.startswith("metric:"):
+            return self._validate_metric(produces)
+
+        # Handle file artifacts: "file:<path>" or "file:<path>:<type>" or "file:<path>:<type>:<rows>"
         if produces.startswith("file:"):
-            file_path = produces[5:]  # Remove "file:" prefix
+            parts = produces.split(":", maxsplit=3)
+            file_path = parts[1] if len(parts) > 1 else ""
+            expected_type = parts[2] if len(parts) > 2 else None
+            row_spec = parts[3] if len(parts) > 3 else None
+
+            # Basic existence check
             if not os.path.exists(file_path):
                 return f"Artifact not found: {file_path}. Task declared produces='{produces}' but file does not exist."
+
+            # Content validation
+            validation_kwargs = {}
+
+            # Parse row specification
+            if row_spec:
+                if row_spec.endswith('+'):
+                    validation_kwargs['min_rows'] = int(row_spec[:-1])
+                elif row_spec.endswith('-'):
+                    validation_kwargs['max_rows'] = int(row_spec[:-1])
+                else:
+                    validation_kwargs['expected_rows'] = int(row_spec)
+
+            # Validate content
+            is_valid, error_msg, metadata = ContentValidator.validate_file_content(
+                file_path,
+                expected_type=expected_type,
+                **validation_kwargs
+            )
+
+            if not is_valid:
+                return f"Artifact validation failed for {file_path}: {error_msg}"
+
             return None
 
         # Handle data/metrics - just check result is not None
@@ -702,11 +1025,201 @@ COMMANDS:
                 return f"Task declared produces='{produces}' but result is None"
             return None
 
-        # Unknown produces type - treat as file path
+        # Unknown produces type - treat as file path and validate content
         if not os.path.exists(produces):
             return f"Artifact not found: {produces}"
 
+        # Validate content of the file
+        is_valid, error_msg, _ = ContentValidator.validate_file_content(produces)
+        if not is_valid:
+            return f"Artifact validation failed for {produces}: {error_msg}"
+
         return None
+
+    def _validate_exec(self, command: str) -> Optional[str]:
+        """
+        Validate by running a command and checking exit code.
+
+        This provides hard verification that cannot be fabricated:
+        - Command is actually executed
+        - Exit code must be 0 for success
+        - Output is logged for audit trail
+
+        Args:
+            command: Shell command to run (e.g., "pytest tests/")
+
+        Returns:
+            Error message if validation fails, None if successful.
+        """
+        import subprocess
+
+        try:
+            print(f"    🔍 Validating: {command}")
+
+            result = subprocess.run(
+                command,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode != 0:
+                # Include first few lines of output for debugging
+                stderr_preview = result.stderr[:500] if result.stderr else ""
+                stdout_preview = result.stdout[:500] if result.stdout else ""
+                output_preview = stderr_preview or stdout_preview
+
+                return (
+                    f"Execution validation failed: '{command}' exited with code {result.returncode}. "
+                    f"Output: {output_preview[:200]}"
+                )
+
+            print(f"    ✓ Validation passed: {command}")
+            return None
+
+        except subprocess.TimeoutExpired:
+            return f"Execution validation failed: '{command}' timed out after 300s"
+        except Exception as e:
+            return f"Execution validation failed: '{command}' error: {str(e)}"
+
+    def _validate_metric(self, produces: str) -> Optional[str]:
+        """
+        Validate a specific metric value in an output file.
+
+        Format: "metric:<file>:<field>:<op><value>"
+        Examples:
+            - "metric:results.json:accuracy:>=0.95"
+            - "metric:results.json:error:<0.01"
+            - "metric:results.json:converged:==true"
+            - "metric:output.csv:row_count:>=100"
+
+        Supported operators: >=, <=, >, <, ==, !=
+
+        Args:
+            produces: Full produces specification
+
+        Returns:
+            Error message if validation fails, None if successful.
+        """
+        import json
+
+        # Parse the specification
+        parts = produces.split(":", maxsplit=3)
+        if len(parts) < 4:
+            return f"Invalid metric specification: '{produces}'. Expected 'metric:<file>:<field>:<op><value>'"
+
+        _, file_path, field, check = parts
+
+        # Parse operator and value from check (e.g., ">=0.95" -> (">=", 0.95))
+        op_match = re.match(r'^(>=|<=|>|<|==|!=)(.+)$', check)
+        if not op_match:
+            return f"Invalid metric check: '{check}'. Expected operator (>=, <=, >, <, ==, !=) followed by value"
+
+        operator, expected_str = op_match.groups()
+
+        # Convert expected value to appropriate type
+        expected_str_lower = expected_str.lower()
+        if expected_str_lower == 'true':
+            expected = True
+        elif expected_str_lower == 'false':
+            expected = False
+        elif expected_str_lower in ('none', 'null'):
+            expected = None
+        else:
+            try:
+                expected = float(expected_str)
+            except ValueError:
+                expected = expected_str  # Keep as string
+
+        # Check file exists
+        if not os.path.exists(file_path):
+            return f"Metric validation failed: file not found: {file_path}"
+
+        # Extract actual value from file
+        actual = None
+        try:
+            ext = os.path.splitext(file_path)[1].lower()
+
+            if ext == '.json':
+                with open(file_path, 'r') as f:
+                    data = json.load(f)
+
+                # Support nested fields with dot notation
+                actual = self._extract_json_value(data, field)
+
+            elif ext == '.csv':
+                # Special handling for CSV
+                if field == 'row_count':
+                    with open(file_path, 'r') as f:
+                        reader = csv.reader(f)
+                        rows = list(reader)
+                        actual = len(rows) - 1  # Subtract header
+                else:
+                    return f"Metric validation: CSV field '{field}' not supported. Use 'row_count' or use JSON."
+
+            else:
+                return f"Metric validation: unsupported file type '{ext}'. Use .json or .csv"
+
+        except Exception as e:
+            return f"Metric validation failed: error reading {file_path}: {str(e)}"
+
+        if actual is None:
+            return f"Metric validation failed: field '{field}' not found in {file_path}"
+
+        # Compare values
+        comparison_result = self._compare_values(actual, operator, expected)
+
+        if not comparison_result:
+            return (
+                f"Metric validation failed: {field}={actual} does not satisfy {operator}{expected}. "
+                f"File: {file_path}"
+            )
+
+        print(f"    ✓ Metric validated: {field}={actual} {operator} {expected}")
+        return None
+
+    def _extract_json_value(self, data: Any, field: str) -> Any:
+        """Extract a value from nested JSON using dot notation."""
+        parts = field.split('.')
+        current = data
+
+        for part in parts:
+            if isinstance(current, dict):
+                current = current.get(part)
+            elif isinstance(current, list) and part.isdigit():
+                idx = int(part)
+                current = current[idx] if idx < len(current) else None
+            else:
+                return None
+
+            if current is None:
+                return None
+
+        return current
+
+    def _compare_values(self, actual: Any, operator: str, expected: Any) -> bool:
+        """Compare actual value against expected using operator."""
+        try:
+            # Convert to same type for comparison
+            if isinstance(expected, bool):
+                actual = bool(actual)
+            elif isinstance(expected, float) and not isinstance(actual, bool):
+                actual = float(actual)
+
+            ops = {
+                '>=': lambda a, b: a >= b,
+                '<=': lambda a, b: a <= b,
+                '>': lambda a, b: a > b,
+                '<': lambda a, b: a < b,
+                '==': lambda a, b: a == b,
+                '!=': lambda a, b: a != b,
+            }
+
+            return ops[operator](actual, expected)
+
+        except (ValueError, TypeError):
+            return False
 
     def _validate_target(self, item: TodoItem, result: Any) -> Optional[str]:
         """Validate that the result meets the target criteria."""

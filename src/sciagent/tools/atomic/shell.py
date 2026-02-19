@@ -16,10 +16,13 @@ Visual Output:
 
 from __future__ import annotations
 
+import json
 import subprocess
 import os
 import hashlib
 import platform
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List
 from dataclasses import dataclass
@@ -31,6 +34,203 @@ class ToolResult:
     success: bool
     output: Any
     error: Optional[str] = None
+
+
+# =============================================================================
+# EXECUTION LOGGING - Audit trail for command execution
+# =============================================================================
+
+class ExecLogger:
+    """
+    Logs all command executions for external validation.
+
+    This creates an immutable audit trail that the model cannot fabricate.
+    The orchestrator can compare these logs against task claims to detect
+    when the model claims to have run something it didn't.
+
+    Log format (JSONL):
+    {
+        "timestamp": "2025-01-15T10:30:00",
+        "command": "python simulate.py",
+        "exit_code": 0,
+        "success": true,
+        "duration_seconds": 45.2,
+        "stdout_preview": "first 500 chars...",
+        "stderr_preview": "first 500 chars...",
+        "output_size": 12345,
+        "timeout": false,
+        "working_dir": "/path/to/dir",
+        "error_indicators": []
+    }
+    """
+
+    _instance = None
+    _log_dir: Path = None
+    _log_file: Path = None
+
+    # Indicators of execution problems
+    ERROR_INDICATORS = [
+        "error:",
+        "exception:",
+        "traceback",
+        "failed",
+        "fatal:",
+        "segmentation fault",
+        "killed",
+        "oom",
+        "out of memory",
+        "permission denied",
+        "not found",
+        "no such file",
+        "syntax error",
+        "import error",
+        "module not found",
+    ]
+
+    # Commands that indicate verification/testing
+    VERIFICATION_COMMANDS = [
+        "pytest", "python -m pytest",
+        "npm test", "yarn test",
+        "go test",
+        "cargo test",
+        "make test",
+        "unittest",
+    ]
+
+    def __new__(cls, log_dir: str = None):
+        """Singleton pattern to ensure single log file."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, log_dir: str = None):
+        if self._initialized:
+            return
+
+        # Default to _logs in current working directory
+        if log_dir is None:
+            log_dir = os.path.join(os.getcwd(), "_logs")
+
+        self._log_dir = Path(log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._log_file = self._log_dir / "exec_log.jsonl"
+        self._initialized = True
+
+    def log_execution(
+        self,
+        command: str,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+        duration_seconds: float,
+        timeout: bool = False,
+        working_dir: str = None,
+        error: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Log a command execution with analysis.
+
+        Returns the log entry (useful for immediate validation).
+        """
+        timestamp = datetime.now().isoformat()
+
+        # Preview first 500 chars of output
+        stdout_preview = stdout[:500] if stdout else ""
+        stderr_preview = stderr[:500] if stderr else ""
+
+        # Detect error indicators in output
+        combined_output = (stdout + stderr).lower()[:5000]
+        error_indicators = [
+            indicator for indicator in self.ERROR_INDICATORS
+            if indicator in combined_output
+        ]
+
+        # Check if this was a verification command
+        cmd_lower = command.lower()
+        is_verification = any(
+            v in cmd_lower for v in self.VERIFICATION_COMMANDS
+        )
+
+        entry = {
+            "timestamp": timestamp,
+            "command": command,
+            "exit_code": exit_code,
+            "success": exit_code == 0 and not timeout,
+            "duration_seconds": round(duration_seconds, 2),
+            "stdout_preview": stdout_preview,
+            "stderr_preview": stderr_preview,
+            "output_size": len(stdout) + len(stderr),
+            "timeout": timeout,
+            "working_dir": working_dir,
+            "error_indicators": error_indicators,
+            "is_verification": is_verification,
+            "error": error,
+        }
+
+        # Append to log file
+        try:
+            with open(self._log_file, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            print(f"⚠️ Failed to write exec log: {e}")
+
+        return entry
+
+    def get_log_path(self) -> Path:
+        """Return path to the log file."""
+        return self._log_file
+
+    def get_recent_executions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Read recent execution entries from log."""
+        entries = []
+        try:
+            if self._log_file.exists():
+                with open(self._log_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            entries.append(json.loads(line))
+        except Exception as e:
+            print(f"⚠️ Failed to read exec log: {e}")
+
+        return entries[-limit:] if limit else entries
+
+    def find_execution(self, command_pattern: str) -> List[Dict[str, Any]]:
+        """Find executions matching a command pattern."""
+        entries = self.get_recent_executions(limit=0)
+        pattern_lower = command_pattern.lower()
+        return [
+            e for e in entries
+            if pattern_lower in e.get("command", "").lower()
+        ]
+
+    def get_verification_runs(self) -> List[Dict[str, Any]]:
+        """Get all verification/test command executions."""
+        entries = self.get_recent_executions(limit=0)
+        return [e for e in entries if e.get("is_verification", False)]
+
+    def get_failed_executions(self) -> List[Dict[str, Any]]:
+        """Get all failed command executions."""
+        entries = self.get_recent_executions(limit=0)
+        return [e for e in entries if not e.get("success", True)]
+
+    def clear(self):
+        """Clear the execution log (for testing)."""
+        if self._log_file.exists():
+            self._log_file.unlink()
+
+
+# Global execution logger instance
+_exec_logger: Optional[ExecLogger] = None
+
+
+def get_exec_logger(log_dir: str = None) -> ExecLogger:
+    """Get or create the global execution logger."""
+    global _exec_logger
+    if _exec_logger is None:
+        _exec_logger = ExecLogger(log_dir)
+    return _exec_logger
 
 
 class ShellTool:
@@ -236,6 +436,10 @@ class ShellTool:
         Visual Output:
         - Detects newly generated image files (png, jpg, svg, pdf, etc.)
         - Automatically opens them for viewing
+
+        Execution Logging:
+        - All executions logged to _logs/exec_log.jsonl for audit trail
+        - Creates external evidence that cannot be fabricated
         """
         if not command or not command.strip():
             return ToolResult(
@@ -245,6 +449,8 @@ class ShellTool:
             )
 
         timeout = self._adjust_timeout(command, timeout)
+        logger = get_exec_logger(str(self._logs_dir))
+        start_time = time.time()
 
         # Capture existing images before running command
         images_before = self._get_existing_images() if self.auto_open_images else set()
@@ -259,6 +465,8 @@ class ShellTool:
                 cwd=self.working_dir
             )
 
+            duration = time.time() - start_time
+
             # Combine stdout and stderr
             output = ""
             if result.stdout:
@@ -267,6 +475,18 @@ class ShellTool:
                 output += f"\n[stderr]\n{result.stderr}" if output else result.stderr
 
             success = result.returncode == 0
+
+            # Log execution for audit trail (external evidence)
+            logger.log_execution(
+                command=command,
+                exit_code=result.returncode,
+                stdout=result.stdout or "",
+                stderr=result.stderr or "",
+                duration_seconds=duration,
+                timeout=False,
+                working_dir=self.working_dir,
+                error=None if success else f"Exit code: {result.returncode}",
+            )
 
             # Truncate output to save tokens
             truncated_output = self._truncate_output(output, command, success)
@@ -300,8 +520,32 @@ class ShellTool:
             )
 
         except subprocess.TimeoutExpired:
+            duration = time.time() - start_time
+            # Log timeout for audit trail
+            logger.log_execution(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration_seconds=duration,
+                timeout=True,
+                working_dir=self.working_dir,
+                error=f"Command timed out after {timeout}s",
+            )
             return ToolResult(success=False, output=None, error=f"Command timed out after {timeout}s")
         except Exception as e:
+            duration = time.time() - start_time
+            # Log exception for audit trail
+            logger.log_execution(
+                command=command,
+                exit_code=-1,
+                stdout="",
+                stderr="",
+                duration_seconds=duration,
+                timeout=False,
+                working_dir=self.working_dir,
+                error=str(e),
+            )
             return ToolResult(success=False, output=None, error=str(e))
 
     def to_schema(self) -> Dict:

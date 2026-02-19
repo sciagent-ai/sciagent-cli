@@ -47,6 +47,14 @@ from .subagent import (
     SubAgentRegistry, SubAgentOrchestrator,
     create_agent_with_subagents
 )
+from .provenance import (
+    ProvenanceChecker, ProvenanceResult, ProvenanceIssue,
+    check_provenance
+)
+from .orchestrator import (
+    TaskOrchestrator, OrchestratorConfig, ExecutionResult,
+    WorkflowBuilder, create_orchestrator
+)
 from .defaults import DEFAULT_MODEL
 
 __version__ = "0.1.0"
@@ -67,4 +75,10 @@ __all__ = [
     "SubAgent", "SubAgentConfig", "SubAgentResult",
     "SubAgentRegistry", "SubAgentOrchestrator",
     "create_agent_with_subagents",
+    # Provenance & Data Validation
+    "ProvenanceChecker", "ProvenanceResult", "ProvenanceIssue",
+    "check_provenance",
+    # Orchestrator
+    "TaskOrchestrator", "OrchestratorConfig", "ExecutionResult",
+    "WorkflowBuilder", "create_orchestrator",
 ]

@@ -6,6 +6,7 @@ LLM Interface - Model-agnostic LLM calls via litellm
 # and fields don't match expected schema (e.g., thinking_blocks for Claude)
 import warnings
 import os
+import time
 
 # Method 1: Comprehensive warning filters
 # Filter by message content (most reliable for runtime warnings)
@@ -216,11 +217,15 @@ class LLMClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         reasoning_effort: Optional[str] = None,  # "low", "medium", "high" or None
+        max_retries: int = 3,  # Max retries for rate limit errors
+        retry_base_delay: float = 2.0,  # Base delay for exponential backoff (seconds)
     ):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.reasoning_effort = reasoning_effort  # Extended thinking (Claude, Gemini, OpenAI o-series)
+        self.max_retries = max_retries
+        self.retry_base_delay = retry_base_delay
 
         # Set API key if provided
         if api_key:
@@ -250,6 +255,72 @@ class LLMClient:
         """Check if current model is an OpenAI model"""
         model_lower = self.model.lower()
         return "gpt" in model_lower or "openai" in model_lower or "o1" in model_lower or "o3" in model_lower
+
+    def _is_xai_model(self) -> bool:
+        """Check if current model is an xAI/Grok model"""
+        model_lower = self.model.lower()
+        return "grok" in model_lower or "xai/" in model_lower
+
+    def _supports_reasoning_effort(self) -> bool:
+        """
+        Check if the model supports reasoning_effort parameter.
+
+        Note: xAI/Grok models do NOT support reasoning_effort - they use model
+        naming conventions (e.g., grok-4-fast-reasoning) instead.
+        See: https://github.com/BerriAI/litellm/issues/16204
+        """
+        if self._is_xai_model():
+            return False
+        return True
+
+    def _call_with_retry(self, call_kwargs: Dict[str, Any], is_stream: bool = False):
+        """
+        Execute LLM completion with retry logic for rate limit errors.
+
+        Uses exponential backoff: delay = base_delay * (2 ^ attempt)
+        """
+        import re
+
+        last_error = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                return completion(**call_kwargs)
+            except Exception as e:
+                error_str = str(e)
+                error_type = type(e).__name__
+
+                # Check if it's a rate limit error (works with litellm's RateLimitError)
+                is_rate_limit = (
+                    "RateLimitError" in error_type or
+                    "rate_limit" in error_str.lower() or
+                    "rate limit" in error_str.lower() or
+                    "429" in error_str
+                )
+
+                if not is_rate_limit:
+                    # Not a rate limit error - don't retry
+                    raise
+
+                last_error = e
+
+                if attempt >= self.max_retries:
+                    # Exhausted retries
+                    raise
+
+                # Parse suggested wait time from error message if available
+                # e.g., "Please try again in 7.38s"
+                wait_time = self.retry_base_delay * (2 ** attempt)
+                match = re.search(r"try again in ([\d.]+)s", error_str)
+                if match:
+                    suggested_wait = float(match.group(1))
+                    wait_time = max(wait_time, suggested_wait + 0.5)  # Add buffer
+
+                print(f"⏳ Rate limit hit. Waiting {wait_time:.1f}s before retry ({attempt + 1}/{self.max_retries})...")
+                time.sleep(wait_time)
+
+        # Should not reach here, but just in case
+        if last_error:
+            raise last_error
 
     def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -422,8 +493,9 @@ class LLMClient:
             call_kwargs["base_url"] = self.base_url
 
         # Add reasoning_effort for extended thinking (works on Claude, Gemini, OpenAI o-series)
-        # litellm.drop_params=True ensures this is safely ignored on unsupported models
-        if self.reasoning_effort:
+        # Note: xAI/Grok models don't support this param and litellm.drop_params doesn't
+        # work for them (see https://github.com/BerriAI/litellm/issues/16204)
+        if self.reasoning_effort and self._supports_reasoning_effort():
             call_kwargs["reasoning_effort"] = self.reasoning_effort
             # Anthropic requires temperature=1 when extended thinking is enabled
             if self._is_anthropic_model():
@@ -438,7 +510,7 @@ class LLMClient:
         # These warnings occur when litellm's response models have extra/missing fields
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            response = completion(**call_kwargs)
+            response = self._call_with_retry(call_kwargs)
 
             # Parse response (also under warnings suppression as model_dump triggers them)
             choice = response.choices[0]
@@ -518,7 +590,7 @@ class LLMClient:
         # Suppress pydantic serialization warnings during streaming
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            response = completion(**call_kwargs)
+            response = self._call_with_retry(call_kwargs, is_stream=True)
 
             full_content = ""
             tool_calls = []

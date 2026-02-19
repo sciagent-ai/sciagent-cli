@@ -18,14 +18,199 @@ IMPROVEMENTS:
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, field
 
 import requests
+
+
+# =============================================================================
+# FETCH LOGGING - Unbiased validation for data provenance
+# =============================================================================
+
+class FetchLogger:
+    """
+    Logs all HTTP fetch operations for external validation.
+
+    This creates an immutable audit trail that the model cannot fabricate.
+    The orchestrator/provenance checker can compare these logs against
+    task claims to detect data fabrication.
+
+    Log format (JSONL):
+    {
+        "timestamp": "2025-01-15T10:30:00",
+        "url": "https://example.com/data.csv",
+        "final_url": "https://example.com/data.csv",  # After redirects
+        "status_code": 200,
+        "content_type": "text/csv",
+        "content_length": 12345,
+        "content_preview": "first 200 chars...",
+        "is_error_page": false,
+        "error_indicators": [],
+        "success": true,
+        "error": null
+    }
+    """
+
+    _instance = None
+    _log_dir: Path = None
+    _log_file: Path = None
+
+    # Indicators that content is an error page, not actual data
+    ERROR_INDICATORS = [
+        "404 not found",
+        "page not found",
+        "error 404",
+        "file not found",
+        "access denied",
+        "403 forbidden",
+        "500 internal server error",
+        "502 bad gateway",
+        "503 service unavailable",
+        "this page doesn't exist",
+        "the requested url was not found",
+    ]
+
+    # HTML indicators - suggests we got a webpage, not data
+    HTML_INDICATORS = [
+        "<!doctype html",
+        "<html",
+        "<head>",
+        "<body>",
+        "text/html",
+    ]
+
+    def __new__(cls, log_dir: str = None):
+        """Singleton pattern to ensure single log file."""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, log_dir: str = None):
+        if self._initialized:
+            return
+
+        # Default to _logs in current working directory
+        if log_dir is None:
+            log_dir = os.path.join(os.getcwd(), "_logs")
+
+        self._log_dir = Path(log_dir)
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._log_file = self._log_dir / "fetch_log.jsonl"
+        self._initialized = True
+
+    def log_fetch(
+        self,
+        url: str,
+        final_url: str,
+        status_code: int,
+        content_type: str,
+        content: str,
+        success: bool,
+        error: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Log a fetch operation with content analysis.
+
+        Returns the log entry (useful for immediate validation).
+        """
+        timestamp = datetime.now().isoformat()
+        content_preview = content[:200] if content else ""
+        content_lower = content.lower()[:2000] if content else ""
+
+        # Detect error page indicators
+        error_indicators = [
+            indicator for indicator in self.ERROR_INDICATORS
+            if indicator in content_lower
+        ]
+
+        # Detect if content is HTML (might be error page or wrong content type)
+        is_html = any(
+            indicator in content_lower
+            for indicator in self.HTML_INDICATORS
+        )
+
+        # Flag as error page if status is error OR content has error indicators
+        is_error_page = (
+            status_code >= 400 or
+            len(error_indicators) > 0 or
+            (is_html and "text/html" not in content_type.lower() and content_type != "")
+        )
+
+        entry = {
+            "timestamp": timestamp,
+            "url": url,
+            "final_url": final_url,
+            "status_code": status_code,
+            "content_type": content_type,
+            "content_length": len(content) if content else 0,
+            "content_preview": content_preview,
+            "is_html": is_html,
+            "is_error_page": is_error_page,
+            "error_indicators": error_indicators,
+            "success": success,
+            "error": error,
+        }
+
+        # Append to log file
+        try:
+            with open(self._log_file, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:
+            print(f"⚠️ Failed to write fetch log: {e}")
+
+        return entry
+
+    def get_log_path(self) -> Path:
+        """Return path to the log file."""
+        return self._log_file
+
+    def get_recent_fetches(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Read recent fetch entries from log."""
+        entries = []
+        try:
+            if self._log_file.exists():
+                with open(self._log_file, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line:
+                            entries.append(json.loads(line))
+        except Exception as e:
+            print(f"⚠️ Failed to read fetch log: {e}")
+
+        return entries[-limit:] if limit else entries
+
+    def find_fetch_for_url(self, url: str) -> Optional[Dict[str, Any]]:
+        """Find the most recent fetch entry for a URL."""
+        entries = self.get_recent_fetches(limit=0)  # Get all
+        for entry in reversed(entries):
+            if entry.get("url") == url or entry.get("final_url") == url:
+                return entry
+        return None
+
+    def clear(self):
+        """Clear the fetch log (for testing)."""
+        if self._log_file.exists():
+            self._log_file.unlink()
+
+
+# Global fetch logger instance
+_fetch_logger: Optional[FetchLogger] = None
+
+
+def get_fetch_logger(log_dir: str = None) -> FetchLogger:
+    """Get or create the global fetch logger."""
+    global _fetch_logger
+    if _fetch_logger is None:
+        _fetch_logger = FetchLogger(log_dir)
+    return _fetch_logger
 
 # Import defaults for model configuration
 from ...defaults import FAST_MODEL, WEB_FETCH_MAX_CONTENT, WEB_FETCH_DISPLAY_LIMIT
@@ -486,10 +671,14 @@ TIPS:
         used by Claude Code's WebFetch tool.
 
         Supports HTML, plain text, and PDF content.
+
+        IMPORTANT: All fetch operations are logged to _logs/fetch_log.jsonl for
+        external validation. This creates an audit trail that cannot be fabricated.
         """
         fetch_date = datetime.now().strftime('%Y-%m-%d %H:%M')
         source_type = self._classify_source(url)
         quality = self._get_quality_emoji(source_type)
+        logger = get_fetch_logger()
 
         print(f"📄 Fetching: {url}")
 
@@ -590,6 +779,17 @@ TIPS:
             print(f"✅ Fetched {len(content):,} chars from {source_type} source" +
                   (f" (LLM-extracted)" if extraction_used else ""))
 
+            # Log fetch for external validation (unbiased audit trail)
+            log_entry = logger.log_fetch(
+                url=url,
+                final_url=final_url,
+                status_code=response.status_code,
+                content_type=content_type,
+                content=content,
+                success=True,
+                error=None
+            )
+
             return ToolResult(
                 success=True,
                 output="\n".join(lines),
@@ -606,35 +806,60 @@ TIPS:
                     "extraction_used": extraction_used,
                     "is_pdf": is_pdf,
                     "full_content": content,  # Include full content in metadata
+                    "fetch_log_entry": log_entry,  # Include log entry for validation
                 }
             )
 
         except requests.exceptions.Timeout:
+            error_msg = f"Timeout fetching {url} (>30s)"
+            logger.log_fetch(
+                url=url, final_url=url, status_code=0,
+                content_type="", content="", success=False, error=error_msg
+            )
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Timeout fetching {url} (>30s)",
+                error=error_msg,
                 metadata={"url": url}
             )
         except requests.exceptions.HTTPError as e:
+            status_code = e.response.status_code if e.response else 0
+            error_msg = f"HTTP error fetching {url}: {status_code}"
+            # Log with response content if available (may be error page)
+            error_content = e.response.text[:500] if e.response else ""
+            logger.log_fetch(
+                url=url, final_url=url, status_code=status_code,
+                content_type=e.response.headers.get('Content-Type', '') if e.response else "",
+                content=error_content, success=False, error=error_msg
+            )
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"HTTP error fetching {url}: {e.response.status_code}",
-                metadata={"url": url, "status_code": e.response.status_code}
+                error=error_msg,
+                metadata={"url": url, "status_code": status_code}
             )
         except requests.exceptions.RequestException as e:
+            error_msg = f"Request error fetching {url}: {str(e)}"
+            logger.log_fetch(
+                url=url, final_url=url, status_code=0,
+                content_type="", content="", success=False, error=error_msg
+            )
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Request error fetching {url}: {str(e)}",
+                error=error_msg,
                 metadata={"url": url}
             )
         except Exception as e:
+            error_msg = f"Failed to fetch {url}: {str(e)}"
+            logger.log_fetch(
+                url=url, final_url=url, status_code=0,
+                content_type="", content="", success=False, error=error_msg
+            )
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Failed to fetch {url}: {str(e)}",
+                error=error_msg,
                 metadata={"url": url}
             )
 

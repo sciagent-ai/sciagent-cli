@@ -14,20 +14,25 @@ For simulation services (RCWA, MEEP, etc.), use shell to run Docker directly.
 See services/registry.yaml for available images.
 """
 
-from .shell import ShellTool
+from .shell import ShellTool, ExecLogger, get_exec_logger
 from .file_ops import FileOpsTool
 from .search import SearchTool
-from .web import WebTool
-from .todo import TodoTool
+from .web import WebTool, FetchLogger, get_fetch_logger
+from .todo import TodoTool, ContentValidator
 from .ask_user import AskUserTool
 from .skill import SkillTool
 
 __all__ = [
     "ShellTool",
+    "ExecLogger",
+    "get_exec_logger",
     "FileOpsTool",
     "SearchTool",
     "WebTool",
+    "FetchLogger",
+    "get_fetch_logger",
     "TodoTool",
+    "ContentValidator",
     "AskUserTool",
     "SkillTool",
 ]

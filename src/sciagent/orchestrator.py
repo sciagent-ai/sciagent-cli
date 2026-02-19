@@ -5,6 +5,7 @@ Integrates:
 - TodoGraph for dependency tracking
 - SubAgentOrchestrator for parallel/sequential execution
 - Result injection for dependent tasks
+- ProvenanceChecker for data validation gates
 
 FEATURES:
 1. Automatic dependency resolution
@@ -12,10 +13,12 @@ FEATURES:
 3. Result passing between dependent tasks
 4. Progress tracking and reporting
 5. Error handling and task retry
+6. DATA GATE: Hard verification before analysis phase (prevents fabrication)
 """
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
@@ -24,6 +27,7 @@ from datetime import datetime
 
 from .tools.atomic.todo import TodoTool, TodoGraph, TodoItem
 from .subagent import SubAgentOrchestrator, SubAgentResult, SubAgentConfig
+from .provenance import ProvenanceChecker, ProvenanceResult
 
 
 @dataclass
@@ -46,6 +50,18 @@ class OrchestratorConfig:
     timeout_per_task: float = 300.0  # 5 minutes
     verbose: bool = True
 
+    # DATA GATE: Hard verification settings
+    enable_data_gate: bool = True  # Verify data before analysis
+    data_gate_strict: bool = True  # Fail on any provenance error
+    data_acquisition_types: tuple = ("research", "data", "download", "fetch")  # Task types that acquire data
+    analysis_types: tuple = ("analysis", "code", "compute", "validate")  # Task types that use data
+
+    # EXEC GATE: Verify commands actually ran
+    enable_exec_gate: bool = True  # Verify execution before final output
+    exec_gate_strict: bool = True  # Fail on execution verification errors
+    verification_types: tuple = ("validate", "test", "verify", "check")  # Task types that should run verification
+    output_types: tuple = ("output", "report", "final", "deliver")  # Task types that produce final output
+
 
 class TaskOrchestrator:
     """
@@ -56,6 +72,20 @@ class TaskOrchestrator:
     - Independent tasks run in parallel
     - Dependent tasks wait for their inputs
     - Results are automatically passed to dependents
+
+    DATA GATE FEATURE:
+    When enable_data_gate=True, the orchestrator verifies data provenance
+    before allowing analysis tasks to proceed. This prevents data fabrication
+    by requiring external evidence (fetch logs, file validation) that the
+    model cannot fabricate.
+
+    Data acquisition tasks (research, download, fetch) produce files.
+    Before analysis tasks can run, the orchestrator:
+    1. Checks fetch logs - Did HTTP requests actually succeed?
+    2. Validates file content - Is the data valid (not HTML/error pages)?
+    3. Cross-references - Do fetch logs match file contents?
+
+    If validation fails with data_gate_strict=True, execution stops.
     """
 
     def __init__(
@@ -64,28 +94,48 @@ class TaskOrchestrator:
         subagent_orchestrator: Optional[SubAgentOrchestrator] = None,
         config: Optional[OrchestratorConfig] = None,
         task_executor: Optional[Callable[[TodoItem, Dict[str, Any]], ExecutionResult]] = None,
+        working_dir: str = ".",
     ):
         self.todo = todo_tool
         self.subagent = subagent_orchestrator
         self.config = config or OrchestratorConfig()
         self._custom_executor = task_executor
+        self.working_dir = working_dir
 
         # Execution state
         self._execution_log: List[Dict[str, Any]] = []
         self._start_time: Optional[float] = None
 
+        # Provenance checking (data gate)
+        self._provenance_checker = ProvenanceChecker()
+        self._data_gate_passed: bool = False
+        self._provenance_results: Dict[str, ProvenanceResult] = {}
+
+        # Execution verification (exec gate)
+        self._exec_gate_passed: bool = False
+        self._exec_verification_results: Dict[str, Any] = {}
+
     def execute_all(self) -> Dict[str, Any]:
         """
         Execute all tasks in the todo graph in dependency order.
+
+        DATA GATE: If enable_data_gate=True, verifies data provenance
+        before allowing analysis tasks to proceed.
 
         Returns summary of execution.
         """
         self._start_time = time.time()
         graph = self.todo.get_graph()
+        self._data_gate_passed = False
+        self._exec_gate_passed = False
 
         if self.config.verbose:
             print("=" * 60)
             print("TASK ORCHESTRATOR - Starting Execution")
+            if self.config.enable_data_gate:
+                print("DATA GATE: Enabled (will verify data before analysis)")
+            if self.config.enable_exec_gate:
+                print("EXEC GATE: Enabled (will verify execution before output)")
             print("=" * 60)
 
         # Get execution order (batches of parallelizable tasks)
@@ -97,6 +147,8 @@ class TaskOrchestrator:
         total_tasks = sum(len(b) for b in batches)
         completed = 0
         failed = 0
+        data_gate_failed = False
+        exec_gate_failed = False
 
         if self.config.verbose:
             print(f"Total tasks: {total_tasks} in {len(batches)} phases")
@@ -104,6 +156,56 @@ class TaskOrchestrator:
 
         # Execute batch by batch
         for batch_num, batch in enumerate(batches):
+            # DATA GATE CHECK: Before analysis tasks, verify data provenance
+            if self.config.enable_data_gate and not self._data_gate_passed:
+                if self._batch_contains_analysis_tasks(batch):
+                    print("\n" + "=" * 60)
+                    print("🔒 DATA GATE: Verifying data provenance before analysis")
+                    print("=" * 60)
+
+                    gate_result = self._run_data_gate()
+
+                    if not gate_result["passed"]:
+                        if self.config.data_gate_strict:
+                            print("❌ DATA GATE FAILED - Execution stopped")
+                            print("Reason: Data provenance could not be verified")
+                            for issue in gate_result.get("issues", []):
+                                print(f"  - {issue}")
+                            data_gate_failed = True
+                            break
+                        else:
+                            print("⚠️ DATA GATE: Issues detected but continuing (strict=False)")
+                    else:
+                        print("✅ DATA GATE PASSED - Data provenance verified")
+                        self._data_gate_passed = True
+
+                    print("=" * 60 + "\n")
+
+            # EXEC GATE CHECK: Before output tasks, verify execution actually happened
+            if self.config.enable_exec_gate and not self._exec_gate_passed:
+                if self._batch_contains_output_tasks(batch):
+                    print("\n" + "=" * 60)
+                    print("🔒 EXEC GATE: Verifying command execution before output")
+                    print("=" * 60)
+
+                    gate_result = self._run_exec_gate()
+
+                    if not gate_result["passed"]:
+                        if self.config.exec_gate_strict:
+                            print("❌ EXEC GATE FAILED - Execution stopped")
+                            print("Reason: Command execution could not be verified")
+                            for issue in gate_result.get("issues", []):
+                                print(f"  - {issue}")
+                            exec_gate_failed = True
+                            break
+                        else:
+                            print("⚠️ EXEC GATE: Issues detected but continuing (strict=False)")
+                    else:
+                        print("✅ EXEC GATE PASSED - Execution verified")
+                        self._exec_gate_passed = True
+
+                    print("=" * 60 + "\n")
+
             if self.config.verbose:
                 parallel_note = "(parallel)" if len(batch) > 1 else "(sequential)"
                 print(f"\n### Phase {batch_num + 1}/{len(batches)} {parallel_note}")
@@ -145,20 +247,38 @@ class TaskOrchestrator:
 
         if self.config.verbose:
             print("\n" + "=" * 60)
-            print("EXECUTION COMPLETE")
+            if data_gate_failed:
+                print("EXECUTION STOPPED - DATA GATE FAILED")
+            elif exec_gate_failed:
+                print("EXECUTION STOPPED - EXEC GATE FAILED")
+            else:
+                print("EXECUTION COMPLETE")
             print(f"  Completed: {completed}/{total_tasks}")
             print(f"  Failed: {failed}/{total_tasks}")
             print(f"  Duration: {total_duration:.1f}s")
+            if self.config.enable_data_gate:
+                print(f"  Data Gate: {'PASSED' if self._data_gate_passed else 'FAILED' if data_gate_failed else 'NOT REACHED'}")
+            if self.config.enable_exec_gate:
+                print(f"  Exec Gate: {'PASSED' if self._exec_gate_passed else 'FAILED' if exec_gate_failed else 'NOT REACHED'}")
             print("=" * 60)
 
         return {
-            "success": failed == 0,
+            "success": failed == 0 and not data_gate_failed and not exec_gate_failed,
             "completed": completed,
             "failed": failed,
             "total": total_tasks,
             "duration_seconds": total_duration,
             "results": graph._results,
             "log": self._execution_log,
+            "data_gate_passed": self._data_gate_passed,
+            "data_gate_failed": data_gate_failed,
+            "exec_gate_passed": self._exec_gate_passed,
+            "exec_gate_failed": exec_gate_failed,
+            "provenance_results": {
+                task_id: result.to_dict()
+                for task_id, result in self._provenance_results.items()
+            },
+            "exec_verification_results": self._exec_verification_results,
         }
 
     def execute_next(self) -> Optional[ExecutionResult]:
@@ -335,6 +455,326 @@ class TaskOrchestrator:
         """Get all task results."""
         return self.todo.get_graph()._results
 
+    # =========================================================================
+    # DATA GATE METHODS
+    # =========================================================================
+
+    def _batch_contains_analysis_tasks(self, batch: List[TodoItem]) -> bool:
+        """Check if a batch contains analysis tasks that require data gate."""
+        for task in batch:
+            task_type = task.task_type.lower()
+            # Check if it's an analysis task type
+            if any(t in task_type for t in self.config.analysis_types):
+                return True
+            # Also check task content for analysis keywords
+            content_lower = task.content.lower()
+            analysis_keywords = ["analyze", "analysis", "compute", "calculate", "process", "run simulation"]
+            if any(kw in content_lower for kw in analysis_keywords):
+                return True
+        return False
+
+    def _get_data_acquisition_tasks(self) -> List[TodoItem]:
+        """Get all completed data acquisition tasks."""
+        graph = self.todo.get_graph()
+        tasks = []
+
+        for task in graph.get_all():
+            if task.status != "completed":
+                continue
+
+            task_type = task.task_type.lower()
+
+            # Check if it's a data acquisition task
+            is_data_task = any(t in task_type for t in self.config.data_acquisition_types)
+
+            # Also check if task produces a file
+            has_file_output = task.produces and task.produces.startswith("file:")
+
+            # Check content for data acquisition keywords
+            content_lower = task.content.lower()
+            data_keywords = ["download", "fetch", "retrieve", "get data", "acquire", "scrape"]
+            has_data_keyword = any(kw in content_lower for kw in data_keywords)
+
+            if is_data_task or has_file_output or has_data_keyword:
+                tasks.append(task)
+
+        return tasks
+
+    def _run_data_gate(self) -> Dict[str, Any]:
+        """
+        Run the data gate verification.
+
+        This uses EXTERNAL EVIDENCE ONLY:
+        1. Fetch logs - What HTTP requests actually returned
+        2. File content - What's actually in the files
+        3. File existence - Whether claimed files exist
+
+        The model cannot fabricate this evidence.
+
+        Returns:
+            {
+                "passed": bool,
+                "issues": List[str],
+                "verified_tasks": int,
+                "failed_tasks": int,
+            }
+        """
+        data_tasks = self._get_data_acquisition_tasks()
+
+        if not data_tasks:
+            if self.config.verbose:
+                print("  No data acquisition tasks to verify")
+            return {"passed": True, "issues": [], "verified_tasks": 0, "failed_tasks": 0}
+
+        if self.config.verbose:
+            print(f"  Verifying {len(data_tasks)} data acquisition task(s)...")
+
+        issues = []
+        verified = 0
+        failed = 0
+
+        for task in data_tasks:
+            if self.config.verbose:
+                print(f"  Checking [{task.id}] {task.content[:50]}...")
+
+            # Extract file path from produces field
+            file_path = None
+            expected_type = None
+            expected_rows = None
+
+            if task.produces:
+                if task.produces.startswith("file:"):
+                    parts = task.produces.split(":", maxsplit=3)
+                    file_path = parts[1] if len(parts) > 1 else None
+                    expected_type = parts[2] if len(parts) > 2 else None
+                    row_spec = parts[3] if len(parts) > 3 else None
+
+                    if row_spec:
+                        try:
+                            if row_spec.endswith('+'):
+                                expected_rows = int(row_spec[:-1])  # Minimum
+                            else:
+                                expected_rows = int(row_spec)
+                        except ValueError:
+                            pass
+                else:
+                    file_path = task.produces
+
+            # Make path absolute
+            if file_path and not os.path.isabs(file_path):
+                file_path = os.path.join(self.working_dir, file_path)
+
+            # Extract claimed URL from result
+            claimed_url = None
+            if isinstance(task.result, dict):
+                claimed_url = task.result.get("url") or task.result.get("source_url")
+
+            # Run provenance check
+            result = self._provenance_checker.verify_data_acquisition(
+                claimed_url=claimed_url,
+                local_file=file_path,
+                expected_type=expected_type,
+                expected_rows=expected_rows if expected_rows else None,
+            )
+
+            self._provenance_results[task.id] = result
+
+            if result.valid:
+                verified += 1
+                if self.config.verbose:
+                    print(f"    ✓ Verified")
+            else:
+                failed += 1
+                for issue in result.errors:
+                    issue_str = f"[{task.id}] {issue.category}: {issue.message}"
+                    issues.append(issue_str)
+                    if self.config.verbose:
+                        print(f"    ✗ {issue.category}: {issue.message}")
+
+        passed = failed == 0
+
+        if self.config.verbose:
+            print(f"\n  Results: {verified} verified, {failed} failed")
+
+        return {
+            "passed": passed,
+            "issues": issues,
+            "verified_tasks": verified,
+            "failed_tasks": failed,
+        }
+
+    def get_provenance_report(self) -> str:
+        """Generate a human-readable provenance report."""
+        return self._provenance_checker.generate_report(self._provenance_results)
+
+    # =========================================================================
+    # EXEC GATE METHODS
+    # =========================================================================
+
+    def _batch_contains_output_tasks(self, batch: List[TodoItem]) -> bool:
+        """Check if a batch contains output tasks that require exec gate."""
+        for task in batch:
+            task_type = task.task_type.lower()
+            # Check if it's an output task type
+            if any(t in task_type for t in self.config.output_types):
+                return True
+            # Also check task content for output keywords
+            content_lower = task.content.lower()
+            output_keywords = ["final", "output", "report", "deliver", "summary", "conclude", "complete"]
+            if any(kw in content_lower for kw in output_keywords):
+                return True
+        return False
+
+    def _get_verification_tasks(self) -> List[TodoItem]:
+        """Get all completed verification/test tasks."""
+        graph = self.todo.get_graph()
+        tasks = []
+
+        for task in graph.get_all():
+            if task.status != "completed":
+                continue
+
+            task_type = task.task_type.lower()
+
+            # Check if it's a verification task
+            is_verify_task = any(t in task_type for t in self.config.verification_types)
+
+            # Check content for verification keywords
+            content_lower = task.content.lower()
+            verify_keywords = ["test", "verify", "validate", "check", "assert", "run", "execute", "pytest", "unittest"]
+            has_verify_keyword = any(kw in content_lower for kw in verify_keywords)
+
+            if is_verify_task or has_verify_keyword:
+                tasks.append(task)
+
+        return tasks
+
+    def _run_exec_gate(self) -> Dict[str, Any]:
+        """
+        Run the execution gate verification.
+
+        This uses EXTERNAL EVIDENCE ONLY:
+        1. Exec logs - What commands actually ran
+        2. Exit codes - Did commands succeed
+        3. Output analysis - Were there errors in output
+
+        The model cannot fabricate this evidence.
+
+        Returns:
+            {
+                "passed": bool,
+                "issues": List[str],
+                "verified_commands": int,
+                "failed_commands": int,
+            }
+        """
+        issues = []
+
+        # Get execution summary from provenance checker
+        exec_summary = self._provenance_checker.get_execution_summary()
+
+        if self.config.verbose:
+            print(f"  Execution summary: {exec_summary['total']} commands logged")
+            print(f"    - Succeeded: {exec_summary['succeeded']}")
+            print(f"    - Failed: {exec_summary['failed']}")
+            print(f"    - Timeouts: {exec_summary['timeouts']}")
+            print(f"    - Verification commands: {exec_summary['verification_commands']}")
+
+        self._exec_verification_results["summary"] = exec_summary
+
+        # Check 1: Were any commands executed at all?
+        if exec_summary["total"] == 0:
+            issues.append("No commands were executed. Claims may be fabricated.")
+
+        # Check 2: Did verification commands run?
+        verify_tasks = self._get_verification_tasks()
+        if verify_tasks and exec_summary["verification_commands"] == 0:
+            task_ids = [t.id for t in verify_tasks]
+            issues.append(
+                f"Tasks {task_ids} claim verification but no test commands found in exec log."
+            )
+
+        # Check 3: Verify test commands actually ran and passed
+        if verify_tasks:
+            if self.config.verbose:
+                print(f"\n  Verifying {len(verify_tasks)} verification task(s)...")
+
+            test_result = self._provenance_checker.verify_tests_ran()
+            self._exec_verification_results["tests"] = test_result.to_dict()
+
+            if not test_result.valid:
+                for issue in test_result.errors:
+                    issues.append(f"Test verification: {issue.message}")
+                if self.config.verbose:
+                    for issue in test_result.errors:
+                        print(f"    ✗ {issue.category}: {issue.message}")
+            else:
+                if self.config.verbose:
+                    metadata = test_result.metadata
+                    print(f"    ✓ Tests verified: {metadata.get('passed', 0)} passed, {metadata.get('failed', 0)} failed")
+
+        # Check 4: Were there critical failures?
+        if exec_summary["failed"] > 0:
+            fail_rate = exec_summary["failed"] / exec_summary["total"]
+            if fail_rate > 0.5:  # More than 50% failed
+                issues.append(
+                    f"High failure rate: {exec_summary['failed']}/{exec_summary['total']} "
+                    f"commands failed ({fail_rate:.0%})"
+                )
+            elif exec_summary["failed"] > 0:
+                # Warning only for low failure rate
+                if self.config.verbose:
+                    print(f"  ⚠️ {exec_summary['failed']} command(s) failed (may be expected)")
+
+        # Check 5: Timeouts indicate potential issues
+        if exec_summary["timeouts"] > 0:
+            issues.append(f"{exec_summary['timeouts']} command(s) timed out")
+
+        passed = len(issues) == 0
+
+        if self.config.verbose:
+            if passed:
+                print(f"\n  Results: Execution verified")
+            else:
+                print(f"\n  Results: {len(issues)} issue(s) found")
+
+        return {
+            "passed": passed,
+            "issues": issues,
+            "verified_commands": exec_summary["succeeded"],
+            "failed_commands": exec_summary["failed"],
+            "summary": exec_summary,
+        }
+
+    def get_exec_verification_report(self) -> str:
+        """Generate a human-readable execution verification report."""
+        lines = [
+            "=" * 60,
+            "EXECUTION VERIFICATION REPORT",
+            f"Generated: {datetime.now().isoformat()}",
+            "=" * 60,
+            ""
+        ]
+
+        summary = self._exec_verification_results.get("summary", {})
+        lines.append(f"Total commands executed: {summary.get('total', 0)}")
+        lines.append(f"  Succeeded: {summary.get('succeeded', 0)}")
+        lines.append(f"  Failed: {summary.get('failed', 0)}")
+        lines.append(f"  Timeouts: {summary.get('timeouts', 0)}")
+        lines.append(f"  Verification commands: {summary.get('verification_commands', 0)}")
+        lines.append("")
+
+        tests = self._exec_verification_results.get("tests", {})
+        if tests:
+            lines.append("Test Verification:")
+            lines.append(f"  Result: {'PASSED' if tests.get('valid') else 'FAILED'}")
+            for issue in tests.get("issues", []):
+                lines.append(f"  - {issue.get('message', issue)}")
+            lines.append("")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
 
 class WorkflowBuilder:
     """
@@ -410,9 +850,22 @@ def create_orchestrator(
     working_dir: str = ".",
     max_parallel: int = 4,
     verbose: bool = True,
+    enable_data_gate: bool = True,
+    data_gate_strict: bool = True,
+    enable_exec_gate: bool = True,
+    exec_gate_strict: bool = True,
 ) -> tuple[TaskOrchestrator, TodoTool]:
     """
-    Create an orchestrator with subagent support.
+    Create an orchestrator with subagent support and verification gates.
+
+    Args:
+        working_dir: Base directory for file operations
+        max_parallel: Maximum parallel tasks
+        verbose: Enable verbose output
+        enable_data_gate: Enable data provenance verification before analysis
+        data_gate_strict: Fail execution if data gate verification fails
+        enable_exec_gate: Enable execution verification before output
+        exec_gate_strict: Fail execution if exec gate verification fails
 
     Returns (orchestrator, todo_tool) tuple.
     """
@@ -425,12 +878,17 @@ def create_orchestrator(
     config = OrchestratorConfig(
         max_parallel_tasks=max_parallel,
         verbose=verbose,
+        enable_data_gate=enable_data_gate,
+        data_gate_strict=data_gate_strict,
+        enable_exec_gate=enable_exec_gate,
+        exec_gate_strict=exec_gate_strict,
     )
 
     orchestrator = TaskOrchestrator(
         todo_tool=todo,
         subagent_orchestrator=subagent,
         config=config,
+        working_dir=working_dir,
     )
 
     return orchestrator, todo

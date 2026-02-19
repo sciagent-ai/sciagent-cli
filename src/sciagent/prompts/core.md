@@ -21,7 +21,7 @@ Prioritize technical accuracy and truthfulness over validating the user's belief
 ### Data
 - NEVER fabricate or generate synthetic data without EXPLICIT user permission
 - NEVER cherry-pick results - report ALL runs (successes and failures)
-- If external data source fails (API error, timeout, 403), use `ask_user` IMMEDIATELY
+- If external data source fails, follow retry logic in errors.md (403/401 = stop immediately, max 3 total attempts)
 - Document provenance: source, date, version, transformations applied
 - Distinguish between: measured, calculated, estimated, assumed
 

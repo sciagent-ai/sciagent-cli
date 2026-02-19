@@ -42,6 +42,14 @@ Read findings → Fix based on root cause
 - Required package not available in any container
 - Data format differs significantly from expected
 
+**Retry Logic for Data Access:**
+- 403/401 (access denied): STOP on first occurrence - retrying won't help
+- 404 (not found): Try 1 alternate endpoint, then STOP
+- Timeout/500/429: Retry 2x with backoff, then STOP
+- **Total cap across ALL strategies:** 3 attempts, then `ask_user`
+  - Trying different endpoints/parameters still counts toward the cap
+  - Don't burn iterations on a fundamentally blocked resource
+
 **Approach Changes:**
 - Switching from real to synthetic data
 - Need to simplify problem/physics to make tractable
