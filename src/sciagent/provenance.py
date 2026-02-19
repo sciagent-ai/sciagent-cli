@@ -551,6 +551,411 @@ class ProvenanceChecker:
         return "\n".join(lines)
 
 
+@dataclass
+class CrossReferenceResult:
+    """Result of cross-reference verification between claims and evidence."""
+    matches: List[Dict[str, Any]] = field(default_factory=list)
+    mismatches: List[Dict[str, Any]] = field(default_factory=list)
+    missing_evidence: List[Dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def all_verified(self) -> bool:
+        """Returns True if all claims have matching evidence with no mismatches."""
+        return len(self.mismatches) == 0 and len(self.missing_evidence) == 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "matches": self.matches,
+            "mismatches": self.mismatches,
+            "missing_evidence": self.missing_evidence,
+            "all_verified": self.all_verified,
+        }
+
+    def summary(self) -> str:
+        """Generate human-readable summary."""
+        lines = [
+            f"Cross-Reference Verification:",
+            f"  Matches: {len(self.matches)}",
+            f"  Mismatches: {len(self.mismatches)}",
+            f"  Missing Evidence: {len(self.missing_evidence)}",
+            f"  Status: {'VERIFIED' if self.all_verified else 'ISSUES FOUND'}",
+        ]
+        return "\n".join(lines)
+
+
+class CrossReferenceVerifier:
+    """
+    Cross-references task claims against multiple evidence sources.
+
+    This provides independent verification by comparing:
+    - Task claims vs fetch_log entries
+    - Task claims vs exec_log entries
+    - Task claims vs actual file contents
+
+    Example:
+        Task claims: "Downloaded 100 rows from NOAA"
+        Cross-check:
+        - fetch_log: URL contains "noaa"? ✓
+        - fetch_log: status=200? ✓
+        - file row_count >= 100? ✗ (only 50)
+        Result: MISMATCH
+
+    The verifier cannot be fooled by model claims because it only
+    trusts external evidence (logs, files, execution records).
+    """
+
+    def __init__(self, log_dir: str = None):
+        """Initialize cross-reference verifier."""
+        self.fetch_logger = get_fetch_logger(log_dir)
+        self.exec_logger = get_exec_logger(log_dir)
+        self.validator = ContentValidator
+
+    def verify_task_claims(
+        self,
+        claims: Dict[str, Any],
+        working_dir: str = "."
+    ) -> CrossReferenceResult:
+        """
+        Verify a set of claims against available evidence.
+
+        Args:
+            claims: Dictionary with claim details:
+                - url: Claimed URL that was fetched
+                - domain: Expected domain in URL (e.g., "noaa", "ncbi")
+                - file_path: Path to claimed output file
+                - row_count: Claimed number of rows downloaded
+                - command: Claimed command that was executed
+                - success: Whether command claimed to succeed
+                - content_type: Expected content type (csv, json, etc.)
+            working_dir: Base directory for relative file paths
+
+        Returns:
+            CrossReferenceResult with matches, mismatches, and missing evidence
+        """
+        result = CrossReferenceResult()
+
+        # Extract claims
+        claimed_url = claims.get("url")
+        claimed_domain = claims.get("domain")
+        claimed_file = claims.get("file_path")
+        claimed_rows = claims.get("row_count")
+        claimed_command = claims.get("command")
+        claimed_success = claims.get("success", True)
+        expected_type = claims.get("content_type")
+
+        # 1. Verify URL fetch if claimed
+        if claimed_url:
+            self._verify_fetch_claim(
+                result, claimed_url, claimed_domain, claimed_success
+            )
+
+        # 2. Verify file content if claimed
+        if claimed_file:
+            # Make path absolute
+            file_path = claimed_file
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(working_dir, file_path)
+
+            self._verify_file_claim(
+                result, file_path, expected_type, claimed_rows
+            )
+
+        # 3. Verify command execution if claimed
+        if claimed_command:
+            self._verify_exec_claim(
+                result, claimed_command, claimed_success
+            )
+
+        # 4. Cross-reference URL domain with file source
+        if claimed_url and claimed_domain and claimed_file:
+            self._cross_reference_url_file(
+                result, claimed_url, claimed_domain, claimed_file, working_dir
+            )
+
+        return result
+
+    def _verify_fetch_claim(
+        self,
+        result: CrossReferenceResult,
+        url: str,
+        domain: str = None,
+        expected_success: bool = True
+    ):
+        """Verify URL fetch claim against fetch log."""
+        fetch_entry = self.fetch_logger.find_fetch_for_url(url)
+
+        if fetch_entry is None:
+            result.missing_evidence.append({
+                "claim": f"Fetched URL: {url}",
+                "evidence_type": "fetch_log",
+                "issue": "No fetch record found in log",
+            })
+            return
+
+        # Check success
+        actual_success = fetch_entry.get("success", False)
+        status_code = fetch_entry.get("status_code", 0)
+
+        if expected_success and not actual_success:
+            result.mismatches.append({
+                "claim": f"Successfully fetched {url}",
+                "evidence": f"Fetch failed with status {status_code}",
+                "evidence_type": "fetch_log",
+                "details": fetch_entry.get("error"),
+            })
+            return
+
+        if expected_success and status_code >= 400:
+            result.mismatches.append({
+                "claim": f"Successfully fetched {url}",
+                "evidence": f"HTTP error {status_code}",
+                "evidence_type": "fetch_log",
+            })
+            return
+
+        # Check domain if specified
+        if domain and domain.lower() not in url.lower():
+            result.mismatches.append({
+                "claim": f"URL from domain '{domain}'",
+                "evidence": f"URL does not contain '{domain}': {url}",
+                "evidence_type": "url_analysis",
+            })
+            return
+
+        # Check for error page content
+        if fetch_entry.get("is_error_page", False):
+            result.mismatches.append({
+                "claim": f"Fetched valid data from {url}",
+                "evidence": f"Content appears to be an error page",
+                "evidence_type": "fetch_log",
+                "details": fetch_entry.get("error_indicators"),
+            })
+            return
+
+        # Success
+        result.matches.append({
+            "claim": f"Fetched {url}",
+            "evidence": f"Fetch log confirms status={status_code}, success={actual_success}",
+            "evidence_type": "fetch_log",
+        })
+
+    def _verify_file_claim(
+        self,
+        result: CrossReferenceResult,
+        file_path: str,
+        expected_type: str = None,
+        claimed_rows: int = None
+    ):
+        """Verify file content claim against actual file."""
+        if not os.path.exists(file_path):
+            result.missing_evidence.append({
+                "claim": f"Created file: {file_path}",
+                "evidence_type": "file_system",
+                "issue": "File does not exist",
+            })
+            return
+
+        # Get file size
+        file_size = os.path.getsize(file_path)
+        if file_size == 0:
+            result.mismatches.append({
+                "claim": f"Created file with data: {file_path}",
+                "evidence": "File is empty (0 bytes)",
+                "evidence_type": "file_system",
+            })
+            return
+
+        # Validate content
+        is_valid, error_msg, metadata = self.validator.validate_file_content(
+            file_path, expected_type=expected_type
+        )
+
+        if not is_valid:
+            result.mismatches.append({
+                "claim": f"Created valid {expected_type or 'data'} file: {file_path}",
+                "evidence": f"Content validation failed: {error_msg}",
+                "evidence_type": "file_content",
+                "details": metadata,
+            })
+            return
+
+        # Check row count if claimed
+        actual_rows = metadata.get("row_count")
+        if claimed_rows is not None and actual_rows is not None:
+            if actual_rows < claimed_rows:
+                result.mismatches.append({
+                    "claim": f"Downloaded {claimed_rows} rows",
+                    "evidence": f"File contains only {actual_rows} rows",
+                    "evidence_type": "file_content",
+                    "details": {"claimed": claimed_rows, "actual": actual_rows},
+                })
+                return
+
+        # Success
+        result.matches.append({
+            "claim": f"Created valid file: {file_path}",
+            "evidence": f"File exists with {file_size} bytes, content validated",
+            "evidence_type": "file_content",
+            "details": metadata,
+        })
+
+    def _verify_exec_claim(
+        self,
+        result: CrossReferenceResult,
+        command: str,
+        expected_success: bool = True
+    ):
+        """Verify command execution claim against exec log."""
+        executions = self.exec_logger.find_execution(command)
+
+        if not executions:
+            result.missing_evidence.append({
+                "claim": f"Executed command: {command}",
+                "evidence_type": "exec_log",
+                "issue": "No execution record found in log",
+            })
+            return
+
+        # Check most recent execution
+        latest = executions[-1]
+        actual_success = latest.get("success", False)
+        exit_code = latest.get("exit_code")
+
+        if expected_success and not actual_success:
+            result.mismatches.append({
+                "claim": f"Command succeeded: {command}",
+                "evidence": f"Command failed with exit code {exit_code}",
+                "evidence_type": "exec_log",
+                "details": latest.get("error_indicators"),
+            })
+            return
+
+        if latest.get("timeout", False):
+            result.mismatches.append({
+                "claim": f"Command completed: {command}",
+                "evidence": "Command timed out",
+                "evidence_type": "exec_log",
+            })
+            return
+
+        # Success
+        result.matches.append({
+            "claim": f"Executed: {command}",
+            "evidence": f"Exec log confirms exit_code={exit_code}, success={actual_success}",
+            "evidence_type": "exec_log",
+        })
+
+    def _cross_reference_url_file(
+        self,
+        result: CrossReferenceResult,
+        url: str,
+        domain: str,
+        file_path: str,
+        working_dir: str
+    ):
+        """Cross-reference URL source with file content."""
+        # Make path absolute
+        if not os.path.isabs(file_path):
+            file_path = os.path.join(working_dir, file_path)
+
+        # Get fetch entry
+        fetch_entry = self.fetch_logger.find_fetch_for_url(url)
+        if not fetch_entry:
+            return  # Already flagged as missing
+
+        # Compare content lengths if available
+        fetch_length = fetch_entry.get("content_length", 0)
+
+        if os.path.exists(file_path):
+            file_size = os.path.getsize(file_path)
+
+            # Check for significant size mismatch
+            if fetch_length > 0 and file_size > 0:
+                ratio = file_size / fetch_length
+                if ratio < 0.1:  # File is much smaller than fetched content
+                    result.mismatches.append({
+                        "claim": f"Saved fetched data from {domain} to {file_path}",
+                        "evidence": f"File ({file_size}b) much smaller than fetch ({fetch_length}b)",
+                        "evidence_type": "cross_reference",
+                        "details": {"ratio": ratio, "file_size": file_size, "fetch_length": fetch_length},
+                    })
+                elif ratio > 10:  # File is much larger than fetched content
+                    result.mismatches.append({
+                        "claim": f"Saved fetched data from {domain} to {file_path}",
+                        "evidence": f"File ({file_size}b) much larger than fetch ({fetch_length}b) - may include extra data",
+                        "evidence_type": "cross_reference",
+                        "details": {"ratio": ratio, "file_size": file_size, "fetch_length": fetch_length},
+                    })
+                else:
+                    result.matches.append({
+                        "claim": f"Data from {domain} saved to {file_path}",
+                        "evidence": f"File size ({file_size}b) consistent with fetch ({fetch_length}b)",
+                        "evidence_type": "cross_reference",
+                    })
+
+    def verify_batch(
+        self,
+        tasks: List[Dict[str, Any]],
+        working_dir: str = "."
+    ) -> Dict[str, CrossReferenceResult]:
+        """
+        Verify a batch of tasks.
+
+        Args:
+            tasks: List of task dictionaries containing claims
+            working_dir: Base directory for relative file paths
+
+        Returns:
+            Dict mapping task_id -> CrossReferenceResult
+        """
+        results = {}
+
+        for task in tasks:
+            task_id = task.get("id", "unknown")
+
+            # Build claims from task
+            claims = {}
+
+            # Extract URL from result
+            task_result = task.get("result")
+            if isinstance(task_result, dict):
+                claims["url"] = task_result.get("url") or task_result.get("source_url")
+                claims["row_count"] = task_result.get("row_count") or task_result.get("rows")
+
+            # Extract file from produces
+            produces = task.get("produces", "")
+            if produces.startswith("file:"):
+                parts = produces.split(":", maxsplit=3)
+                claims["file_path"] = parts[1] if len(parts) > 1 else None
+                claims["content_type"] = parts[2] if len(parts) > 2 else None
+
+                # Extract row count from produces spec
+                if len(parts) > 3:
+                    row_spec = parts[3]
+                    try:
+                        if row_spec.endswith('+'):
+                            claims["row_count"] = int(row_spec[:-1])
+                        else:
+                            claims["row_count"] = int(row_spec)
+                    except ValueError:
+                        pass
+
+            # Extract domain hint from task content
+            content = task.get("content", "").lower()
+            for domain in ["noaa", "ncbi", "nasa", "usgs", "esa", "github"]:
+                if domain in content:
+                    claims["domain"] = domain
+                    break
+
+            # Skip tasks with no verifiable claims
+            if not any(claims.values()):
+                continue
+
+            results[task_id] = self.verify_task_claims(claims, working_dir)
+
+        return results
+
+
 def check_provenance(
     url: str = None,
     file_path: str = None,
@@ -577,3 +982,26 @@ def check_provenance(
         expected_type=expected_type,
         expected_rows=expected_rows,
     )
+
+
+def cross_reference_claims(
+    claims: Dict[str, Any],
+    working_dir: str = "."
+) -> CrossReferenceResult:
+    """
+    Convenience function for cross-reference verification.
+
+    Example:
+        result = cross_reference_claims({
+            "url": "https://noaa.gov/data.csv",
+            "domain": "noaa",
+            "file_path": "output/noaa_data.csv",
+            "row_count": 100,
+            "content_type": "csv",
+        })
+        if not result.all_verified:
+            print(f"Mismatches: {result.mismatches}")
+            print(f"Missing: {result.missing_evidence}")
+    """
+    verifier = CrossReferenceVerifier()
+    return verifier.verify_task_claims(claims, working_dir)

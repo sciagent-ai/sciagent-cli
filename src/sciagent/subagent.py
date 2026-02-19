@@ -177,8 +177,10 @@ class SubAgentRegistry:
         - research: CODING_MODEL (Sonnet) - web search, doc reading
         - plan: SCIENTIFIC_MODEL (Opus) - architecture needs deep reasoning
         - general: CODING_MODEL (Sonnet) - implementation tasks
+        - verifier: VERIFICATION_MODEL (Sonnet) - independent claim verification
         """
-        from .defaults import FAST_MODEL, CODING_MODEL, SCIENTIFIC_MODEL
+        from .defaults import FAST_MODEL, CODING_MODEL, SCIENTIFIC_MODEL, VERIFICATION_MODEL
+        from .prompts.loader import load_prompt
 
         # Explore agent - fast, read-only, for quick codebase searches
         # Uses FAST_MODEL (Haiku) for speed and cost efficiency
@@ -324,6 +326,51 @@ Think step by step:
 
 Use all available tools as needed.""",
             max_iterations=50
+        ))
+
+        # Verifier agent - independent verification with FRESH context
+        # Uses VERIFICATION_MODEL (Sonnet by default) - user can configure
+        # CRITICAL: This agent has NO conversation history - it's intentionally isolated
+        # to prevent bias from the reasoning that produced the claims
+        verifier_prompt = load_prompt("verification_llm")
+        if not verifier_prompt:
+            # Fallback if prompt file not found
+            verifier_prompt = """You are a skeptical scientific auditor. Your job is to find problems with claims.
+
+IMPORTANT: You have NO context about how this claim was produced.
+You only see the claim and evidence. Be adversarial.
+
+## YOUR TASK
+1. What could be WRONG with this claim?
+2. What evidence is MISSING that should exist?
+3. Are there signs of fabrication?
+   - HTML in data files
+   - Placeholder values
+   - Suspiciously round numbers
+   - Error messages in output
+4. Does the evidence ACTUALLY prove what's claimed?
+
+## OUTPUT (JSON)
+{
+    "verdict": "verified|refuted|insufficient",
+    "confidence": 0.0-1.0,
+    "issues": ["list of problems found"],
+    "supporting_facts": ["evidence that supports claim"],
+    "fabrication_indicators": ["any signs of made-up data"],
+    "missing_evidence": ["what should exist but doesn't"],
+    "reasoning": "brief explanation"
+}
+
+Default to skepticism. Only "verified" if evidence is strong."""
+
+        self.register(SubAgentConfig(
+            name="verifier",
+            description="Independent verification of claims. Fresh context, adversarial. Use for final output verification.",
+            model=VERIFICATION_MODEL,
+            system_prompt=verifier_prompt,
+            allowed_tools=["file_ops", "search", "bash"],  # Read-only + can run verification commands
+            max_iterations=10,
+            temperature=0.0,  # Deterministic for reproducible verification
         ))
     
     def register(self, config: SubAgentConfig):
@@ -478,12 +525,14 @@ Available agents:
 - research: Web research, documentation, literature review. Use for external knowledge.
 - plan: Break down complex problems into steps.
 - general: Complex multi-step tasks requiring both exploration AND action.
+- verifier: Independent claim verification (fresh context, adversarial). Use for final output verification.
 
 Use 'explore' for quick local searches.
 Use 'debug' when investigating errors.
 Use 'research' for documentation, APIs, scientific methods.
 Use 'plan' before implementing anything non-trivial.
-Use 'general' for complex tasks that need to make changes."""
+Use 'general' for complex tasks that need to make changes.
+Use 'verifier' to independently verify claims before final output."""
 
     parameters = {
         "type": "object",
@@ -491,7 +540,7 @@ Use 'general' for complex tasks that need to make changes."""
             "agent_name": {
                 "type": "string",
                 "description": "Name of the sub-agent to use",
-                "enum": ["explore", "debug", "research", "plan", "general"]
+                "enum": ["explore", "debug", "research", "plan", "general", "verifier"]
             },
             "task": {
                 "type": "string",

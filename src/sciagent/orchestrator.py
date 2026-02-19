@@ -62,6 +62,11 @@ class OrchestratorConfig:
     verification_types: tuple = ("validate", "test", "verify", "check")  # Task types that should run verification
     output_types: tuple = ("output", "report", "final", "deliver")  # Task types that produce final output
 
+    # LLM VERIFICATION GATE: Independent verification using fresh-context subagent
+    enable_verification: bool = True  # Enable LLM-based verification
+    verification_strict: bool = True  # True = block on verification failure; False = warn only
+    verification_threshold: float = 0.7  # Minimum confidence for "verified" verdict to pass
+
 
 class TaskOrchestrator:
     """
@@ -114,6 +119,10 @@ class TaskOrchestrator:
         # Execution verification (exec gate)
         self._exec_gate_passed: bool = False
         self._exec_verification_results: Dict[str, Any] = {}
+
+        # LLM verification (verification gate)
+        self._llm_verification_passed: bool = False
+        self._llm_verification_results: Dict[str, Any] = {}
 
     def execute_all(self) -> Dict[str, Any]:
         """
@@ -242,6 +251,31 @@ class TaskOrchestrator:
                     "timestamp": datetime.now().isoformat(),
                 })
 
+        # LLM VERIFICATION GATE: Run after all tasks complete but before final summary
+        llm_verification_failed = False
+        if self.config.enable_verification and not data_gate_failed and not exec_gate_failed:
+            verification_tasks = self._get_tasks_requiring_verification()
+            if verification_tasks:
+                print("\n" + "=" * 60)
+                print("🔒 LLM VERIFICATION GATE: Independent verification of claims")
+                print("=" * 60)
+
+                self._llm_verification_results = self._run_llm_verification_gate(verification_tasks)
+
+                if not self._llm_verification_results["passed"]:
+                    if self.config.verification_strict:
+                        print("❌ LLM VERIFICATION FAILED - Execution stopped")
+                        print("Reason: Independent verifier found issues with claims")
+                        llm_verification_failed = True
+                    else:
+                        print("⚠️ LLM VERIFICATION: Issues detected but continuing (strict=False)")
+                        self._llm_verification_passed = False
+                else:
+                    print("✅ LLM VERIFICATION PASSED - Claims independently verified")
+                    self._llm_verification_passed = True
+
+                print("=" * 60 + "\n")
+
         # Summary
         total_duration = time.time() - self._start_time
 
@@ -251,6 +285,8 @@ class TaskOrchestrator:
                 print("EXECUTION STOPPED - DATA GATE FAILED")
             elif exec_gate_failed:
                 print("EXECUTION STOPPED - EXEC GATE FAILED")
+            elif llm_verification_failed:
+                print("EXECUTION STOPPED - LLM VERIFICATION FAILED")
             else:
                 print("EXECUTION COMPLETE")
             print(f"  Completed: {completed}/{total_tasks}")
@@ -260,10 +296,12 @@ class TaskOrchestrator:
                 print(f"  Data Gate: {'PASSED' if self._data_gate_passed else 'FAILED' if data_gate_failed else 'NOT REACHED'}")
             if self.config.enable_exec_gate:
                 print(f"  Exec Gate: {'PASSED' if self._exec_gate_passed else 'FAILED' if exec_gate_failed else 'NOT REACHED'}")
+            if self.config.enable_verification:
+                print(f"  LLM Verification: {'PASSED' if self._llm_verification_passed else 'FAILED' if llm_verification_failed else 'NOT REACHED'}")
             print("=" * 60)
 
         return {
-            "success": failed == 0 and not data_gate_failed and not exec_gate_failed,
+            "success": failed == 0 and not data_gate_failed and not exec_gate_failed and not llm_verification_failed,
             "completed": completed,
             "failed": failed,
             "total": total_tasks,
@@ -274,11 +312,14 @@ class TaskOrchestrator:
             "data_gate_failed": data_gate_failed,
             "exec_gate_passed": self._exec_gate_passed,
             "exec_gate_failed": exec_gate_failed,
+            "llm_verification_passed": self._llm_verification_passed,
+            "llm_verification_failed": llm_verification_failed,
             "provenance_results": {
                 task_id: result.to_dict()
                 for task_id, result in self._provenance_results.items()
             },
             "exec_verification_results": self._exec_verification_results,
+            "llm_verification_results": self._llm_verification_results,
         }
 
     def execute_next(self) -> Optional[ExecutionResult]:
@@ -775,6 +816,325 @@ class TaskOrchestrator:
         lines.append("=" * 60)
         return "\n".join(lines)
 
+    # =========================================================================
+    # LLM VERIFICATION GATE METHODS
+    # =========================================================================
+
+    def _get_tasks_requiring_verification(self) -> List[TodoItem]:
+        """
+        Get tasks that require LLM verification.
+
+        Tasks are selected for verification if:
+        1. They have verify=True flag set
+        2. They are final output tasks (task_type in output_types)
+        3. They are the last task in the execution order
+        """
+        graph = self.todo.get_graph()
+        tasks = []
+
+        all_tasks = graph.get_all()
+        execution_order = graph.get_execution_order()
+
+        # Find final tasks (last batch)
+        final_task_ids = set()
+        if execution_order:
+            final_batch = execution_order[-1]
+            final_task_ids = {t.id for t in final_batch}
+
+        for task in all_tasks:
+            if task.status != "completed":
+                continue
+
+            # Check if task has verify flag
+            if getattr(task, 'verify', False):
+                tasks.append(task)
+                continue
+
+            # Check if task is output type
+            task_type = task.task_type.lower()
+            if any(t in task_type for t in self.config.output_types):
+                tasks.append(task)
+                continue
+
+            # Check if task is in final batch
+            if task.id in final_task_ids:
+                tasks.append(task)
+                continue
+
+            # Check content for output keywords
+            content_lower = task.content.lower()
+            output_keywords = ["final", "output", "report", "deliver", "summary", "conclude"]
+            if any(kw in content_lower for kw in output_keywords):
+                tasks.append(task)
+
+        return tasks
+
+    def _build_verification_context(self, task: TodoItem) -> Dict[str, Any]:
+        """
+        Build the context for LLM verification of a task.
+
+        Returns claim summary and evidence to pass to the verifier subagent.
+        """
+        import json
+
+        # Build claim summary
+        claim_parts = [f"Task: {task.content}"]
+
+        if task.result:
+            result_str = str(task.result)
+            if len(result_str) > 1000:
+                result_str = result_str[:1000] + "..."
+            claim_parts.append(f"Claimed result: {result_str}")
+
+        if task.produces:
+            claim_parts.append(f"Claimed output: {task.produces}")
+
+        claim = "\n".join(claim_parts)
+
+        # Build evidence summary
+        evidence_parts = []
+
+        # Add fetch log evidence
+        fetch_entries = self._provenance_checker.fetch_logger.get_recent_fetches(limit=10)
+        if fetch_entries:
+            evidence_parts.append("## Fetch Log (recent HTTP requests)")
+            for entry in fetch_entries[-5:]:  # Last 5 entries
+                url = entry.get("url", "unknown")
+                status = entry.get("status_code", "?")
+                success = entry.get("success", False)
+                evidence_parts.append(f"- {url[:80]}: status={status}, success={success}")
+
+        # Add exec log evidence
+        exec_entries = self._provenance_checker.exec_logger.get_recent_executions(limit=10)
+        if exec_entries:
+            evidence_parts.append("\n## Exec Log (recent commands)")
+            for entry in exec_entries[-5:]:
+                cmd = entry.get("command", "unknown")[:60]
+                exit_code = entry.get("exit_code", "?")
+                success = entry.get("success", False)
+                evidence_parts.append(f"- {cmd}: exit={exit_code}, success={success}")
+
+        # Add file evidence if produces file
+        if task.produces and task.produces.startswith("file:"):
+            parts = task.produces.split(":", maxsplit=3)
+            file_path = parts[1] if len(parts) > 1 else ""
+
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(self.working_dir, file_path)
+
+            evidence_parts.append(f"\n## File Evidence: {file_path}")
+
+            if os.path.exists(file_path):
+                file_size = os.path.getsize(file_path)
+                evidence_parts.append(f"- File exists: Yes")
+                evidence_parts.append(f"- File size: {file_size} bytes")
+
+                # Read first 500 chars of file
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+                        content_preview = f.read(500)
+                    evidence_parts.append(f"- Content preview:\n```\n{content_preview}\n```")
+                except Exception as e:
+                    evidence_parts.append(f"- Content read error: {e}")
+            else:
+                evidence_parts.append(f"- File exists: No")
+
+        # Add provenance results if available
+        if task.id in self._provenance_results:
+            prov_result = self._provenance_results[task.id]
+            evidence_parts.append("\n## Provenance Check")
+            evidence_parts.append(f"- Valid: {prov_result.valid}")
+            if prov_result.issues:
+                for issue in prov_result.issues[:3]:
+                    evidence_parts.append(f"- Issue: {issue.message}")
+
+        evidence = "\n".join(evidence_parts) if evidence_parts else "No evidence available"
+
+        return {
+            "claim": claim,
+            "evidence": evidence,
+            "task_id": task.id,
+        }
+
+    def _run_llm_verification_gate(self, tasks: List[TodoItem]) -> Dict[str, Any]:
+        """
+        Run LLM verification on selected tasks using the verifier subagent.
+
+        The verifier subagent has:
+        - FRESH CONTEXT (no conversation history)
+        - Adversarial prompt focused on finding issues
+        - Only sees claim + evidence, not reasoning
+
+        Returns:
+            {
+                "passed": bool,
+                "tasks_verified": int,
+                "tasks_failed": int,
+                "results": {task_id: verification_result}
+            }
+        """
+        import json
+
+        if not self.subagent:
+            return {
+                "passed": True,
+                "tasks_verified": 0,
+                "tasks_failed": 0,
+                "results": {},
+                "skipped": "No subagent orchestrator available"
+            }
+
+        results = {}
+        verified_count = 0
+        failed_count = 0
+
+        for task in tasks:
+            if self.config.verbose:
+                print(f"  Verifying [{task.id}] {task.content[:50]}...")
+
+            # Build context for verification
+            context = self._build_verification_context(task)
+
+            # Build the verification prompt with claim and evidence injected
+            verification_prompt = f"""Please verify the following claim and evidence.
+
+## CLAIM TO AUDIT
+{context['claim']}
+
+## EVIDENCE PROVIDED
+{context['evidence']}
+
+Respond with a JSON object containing your verdict, confidence, issues found, etc.
+"""
+
+            # Spawn verifier subagent with fresh context
+            try:
+                verifier_result = self.subagent.spawn("verifier", verification_prompt)
+
+                if verifier_result.success:
+                    # Parse the JSON response
+                    try:
+                        # Try to extract JSON from the output
+                        output = verifier_result.output
+                        json_match = output.find("{")
+                        json_end = output.rfind("}") + 1
+
+                        if json_match != -1 and json_end > json_match:
+                            json_str = output[json_match:json_end]
+                            verification = json.loads(json_str)
+                        else:
+                            verification = {
+                                "verdict": "insufficient",
+                                "confidence": 0.0,
+                                "issues": ["Could not parse verifier response"],
+                                "reasoning": output[:500]
+                            }
+                    except json.JSONDecodeError:
+                        verification = {
+                            "verdict": "insufficient",
+                            "confidence": 0.0,
+                            "issues": ["Invalid JSON response from verifier"],
+                            "reasoning": verifier_result.output[:500]
+                        }
+                else:
+                    verification = {
+                        "verdict": "insufficient",
+                        "confidence": 0.0,
+                        "issues": [f"Verifier error: {verifier_result.error}"],
+                        "reasoning": "Verification subagent failed to complete"
+                    }
+
+                results[task.id] = verification
+
+                # Check if verification passed
+                verdict = verification.get("verdict", "insufficient")
+                confidence = verification.get("confidence", 0.0)
+
+                if verdict == "verified" and confidence >= self.config.verification_threshold:
+                    verified_count += 1
+                    if self.config.verbose:
+                        print(f"    ✓ Verified (confidence: {confidence:.2f})")
+                elif verdict == "refuted":
+                    failed_count += 1
+                    if self.config.verbose:
+                        print(f"    ✗ Refuted: {verification.get('reasoning', 'No reason given')[:100]}")
+                        for issue in verification.get("issues", [])[:3]:
+                            print(f"      - {issue}")
+                else:
+                    failed_count += 1
+                    if self.config.verbose:
+                        print(f"    ⚠ Insufficient evidence (confidence: {confidence:.2f})")
+                        for issue in verification.get("missing_evidence", [])[:3]:
+                            print(f"      - Missing: {issue}")
+
+            except Exception as e:
+                results[task.id] = {
+                    "verdict": "insufficient",
+                    "confidence": 0.0,
+                    "issues": [f"Verification error: {str(e)}"],
+                }
+                failed_count += 1
+                if self.config.verbose:
+                    print(f"    ✗ Error: {str(e)}")
+
+        passed = failed_count == 0
+
+        return {
+            "passed": passed,
+            "tasks_verified": verified_count,
+            "tasks_failed": failed_count,
+            "results": results,
+        }
+
+    def get_llm_verification_report(self) -> str:
+        """Generate a human-readable LLM verification report."""
+        lines = [
+            "=" * 60,
+            "LLM VERIFICATION REPORT",
+            f"Generated: {datetime.now().isoformat()}",
+            "=" * 60,
+            ""
+        ]
+
+        results = self._llm_verification_results.get("results", {})
+        verified = self._llm_verification_results.get("tasks_verified", 0)
+        failed = self._llm_verification_results.get("tasks_failed", 0)
+        passed = self._llm_verification_results.get("passed", False)
+
+        lines.append(f"Overall: {'PASSED' if passed else 'FAILED'}")
+        lines.append(f"Tasks verified: {verified}")
+        lines.append(f"Tasks failed: {failed}")
+        lines.append("")
+
+        for task_id, result in results.items():
+            verdict = result.get("verdict", "unknown")
+            confidence = result.get("confidence", 0.0)
+            lines.append(f"Task: {task_id}")
+            lines.append(f"  Verdict: {verdict} (confidence: {confidence:.2f})")
+
+            issues = result.get("issues", [])
+            if issues:
+                lines.append("  Issues:")
+                for issue in issues[:5]:
+                    lines.append(f"    - {issue}")
+
+            supporting = result.get("supporting_facts", [])
+            if supporting:
+                lines.append("  Supporting evidence:")
+                for fact in supporting[:3]:
+                    lines.append(f"    + {fact}")
+
+            fabrication = result.get("fabrication_indicators", [])
+            if fabrication:
+                lines.append("  Fabrication indicators:")
+                for indicator in fabrication[:3]:
+                    lines.append(f"    ! {indicator}")
+
+            lines.append("")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
 
 class WorkflowBuilder:
     """
@@ -854,6 +1214,9 @@ def create_orchestrator(
     data_gate_strict: bool = True,
     enable_exec_gate: bool = True,
     exec_gate_strict: bool = True,
+    enable_verification: bool = True,
+    verification_strict: bool = True,
+    verification_threshold: float = 0.7,
 ) -> tuple[TaskOrchestrator, TodoTool]:
     """
     Create an orchestrator with subagent support and verification gates.
@@ -866,6 +1229,9 @@ def create_orchestrator(
         data_gate_strict: Fail execution if data gate verification fails
         enable_exec_gate: Enable execution verification before output
         exec_gate_strict: Fail execution if exec gate verification fails
+        enable_verification: Enable LLM-based independent verification
+        verification_strict: Fail execution if LLM verification fails (default: True, blocks on failure)
+        verification_threshold: Minimum confidence for "verified" verdict (default: 0.7)
 
     Returns (orchestrator, todo_tool) tuple.
     """
@@ -882,6 +1248,9 @@ def create_orchestrator(
         data_gate_strict=data_gate_strict,
         enable_exec_gate=enable_exec_gate,
         exec_gate_strict=exec_gate_strict,
+        enable_verification=enable_verification,
+        verification_strict=verification_strict,
+        verification_threshold=verification_threshold,
     )
 
     orchestrator = TaskOrchestrator(

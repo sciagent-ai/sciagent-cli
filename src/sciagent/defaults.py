@@ -110,6 +110,12 @@ VISION_MODEL = "anthropic/claude-opus-4-5-20251101"
 # Default for main agent - Opus for scientific work quality
 DEFAULT_MODEL = SCIENTIFIC_MODEL
 
+# Verification model - Used by the independent verifier subagent
+# This model has FRESH CONTEXT (no conversation history) and acts as a skeptical auditor.
+# User can change this to a different model for cost/quality tradeoffs.
+# Sonnet provides good balance of capability and cost for verification tasks.
+VERIFICATION_MODEL = "anthropic/claude-sonnet-4-20250514"
+
 # =============================================================================
 # CONTENT LIMITS
 # =============================================================================

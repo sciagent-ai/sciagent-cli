@@ -307,9 +307,11 @@ class TodoItem:
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     completed_at: Optional[str] = None
     error: Optional[str] = None
-    # NEW: Data flow fields
+    # Data flow fields
     produces: Optional[str] = None  # Artifact this task produces: "file:<path>" or "data" or "metrics"
     target: Optional[Dict[str, Any]] = None  # Success criteria: {"metric": "name", "operator": ">=", "value": X}
+    # LLM Verification field
+    verify: bool = False  # If True, run LLM verification on this task (in addition to final output tasks)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -327,6 +329,7 @@ class TodoItem:
             "error": self.error,
             "produces": self.produces,
             "target": self.target,
+            "verify": self.verify,
         }
 
     @classmethod
@@ -346,6 +349,7 @@ class TodoItem:
             error=data.get("error"),
             produces=data.get("produces"),
             target=data.get("target"),
+            verify=data.get("verify", False),
         )
 
 
@@ -636,6 +640,11 @@ COMMANDS:
                                 "operator": {"type": "string", "enum": [">=", "<=", ">", "<", "==", "!="]},
                                 "value": {"type": "number", "description": "Target value"}
                             }
+                        },
+                        "verify": {
+                            "type": "boolean",
+                            "description": "If True, run independent LLM verification on this task. Final output tasks are always verified.",
+                            "default": False
                         }
                     },
                     "required": ["content", "status"]
