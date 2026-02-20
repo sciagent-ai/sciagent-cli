@@ -145,4 +145,4 @@ sciagent "Calculate ground state energy using VQE algorithm"
 | Materials modeling | ase → lammps → scipy-base | Thermodynamic properties |
 | Process engineering | dwsim → optuna | Optimal reactor conditions |
 
-See [Case Studies](case-studies.md) for real-world examples of SciAgent in published research.
+See [Case Studies](case-studies/) for real-world examples of SciAgent in published research.

@@ -41,7 +41,7 @@ Frameworks for building and orchestrating multiple AI agents working together.
 |---------|------------------------|----------|
 | Agent orchestration | ✓ Core capability | ✓ Verifier subagent |
 | Custom agent design | ✓ Flexible | Focused design |
-| Provider-agnostic | ✓ Most tools | Anthropic-first |
+| Provider-agnostic | ✓ Most tools | ✓ Via LiteLLM |
 | Scientific computing | ✗ Requires custom setup | ✓ Built-in |
 | Pre-built scientific tools | ✗ None | ✓ 27 services |
 
