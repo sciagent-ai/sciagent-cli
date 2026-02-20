@@ -133,6 +133,7 @@ Built-in sub-agents:
 | research | Coding | Web/doc research | web, file_ops, search |
 | plan | Scientific | Break down problems | file_ops, search, bash, web, skill, todo |
 | general | Coding | Multi-step tasks | all |
+| verifier | Verification | Independent validation | file_ops, search, bash |
 
 ### Orchestration
 
@@ -145,6 +146,99 @@ results = orch.spawn_parallel([
     {"agent_name": "research", "task": "Find documentation for S4 library"},
     {"agent_name": "debug", "task": "Investigate build error in logs"}
 ])
+```
+
+## Verification System
+
+SciAgent implements a **three-tier verification architecture** to prevent fabricated data and ensure scientific integrity.
+
+### Verification Gates
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Task Execution                         │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  GATE 1: DATA GATE                                       │
+│  • Verify HTTP fetches succeeded (status 200)            │
+│  • Detect HTML/error pages in data files                 │
+│  • Validate CSV structure and row counts                 │
+│  • Prevents analysis on fabricated/invalid data          │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  GATE 2: EXEC GATE                                       │
+│  • Verify commands actually ran                          │
+│  • Check exit codes (success = 0)                        │
+│  • Ensure verification tasks completed                   │
+└─────────────────────────────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│  GATE 3: LLM VERIFICATION                                │
+│  • Independent verifier subagent (fresh context)         │
+│  • Skeptical auditor with no conversation history        │
+│  • Returns verdict: verified | refuted | insufficient    │
+│  • Detects fabrication indicators                        │
+└─────────────────────────────────────────────────────────┘
+```
+
+### Verifier Subagent
+
+The LLM verification gate spawns an independent `verifier` subagent:
+
+```python
+SubAgentConfig(
+    name="verifier",
+    description="Independent verification of claims",
+    model=VERIFICATION_MODEL,  # Sonnet by default
+    temperature=0.0,           # Deterministic
+    allowed_tools=["file_ops", "search", "bash"]
+)
+```
+
+Key properties:
+- **Fresh context**: No conversation history (prevents bias)
+- **Adversarial**: Defaults to "insufficient" verdict
+- **Read-only**: Can read files and run verification commands but not modify
+
+### Configuration
+
+Configure gates in `OrchestratorConfig`:
+
+```python
+OrchestratorConfig(
+    enable_data_gate=True,       # Verify data provenance
+    data_gate_strict=True,       # Block on failure (vs warn)
+    enable_exec_gate=True,       # Verify execution
+    exec_gate_strict=True,
+    enable_verification=True,    # LLM verification
+    verification_strict=True,
+    verification_threshold=0.7   # Confidence threshold
+)
+```
+
+### Content Validation
+
+`ContentValidator` in `tools/atomic/todo.py` detects fabrication patterns:
+- HTML in data files (downloaded error page instead of data)
+- Placeholder values (suspiciously round numbers)
+- Error messages in output (404, access denied, stack traces)
+- Invalid CSV structure
+
+### TodoItem Verification
+
+Tasks can request verification via the `verify` flag:
+
+```python
+TodoItem(
+    content="Analyze protein fitness data",
+    produces="file:results.csv:csv:100",  # Expect CSV with 100 rows
+    verify=True  # Run LLM verification on completion
+)
 ```
 
 ## Service Registry

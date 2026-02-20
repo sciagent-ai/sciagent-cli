@@ -12,7 +12,7 @@ Configure SciAgent via command-line flags or Python.
 
 ### Default Model
 
-SciAgent uses Claude Opus as the default. Change it with `--model`:
+SciAgent uses Claude Sonnet as the default. Change it with `--model`:
 
 ```bash
 sciagent --model openai/gpt-4.1 "Summarize README.md"
@@ -24,16 +24,17 @@ Supported providers (via [litellm](https://github.com/BerriAI/litellm)): OpenAI,
 
 ### Model Tiers
 
-SciAgent uses four model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
+SciAgent uses five model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
 
 | Tier | Variable | Purpose |
 |------|----------|---------|
-| Scientific | `SCIENTIFIC_MODEL` | Main agent, planning (best quality) |
-| Vision | `VISION_MODEL` | Image and multimodal analysis |
+| Scientific | `SCIENTIFIC_MODEL` | Main agent, planning |
+| Vision | `VISION_MODEL` | Image and multimodal analysis (uses Opus) |
 | Coding | `CODING_MODEL` | Debug, research, general sub-agents |
+| Verification | `VERIFICATION_MODEL` | Independent verifier subagent |
 | Fast | `FAST_MODEL` | Explore sub-agent (speed/cost) |
 
-The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The vision tier uses the same model as scientific for high-quality image analysis. Sub-agents use tier-appropriate models automatically.
+The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The vision tier uses Opus for high-quality image analysis. The verification tier powers the independent verifier subagent that validates task outputs. Sub-agents use tier-appropriate models automatically.
 
 ### Alternative Models by Provider
 
@@ -43,9 +44,10 @@ SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriA
 
 | Tier | Anthropic (tested) | OpenAI | Google | xAI |
 |------|-------------------|--------|--------|-----|
-| **Scientific** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
+| **Scientific** | `claude-sonnet-4-20250514` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
 | **Vision** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
 | **Coding** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Verification** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
 | **Fast** | `claude-3-haiku-20240307` | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
 
 **Open-Source alternatives** (via Together AI, Groq, or self-hosted):
@@ -55,6 +57,7 @@ SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriA
 | Scientific | `deepseek/deepseek-reasoner`, `together_ai/Qwen/Qwen3-235B-A22B-Instruct` |
 | Vision | `together_ai/Qwen/Qwen2.5-VL-72B-Instruct`, `together_ai/meta-llama/Llama-3.2-90B-Vision-Instruct` |
 | Coding | `deepseek/deepseek-chat`, `together_ai/meta-llama/Llama-3.3-70B-Instruct` |
+| Verification | `deepseek/deepseek-chat`, `together_ai/meta-llama/Llama-3.3-70B-Instruct` |
 | Fast | `groq/llama-3.3-70b-versatile`, `together_ai/Qwen/Qwen2.5-7B-Instruct` |
 
 See `src/sciagent/defaults.py` for the full list with notes.
@@ -114,6 +117,7 @@ Built-in sub-agents (each uses a cost-optimised model tier):
 | `research` | Coding | Web research, documentation lookup |
 | `plan` | Scientific | Break down complex problems |
 | `general` | Coding | Complex multi-step tasks |
+| `verifier` | Verification | Independent validation of task outputs |
 
 Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
 

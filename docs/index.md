@@ -36,4 +36,4 @@ Building on SciAgent? See the [developer documentation](developers/):
 
 ## Community
 
-SciAgent is open source under the MIT License. [GitHub](https://github.com/sciagent-ai/sciagent-cli)
+SciAgent is open source under the Apache 2.0 License. [GitHub](https://github.com/sciagent-ai/sciagent-cli)
