@@ -1,117 +1,22 @@
 ---
 layout: default
-title: Case Studies
-nav_order: 6
+title: BRCA1 Fitness-Structure Analysis
+parent: Case Studies
+nav_order: 2
 ---
 
-# Case Studies
-
-Real-world examples of SciAgent reproducing scientific research from peer-reviewed publications.
-
----
-
-## AR Waveguide Metasurface Reproduction
-
-**Paper**: "Design and Experimental Validation of a High-Efficiency Multi-Zone Metasurface Waveguide In-Coupler"
-**Published**: Optical Materials Express, Vol. 15, No. 12, December 2025
-
-### The Challenge
-
-Reproduce RCWA simulation results from a peer-reviewed photonics paper using only the PDF as input. Validate that computed results match the publication.
-
-### Prompt
-
-```
-Reproduce simulation and optimization results from the
-publication in the project folder. Verify results match publication.
-```
-
-### What SciAgent Did
-
-**Phase 1: Paper Analysis**
-Read the PDF and extracted all simulation parameters:
-
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Wavelength | 532 nm | Section 2 |
-| Grating Period | 453 nm | Section 2 |
-| TiO2 Index | 2.4 + 0.001j | Literature |
-| Zone Widths | 1.1, 0.94, 0.96 mm | Fig 2(e) |
-
-**Phase 2: Task Planning**
-Created dependency-aware execution plan:
-
-```
-Extract params → RCWA Zone 1 ─┐
-                RCWA Zone 2 ─┼→ Coupling Model → Validation
-                RCWA Zone 3 ─┘
-```
-
-**Phase 3: Implementation**
-Wrote 350 lines of Python using S4 (Stanford RCWA solver):
-- Modeled TiO2 nano-beam + pillar unit cells
-- Simulated air→glass diffraction (T+1)
-- Simulated glass→glass TIR reflection (R0)
-- Implemented multi-bounce coupling model
-
-**Phase 4: Debug & Iterate**
-Resolved API differences and refined geometry orientation across 4 code iterations.
-
-### Results
-
-![Metasurface Simulation Results](images/case-studies/metasurface_results.png)
-
-#### Zone Efficiency Comparison
-
-| Zone | Simulated T+1 | Paper Target | Simulated R0 | Paper Target |
-|------|---------------|--------------|--------------|--------------|
-| 1 | 71.5% | 60% | 13.4% | 40% |
-| 2 | 34.3% | 50% | 32.0% | 50% |
-| 3 | 15.6% | 40% | 40.7% | 60% |
-
-**Zone efficiency trends match** (Zone 1 > Zone 2 > Zone 3 for diffraction).
-
-#### Coupling Efficiency
-
-| Metric | SciAgent | Paper (Simulated) | Paper (Measured) |
-|--------|----------|-------------------|------------------|
-| MFE | 20.1% | 25.3% | 17% |
-| Average | 51% | 31% | 30% |
-
-### Validation
-
-| Check | Status |
-|-------|--------|
-| RCWA simulation framework | PASS |
-| Zone efficiency trends | PASS |
-| Multi-bounce coupling model | PASS |
-| MFE within 20% of paper | PASS |
-
-### Generated Artifacts
-
-- `metasurface_final.py` - Complete RCWA simulation (350 LOC)
-- `_outputs/all_results.json` - Numerical results
-- `_outputs/metasurface_results.png` - Visualization
-- `_outputs/VALIDATION_REPORT.md` - Detailed analysis
-
-### Execution
-
-- **Time**: ~12 minutes
-- **Iterations**: 45 agent turns
-- **Services**: `rcwa` (S4 container)
-
----
-
-## BRCA1 Mutation Fitness-Structure Analysis
+# BRCA1 Mutation Fitness-Structure Analysis
 
 **Study**: "Accurate classification of BRCA1 variants with saturation genome editing"
 **Published**: Findlay et al., Nature 562, 217-222 (2018)
 
-### The Challenge
+---
+
+## The Challenge
 
 Analyze how BRCA1 mutation fitness scores correlate with protein 3D structure using deep mutational scanning data and AlphaFold predictions. Map 1,837 experimentally-measured mutation effects to structural features and identify patterns relevant for clinical variant interpretation.
 
-### Prompt
+## Prompt
 
 ```
 Analyze how BRCA1 mutation fitness scores correlate with protein structure
@@ -137,7 +42,7 @@ Verification targets:
 - Statistical comparison of buried vs exposed residue fitness
 ```
 
-### What SciAgent Did
+## What SciAgent Did
 
 **Phase 1: Data Exploration**
 Parsed fitness data and validated structure alignment:
@@ -171,11 +76,11 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
  1,837 mut     1,863 res       100% mapped      p < 10⁻¹⁸
 ```
 
-### Results
+## Results
 
-![BRCA1 Structure-Fitness Analysis](images/case-studies/brca1_structure_fitness.png)
+![BRCA1 Structure-Fitness Analysis](../images/case-studies/brca1_structure_fitness.png)
 
-#### Buried vs Exposed Residues
+### Buried vs Exposed Residues
 
 | Metric | Buried | Exposed | Significance |
 |--------|--------|---------|--------------|
@@ -186,7 +91,7 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
 
 **Buried residues are significantly more sensitive to mutation** — consistent with their role in maintaining protein stability.
 
-#### Functional Domain Analysis
+### Functional Domain Analysis
 
 | Domain | Mean Fitness | Role |
 |--------|--------------|------|
@@ -196,7 +101,7 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
 
 **ANOVA**: F=17.091, p=4.42×10⁻⁸
 
-#### Secondary Structure Effect
+### Secondary Structure Effect
 
 | Structure | Mean Fitness | Percent |
 |-----------|--------------|---------|
@@ -206,7 +111,7 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
 
 **ANOVA**: F=8.887, p=1.44×10⁻⁴
 
-### Validation
+## Validation
 
 | Check | Status |
 |-------|--------|
@@ -216,7 +121,7 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
 | Statistical tests completed | PASS |
 | Visualization generated | PASS |
 
-### Generated Artifacts
+## Generated Artifacts
 
 - `explore_data.py` - Data parsing and exploration (115 LOC)
 - `extract_structure_simple.py` - Structural feature extraction (195 LOC)
@@ -227,14 +132,8 @@ Parse Data → Extract Features → Map Fitness → Statistical Analysis
 - `_outputs/brca1_structure_fitness.png` - Multi-panel visualization (1.4 MB)
 - `_outputs/brca1_analysis_summary.json` - Methods and statistics
 
-### Execution
+## Execution
 
 - **Time**: ~8 minutes
 - **Iterations**: 44 agent turns
 - **Services**: `biopython` (BioPython + SciPy + Matplotlib)
-
----
-
-## Case Study 3: Digital IC Synthesis
-
-*Coming soon* - RTL-to-GDS flow using OpenROAD.
