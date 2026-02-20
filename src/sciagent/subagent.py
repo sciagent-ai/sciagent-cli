@@ -9,6 +9,7 @@ Key principles:
 """
 import os
 import json
+import threading
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
@@ -74,25 +75,27 @@ class SubAgentResult:
 class SubAgent:
     """
     An isolated agent instance with its own context
-    
+
     Sub-agents:
     - Have their own system prompt
     - Have restricted tool access (optional)
     - Cannot spawn further sub-agents
     - Return only their final result to parent
     """
-    
+
     def __init__(
         self,
         config: SubAgentConfig,
         tools: Optional[ToolRegistry] = None,
         working_dir: str = ".",
-        is_nested: bool = False  # True if spawned by another agent
+        is_nested: bool = False,  # True if spawned by another agent
+        parent_interrupt_event: Optional["threading.Event"] = None  # Share parent's interrupt state
     ):
         self.config = config
         self.working_dir = working_dir
         self.is_nested = is_nested
-        
+        self.parent_interrupt_event = parent_interrupt_event
+
         # Create filtered tool registry if restrictions specified
         if tools and config.allowed_tools is not None:
             self.tools = ToolRegistry()
@@ -130,18 +133,40 @@ class SubAgent:
         """Execute a task and return the result"""
         import time
         start_time = time.time()
-        
+
+        # Check if parent was already cancelled before starting
+        if self.parent_interrupt_event and self.parent_interrupt_event.is_set():
+            return SubAgentResult(
+                agent_name=self.config.name,
+                task=task,
+                success=False,
+                output="",
+                error="Cancelled by parent",
+                iterations=0,
+                tokens_used=0,
+                duration_seconds=0.0,
+                session_id=self.session_id
+            )
+
+        # Share parent's interrupt event with child agent
+        if self.parent_interrupt_event:
+            self.agent._parent_interrupt_event = self.parent_interrupt_event
+
         try:
             output = self.agent.run(task)
             success = True
             error = None
+        except KeyboardInterrupt:
+            output = "(Stopped by user)"
+            success = False
+            error = "User interrupt"
         except Exception as e:
             output = ""
             success = False
             error = str(e)
-        
+
         duration = time.time() - start_time
-        
+
         return SubAgentResult(
             agent_name=self.config.name,
             task=task,
@@ -392,24 +417,26 @@ Default to skepticism. Only "verified" if evidence is strong."""
 class SubAgentOrchestrator:
     """
     Orchestrates sub-agent spawning and execution
-    
+
     Provides:
     - Sequential execution
     - Parallel execution
     - Result aggregation
     """
-    
+
     def __init__(
         self,
         tools: Optional[ToolRegistry] = None,
         working_dir: str = ".",
-        max_workers: int = 4
+        max_workers: int = 4,
+        parent_interrupt_event: Optional[threading.Event] = None
     ):
         self.tools = tools or create_default_registry(working_dir)
         self.working_dir = working_dir
         self.max_workers = max_workers
         self.registry = SubAgentRegistry()
-        
+        self.parent_interrupt_event = parent_interrupt_event
+
         # Track active sub-agents
         self._active: Dict[str, SubAgent] = {}
         self._results: List[SubAgentResult] = []
@@ -447,7 +474,8 @@ class SubAgentOrchestrator:
             config=config,
             tools=self.tools,
             working_dir=self.working_dir,
-            is_nested=True
+            is_nested=True,
+            parent_interrupt_event=self.parent_interrupt_event
         )
         
         result = sub_agent.run(task)

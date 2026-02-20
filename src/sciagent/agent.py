@@ -12,6 +12,9 @@ import signal
 import threading
 import traceback
 from typing import Dict, Any, List, Optional, Callable
+
+from prompt_toolkit import prompt as pt_prompt
+from prompt_toolkit.patch_stdout import patch_stdout
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -87,10 +90,13 @@ class AgentLoop:
             import pathlib
             registry_path = pathlib.Path(__file__).parent / "services" / "registry.yaml"
 
+        # Store registry path for skill variable substitution
+        self._registry_path = str(registry_path)
+
         # Build system prompt from modular files
         prompt = system_prompt or build_system_prompt(
             working_dir=os.path.abspath(self.config.working_dir),
-            registry_path=str(registry_path)
+            registry_path=self._registry_path
         )
         self.state = AgentState(
             session_id=generate_session_id(),
@@ -116,6 +122,21 @@ class AgentLoop:
         self._error_counts: Dict[str, int] = {}
         self._max_same_error = 3
 
+        # Integrity: Evidence tracking (Action 3)
+        self._evidence = {
+            "fetches_total": 0,
+            "fetches_ok": 0,
+            "execs_total": 0,
+            "execs_ok": 0,
+            "files_created": 0
+        }
+
+        # Integrity: Consecutive failure tracking for external data (Action 2)
+        # Force user prompt after 3 consecutive failures to prevent LLM from
+        # proceeding with "local knowledge" when required data isn't available
+        self._consecutive_external_failures = 0
+        self._max_consecutive_external_failures = 3
+
         # User interrupt handling - thread-safe for immediate response
         self._paused = False
         self._cancelled = False
@@ -125,6 +146,7 @@ class AgentLoop:
         self._menu_lock = threading.Lock()  # Prevents multiple menus
         self._menu_shown = False  # Track if menu is currently displayed
         self._interrupt_count = 0  # Track rapid Ctrl+C presses
+        self._parent_interrupt_event = None  # Set by parent for subagents
 
     # =========================================================================
     # Interrupt Handling
@@ -144,7 +166,9 @@ class AgentLoop:
         if self._interrupt_count >= 3:
             print("\n\n🛑 Force stopping...")
             self._cancelled = True
-            return
+            # Restore original handler and re-raise to actually exit
+            self._restore_interrupt_handler()
+            raise KeyboardInterrupt("Force stopped by user (3x Ctrl+C)")
 
         # Show menu immediately in a thread (non-blocking)
         if not self._menu_shown:
@@ -168,25 +192,45 @@ class AgentLoop:
 
     def _handle_pause_menu(self):
         """Display pause menu and get user choice."""
+        # Small delay to let any pending output settle
+        import time
+        time.sleep(0.1)
+
         print("What would you like to do?")
         print("  [c] Continue")
         print("  [s] Stop")
         print("  [f] Give feedback/redirect")
-        try:
-            choice = input("\nChoice: ").strip().lower()
-            if choice == 's':
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                choice = pt_prompt("\nChoice [c/s/f]: ").strip().lower()
+
+                if choice == 's' or choice == 'stop':
+                    self._cancelled = True
+                    print("Stopping...")
+                    break
+                elif choice == 'f' or choice == 'feedback':
+                    feedback = pt_prompt("Your feedback: ").strip()
+                    if feedback:
+                        self._user_feedback = feedback
+                        print(f"Got it. Will incorporate: {feedback[:50]}...")
+                    break
+                elif choice == 'c' or choice == 'continue' or choice == '':
+                    print("Continuing...")
+                    break
+                else:
+                    # Unrecognized input - prompt again
+                    if attempt < max_attempts - 1:
+                        print(f"  Please enter 'c' to continue, 's' to stop, or 'f' for feedback.")
+                    else:
+                        print("  Defaulting to continue...")
+
+            except (EOFError, OSError, KeyboardInterrupt):
+                # EOFError: stdin closed, OSError: terminal issues
                 self._cancelled = True
-                print("Stopping...")
-            elif choice == 'f':
-                feedback = input("Your feedback: ").strip()
-                if feedback:
-                    self._user_feedback = feedback
-                    print(f"Got it. Will incorporate: {feedback[:50]}...")
-            else:
-                print("Continuing...")
-        except (EOFError, OSError):
-            # EOFError: stdin closed, OSError: terminal issues
-            self._cancelled = True
+                break
+
         self._paused = False
         self._interrupt_event.clear()  # Reset for next interrupt
 
@@ -219,6 +263,12 @@ class AgentLoop:
             max_attempts = 5  # Prevent infinite loops on bad input
 
             for attempt in range(max_attempts):
+                # Check if user cancelled via Ctrl+C
+                if self._cancelled:
+                    fallback = default or options[0]
+                    print(f"\n(Cancelled, using: {fallback})")
+                    return fallback
+
                 # Show options on first attempt or after invalid input
                 if attempt == 0:
                     print("\nOptions:")
@@ -234,7 +284,7 @@ class AgentLoop:
                 prompt += ": "
 
                 try:
-                    choice = input(prompt).strip()
+                    choice = pt_prompt(prompt).strip()
 
                     # Empty input with default available
                     if not choice and default:
@@ -255,7 +305,7 @@ class AgentLoop:
                             return selected
                         elif idx == 0:
                             # User explicitly chose "Other" - get custom response
-                            custom = input("Your response: ").strip()
+                            custom = pt_prompt("Your response: ").strip()
                             if custom:
                                 print(f"✓ Custom response: {custom}")
                                 return custom
@@ -298,7 +348,7 @@ class AgentLoop:
             prompt += ": "
 
             try:
-                response = input(prompt).strip()
+                response = pt_prompt(prompt).strip()
                 if not response and default:
                     print(f"Using default: {default}")
                     return default
@@ -307,17 +357,34 @@ class AgentLoop:
                 return default or "No response provided"
 
     def _setup_interrupt_handler(self):
-        """Install our interrupt handler and reset state"""
+        """Install our interrupt handler and reset state.
+
+        If this agent has a parent (is a subagent), skip installing
+        signal handler - let parent handle signals and propagate via event.
+        """
         self._interrupt_event.clear()
         self._menu_shown = False
         self._interrupt_count = 0
-        signal.signal(signal.SIGINT, self._handle_interrupt)
+        # Only install signal handler if we're the top-level agent
+        if self._parent_interrupt_event is None:
+            signal.signal(signal.SIGINT, self._handle_interrupt)
 
     def _restore_interrupt_handler(self):
         """Restore original interrupt handler and cleanup"""
-        signal.signal(signal.SIGINT, self._original_sigint)
+        # Only restore if we installed a handler (top-level agent)
+        if self._parent_interrupt_event is None:
+            signal.signal(signal.SIGINT, self._original_sigint)
         self._interrupt_event.clear()
         self._menu_shown = False
+
+    def _is_cancelled(self) -> bool:
+        """Check if this agent or parent was cancelled."""
+        if self._cancelled:
+            return True
+        if self._parent_interrupt_event and self._parent_interrupt_event.is_set():
+            self._cancelled = True  # Propagate to local state
+            return True
+        return False
 
     def _wait_for_menu_if_paused(self) -> bool:
         """Wait for any active menu interaction to complete.
@@ -325,7 +392,7 @@ class AgentLoop:
         Returns True if cancelled, False otherwise.
         """
         if not self._paused:
-            return self._cancelled
+            return self._is_cancelled()
 
         # Wait for menu thread to finish (with timeout to avoid deadlock)
         for _ in range(100):  # 10 second max wait
@@ -412,6 +479,88 @@ class AgentLoop:
         return result_container["response"]
 
     # =========================================================================
+    # Integrity: Gates and Fail-Fast (Actions 1, 2, 3)
+    # =========================================================================
+
+    # External tools that access resources outside the agent's control
+    EXTERNAL_TOOLS = {"web", "fetch", "http_request", "service", "web_search", "read_url"}
+
+    # Failure signals for external resources
+    FAILURE_SIGNALS = ["403", "404", "500", "timeout", "refused", "unavailable", "connection error"]
+
+    # Container/docker specific failure signals
+    CONTAINER_FAILURE_SIGNALS = [
+        # Missing packages
+        "importerror", "modulenotfounderror", "no module named",
+        # Container issues
+        "image not found", "no such image", "pull access denied",
+        # Execution failures
+        "exec failed", "container failed", "exited with code",
+    ]
+
+    def _check_gates(self, tool_call: ToolCall) -> Optional[str]:
+        """
+        Action 1: Gate check that runs for ALL tool calls.
+        Returns None if passed, or error message if blocked.
+
+        Extend this method to add project-specific integrity checks.
+        """
+        # Placeholder for custom gates (data_gate, exec_gate, etc.)
+        return None
+
+    def _handle_gate_failure(self, tool_call: ToolCall, gate_error: str) -> ToolResult:
+        """Handle a gate check failure."""
+        self.display.warning(f"Gate blocked: {gate_error}")
+        return ToolResult(success=False, output=None, error=f"Blocked by gate: {gate_error}")
+
+    def _pause_for_user(self, reason: str, options: List[str]) -> ToolResult:
+        """
+        Action 2: Pause execution and get user decision on external failure.
+        Forces human involvement instead of letting LLM work around failures.
+        """
+        print(f"\n⚠️  {reason}")
+        print("\nWhat would you like to do?")
+        for i, opt in enumerate(options, 1):
+            print(f"  [{i}] {opt}")
+
+        try:
+            choice = pt_prompt("\nChoice: ").strip()
+            if choice.isdigit() and 1 <= int(choice) <= len(options):
+                selected = options[int(choice) - 1]
+                return ToolResult(success=False, output=None, error=f"User chose: {selected}")
+            return ToolResult(success=False, output=None, error=f"User input: {choice}")
+        except (EOFError, KeyboardInterrupt):
+            return ToolResult(success=False, output=None, error="User chose: stop")
+
+    def _is_container_failure(self, command: str, result: ToolResult) -> bool:
+        """Check if a bash command was a docker/container execution that failed."""
+        if result.success:
+            return False
+
+        cmd_lower = command.lower()
+        if "docker" not in cmd_lower:
+            return False
+
+        # Check error output for container-specific failures
+        error_text = str(result.error or "").lower() + str(result.output or "").lower()
+        return any(sig in error_text for sig in self.CONTAINER_FAILURE_SIGNALS + self.FAILURE_SIGNALS)
+
+    def _collect_evidence_summary(self) -> Dict[str, int]:
+        """Action 3: Collect evidence summary for final output."""
+        return self._evidence.copy()
+
+    def _print_evidence_summary(self):
+        """Action 3: Print lightweight evidence summary before final response."""
+        ev = self._evidence
+        if ev["fetches_total"] > 0 or ev["execs_total"] > 0 or ev["files_created"] > 0:
+            print(f"\n📊 Session: {ev['fetches_ok']}/{ev['fetches_total']} fetches, "
+                  f"{ev['execs_ok']}/{ev['execs_total']} execs, "
+                  f"{ev['files_created']} files created")
+
+            if ev["fetches_total"] > 0 and ev["fetches_ok"] == 0:
+                print("⚠️  No external data successfully retrieved.")
+
+    # =========================================================================
     # Skill Auto-Injection
     # =========================================================================
 
@@ -430,15 +579,25 @@ class AgentLoop:
             skill = loader.match_skill(task)
 
             if skill:
+                # Apply variable substitution to skill workflow
+                # Skills use <placeholder> syntax (e.g., <registry_path>)
+                workflow = skill.workflow
+                workflow = workflow.replace("<registry_path>", self._registry_path)
+                workflow = workflow.replace("{registry_path}", self._registry_path)
+                workflow = workflow.replace("<working_dir>", os.path.abspath(self.config.working_dir))
+                workflow = workflow.replace("{working_dir}", os.path.abspath(self.config.working_dir))
+
                 return f"""[SYSTEM] Matched skill: {skill.name}
 
 {skill.description}
+
+**Registry path**: `{self._registry_path}`
 
 ---
 
 **Follow this workflow:**
 
-{skill.workflow}
+{workflow}
 
 ---
 """
@@ -782,6 +941,56 @@ Provide a concise summary (max 500 words):"""
         if self._on_tool_end:
             self._on_tool_end(tool_call.name, result)
 
+        # Integrity Action 2: Fail-fast on container/external failures
+        # Track evidence for external tools
+        if tool_call.name in self.EXTERNAL_TOOLS:
+            self._evidence["fetches_total"] += 1
+            if result.success:
+                self._evidence["fetches_ok"] += 1
+                # Reset consecutive failures on success
+                self._consecutive_external_failures = 0
+            else:
+                # Track consecutive failures
+                self._consecutive_external_failures += 1
+
+                # Fail-fast: after max consecutive external data failures, force user decision
+                # This prevents the LLM from silently "proceeding with local knowledge"
+                if self._consecutive_external_failures >= self._max_consecutive_external_failures:
+                    self._consecutive_external_failures = 0  # Reset counter
+                    return self._pause_for_user(
+                        f"External data access failed {self._max_consecutive_external_failures} times: {result.error or 'No data retrieved'}",
+                        options=[
+                            "Provide alternative data source (I'll specify)",
+                            "Continue with explicit limitations (document missing data)",
+                            "Stop task - required data not available"
+                        ]
+                    )
+
+        # Track bash executions (especially docker)
+        if tool_call.name == "bash":
+            self._evidence["execs_total"] += 1
+            if result.success:
+                self._evidence["execs_ok"] += 1
+
+            # Fail-fast: docker/container command failed → pause for user
+            cmd = tool_call.arguments.get("command", "")
+            if self._is_container_failure(cmd, result):
+                return self._pause_for_user(
+                    f"Container execution failed: {result.error}",
+                    options=[
+                        "Use build-service to add missing package",
+                        "Install at runtime (pip install in container)",
+                        "Try alternative approach",
+                        "Stop"
+                    ]
+                )
+
+        # Track file creation
+        if tool_call.name == "file_ops":
+            action = tool_call.arguments.get("action", "")
+            if action in ("write", "create") and result.success:
+                self._evidence["files_created"] += 1
+
         # Special handling for ask_user tool - prompt user and return their response
         if tool_call.name == "ask_user" and result.success:
             output = result.output
@@ -849,16 +1058,22 @@ Provide a concise summary (max 500 words):"""
         pending_images = []  # Collect images to inject as multimodal message
 
         for tc in tool_calls:
-            try:
-                result = self._execute_tool(tc, defer_spiral=True)
-            except Exception as e:
-                # Ensure we still add a result even if tool execution crashes
-                result = ToolResult(
-                    success=False,
-                    output=None,
-                    error=f"Tool execution failed: {str(e)}"
-                )
-                self.display.tool_end(tc.name, success=False, error=str(e))
+            # Integrity Action 1: Gate check runs for ALL tools
+            gate_error = self._check_gates(tc)
+            if gate_error:
+                result = self._handle_gate_failure(tc, gate_error)
+                self.display.tool_end(tc.name, success=False, error=gate_error)
+            else:
+                try:
+                    result = self._execute_tool(tc, defer_spiral=True)
+                except Exception as e:
+                    # Ensure we still add a result even if tool execution crashes
+                    result = ToolResult(
+                        success=False,
+                        output=None,
+                        error=f"Tool execution failed: {str(e)}"
+                    )
+                    self.display.tool_end(tc.name, success=False, error=str(e))
 
             # Check if this is an image result from file_ops
             is_image_result = (
@@ -981,7 +1196,7 @@ Provide a concise summary (max 500 words):"""
         print("  [+N] Add N more iterations (e.g., +10, +25)")
 
         try:
-            choice = input("\nChoice [w/c/+N]: ").strip().lower()
+            choice = pt_prompt("\nChoice [w/c/+N]: ").strip().lower()
 
             if choice == 'w':
                 return 'wrap_up'
@@ -1065,8 +1280,8 @@ Provide a concise summary (max 500 words):"""
 
         try:
             while self.iteration_count < max_iter:
-                # Check for user cancellation
-                if self._cancelled:
+                # Check for user cancellation (including parent cancellation for subagents)
+                if self._is_cancelled():
                     final_response = "(Stopped by user)"
                     break
 
@@ -1167,6 +1382,8 @@ Provide a concise summary (max 500 words):"""
 
                 else:
                     # No tool calls = done
+                    # Integrity Action 3: Show evidence summary before final output
+                    self._print_evidence_summary()
                     final_response = response.content
                     self.state.context.add_assistant_message(content=response.content)
                     break
@@ -1197,7 +1414,7 @@ Provide a concise summary (max 500 words):"""
         
         while True:
             try:
-                user_input = input("\n> ").strip()
+                user_input = pt_prompt("\n> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nGoodbye!")
                 break

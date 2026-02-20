@@ -40,9 +40,9 @@ This skill enables the execution of scientific and engineering computations by l
 
 2. **Read registry and check `packages:` field**:
    ```
-   file_ops(action="read", path="<registry_path>")
+   file_ops(action="read", path="{registry_path}")
    ```
-   Find a service whose `packages:` list contains ALL your requirements.
+   The registry path is provided above. Find a service whose `packages:` list contains ALL your requirements.
 
 3. **If no single service has all packages → ASK THE USER**:
 
@@ -82,7 +82,7 @@ This skill enables the execution of scientific and engineering computations by l
 
 ### Phase 1: Discovery
 
-1. **Locate the Service Registry**: The `registry.yaml` file in the `services` directory defines all available services.
+1. **Locate the Service Registry**: Read the registry at `{registry_path}` to see all available services.
 
 2. **Discover Services**: Each service entry includes:
    - `packages`: Libraries installed (verify your needs here)

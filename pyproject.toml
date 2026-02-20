@@ -35,6 +35,7 @@ dependencies = [
     "html2text>=2024.2.26",
     "beautifulsoup4>=4.12.0",
     "pypdf>=4.0.0",
+    "prompt_toolkit>=3.0.0",
 ]
 
 [project.optional-dependencies]

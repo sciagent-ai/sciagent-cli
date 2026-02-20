@@ -292,7 +292,10 @@ def main():
     )
 
     agent = AgentLoop(config=config, tools=tools, system_prompt=final_system_prompt)
-    
+
+    # Connect parent's interrupt event to orchestrator for subagent cancellation
+    orchestrator.parent_interrupt_event = agent._interrupt_event
+
     # Resume session if specified
     if args.resume:
         if agent.load_session(args.resume):
