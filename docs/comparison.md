@@ -4,188 +4,77 @@ title: Comparison
 nav_order: 6
 ---
 
-# Comparison with Other Frameworks
+# How SciAgent Fits the AI Agent Landscape
 
-The AI agent landscape in 2026 spans general-purpose coding agents, multi-agent frameworks, and domain-specific scientific systems. SciAgent bridges these categories: it's a coding agent with containerized scientific computing and built-in verification.
+The AI agent landscape in 2026 spans three categories: general-purpose coding agents, multi-agent orchestration frameworks, and domain-specific scientific systems. SciAgent bridges these categories—combining software engineering capabilities with containerized scientific computing and built-in verification.
 
-## Quick Comparison
-
-| Feature | SciAgent | Claude Code | Cursor | OpenHands | SWE-Agent | Devin |
-|---------|----------|-------------|--------|-----------|-----------|-------|
-| Primary focus | Scientific + SWE | General SWE | IDE coding | Autonomous SWE | GitHub issues | Full autonomy |
-| Scientific services | 27 containers | No | No | No | No | No |
-| Verification system | 3-tier gates | No | No | No | No | No |
-| Research-first workflow | Yes | No | No | No | No | No |
-| Open source | Yes | No | No | Yes | Yes | No |
-| Price | Free | $200/mo (Max) | $20-200/mo | Free | Free | $500/mo |
+This page compares approaches by feature category to help you understand where SciAgent fits and when to use different tools.
 
 ---
 
-## Category 1: Coding Agents
+## Feature Comparison by Category
 
-These tools focus on general software engineering tasks.
+### Coding Agents
 
-### Claude Code
+Tools focused on software engineering tasks: code generation, debugging, refactoring, and repository management.
 
-Anthropic's terminal-based agent for software engineering. Known for deep reasoning and handling complex architectural changes.
+| Feature | Coding Agents | SciAgent |
+|---------|---------------|----------|
+| Code generation & editing | ✓ All tools | ✓ |
+| Repository navigation | ✓ All tools | ✓ |
+| Git operations | ✓ All tools | ✓ |
+| Autonomous execution | Varies (high in OpenHands, Devin; lower in Cursor) | ✓ |
+| Scientific computing | ✗ None | ✓ 27 containers |
+| Result verification | ✗ None | ✓ 3-tier system |
 
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | 200K context window, exceptional debugging, agentic workflow |
-| **Limitations** | No scientific computing focus, subscription cost |
-| **Best for** | Complex refactoring, unfamiliar codebases, architectural decisions |
+**Representative tools:** Claude Code [1], Cursor [2], Aider [3], OpenHands [4], SWE-Agent [5], Devin [6]
 
-Claude Code is often used as an "escalation path" when other tools fail on hard problems.
-
-### Cursor
-
-IDE-first coding assistant built as a VS Code fork. You drive, the AI assists.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Whole-codebase awareness, Composer mode for multi-file edits, Tab completion |
-| **Limitations** | IDE-dependent, no autonomous execution, no scientific focus |
-| **Best for** | Daily coding flow, inline suggestions, quick edits |
-
-### Aider
-
-Open-source CLI tool for AI-assisted coding with direct repository write access.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Lightweight, excellent Git integration, local execution, open source |
-| **Limitations** | Command-line only, no scientific computing, manual operation |
-| **Best for** | Quick code edits, privacy-conscious teams, existing projects |
-
-### OpenHands
-
-Open-source autonomous coding assistant (formerly OpenDevin). Acts as a full-capability developer.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | High autonomy, sandboxed execution, web browsing, strong SWE-bench scores |
-| **Limitations** | No scientific computing, requires oversight for complex tasks |
-| **Best for** | Autonomous task completion, tackling project backlogs |
-
-### SWE-Agent
-
-Princeton/Stanford research project for automated GitHub issue resolution.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Custom agent-computer interface (ACI), >74% SWE-bench verified, research-backed |
-| **Limitations** | Focused on issue resolution, no scientific computing |
-| **Best for** | Automated bug fixes, GitHub issue triage, research applications |
-
-Mini-SWE-Agent (100 lines of Python) is now the primary development focus, used by Meta, NVIDIA, IBM, and others.
-
-### Devin
-
-Cognition AI's commercial "AI software engineer" with full environment access.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Maximum autonomy, browser + terminal access, handles CI/CD |
-| **Limitations** | $500/month, inconsistent on complex tasks, requires oversight |
-| **Best for** | Enterprises needing fully autonomous task completion |
+**Key insight:** Coding agents excel at software engineering but lack scientific computing environments. SciAgent adds containerized services while retaining full SWE capabilities.
 
 ---
 
-## Category 2: Multi-Agent Frameworks
+### Multi-Agent Frameworks
 
-Frameworks for building and orchestrating multiple AI agents.
+Frameworks for building and orchestrating multiple AI agents working together.
 
-### AG2 (Community AutoGen)
+| Feature | Multi-Agent Frameworks | SciAgent |
+|---------|------------------------|----------|
+| Agent orchestration | ✓ Core capability | ✓ Verifier subagent |
+| Custom agent design | ✓ Flexible | Focused design |
+| Provider-agnostic | ✓ Most tools | Anthropic-first |
+| Scientific computing | ✗ Requires custom setup | ✓ Built-in |
+| Pre-built scientific tools | ✗ None | ✓ 27 services |
 
-Community-driven fork of AutoGen, maintained by Chi Wang (formerly Microsoft, now Google DeepMind) and researchers from Meta, IBM, and universities.
+**Representative tools:** AG2 [7], Microsoft AutoGen/Semantic Kernel [8], LangChain/LangGraph [9]
 
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Stable API (continues v0.2 line), open governance, community-driven |
-| **Limitations** | General-purpose, no built-in scientific computing |
-| **Best for** | Teams needing stable multi-agent orchestration without Microsoft lock-in |
-
-AG2 provides a "safe harbor" for developers who built on original AutoGen and want to avoid Microsoft's v0.4 migration.
-
-### Microsoft AutoGen / Semantic Kernel
-
-Microsoft's enterprise multi-agent framework, now merged with Semantic Kernel.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Enterprise features, Azure integration, unified Agent Framework |
-| **Limitations** | Migration required from v0.2, Microsoft ecosystem coupling |
-| **Best for** | Enterprise teams already in Microsoft/Azure ecosystem |
-
-Note: AutoGen will only receive bug fixes; new development is in the unified Agent Framework.
-
-### LangChain / LangGraph
-
-General-purpose framework for building AI agents with extensive integrations.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Large ecosystem, provider-agnostic, pluggable backends |
-| **Limitations** | Complexity, no scientific computing focus, requires assembly |
-| **Best for** | Custom agent architectures, third-party integrations |
+**Key insight:** Multi-agent frameworks provide orchestration primitives but require building scientific capabilities from scratch. SciAgent provides ready-to-use scientific infrastructure.
 
 ---
 
-## Category 3: Scientific AI Agents
+### Scientific AI Agents
 
-Domain-specific agents for scientific research and discovery.
+Domain-specific agents designed for scientific research and discovery.
 
-### ChemCrow
+| Feature | Scientific Agents | SciAgent |
+|---------|-------------------|----------|
+| Domain expertise | Single domain (chemistry, materials) | 10 domains |
+| Tool count | 5-18 tools | 27 containerized services |
+| Cross-domain pipelines | ✗ Limited | ✓ Full support |
+| Software engineering | ✗ Minimal | ✓ Full SWE agent |
+| Result verification | Varies | ✓ 3-tier system |
+| Lab automation | Some (Coscientist) | ✗ Computational only |
 
-LLM chemistry agent with 18 expert-designed tools for synthesis, drug discovery, and materials design.
+**Representative tools:** ChemCrow [10], Coscientist [11], FORUM-AI [12], Google AI Co-Scientist [13]
 
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Autonomous synthesis planning, safety checks (weapons, explosives, patents) |
-| **Limitations** | Chemistry-only, sometimes generates incorrect responses |
-| **Best for** | Organic synthesis, drug discovery, materials chemistry |
-
-ChemCrow has autonomously synthesized insect repellents, organocatalysts, and discovered novel chromophores.
-
-### Coscientist
-
-Carnegie Mellon's end-to-end AI research assistant with five interacting modules.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Planner + web searcher + code execution + documentation + automation |
-| **Limitations** | Chemistry-focused, can produce errors |
-| **Best for** | Autonomous chemical experiment design and execution |
-
-Coscientist designed accurate reaction procedures in under four minutes and successfully synthesized target products.
-
-### FORUM-AI (Berkeley Lab)
-
-First full-stack agentic AI system for materials science, launching 2026.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Supercomputer integration (NERSC, Oak Ridge, Argonne), robotic experiments |
-| **Limitations** | Materials science focus, institutional access |
-| **Best for** | Energy materials research, hypothesis-to-experiment pipelines |
-
-### Google AI Co-Scientist
-
-Google's research system for accelerating scientific discovery.
-
-| Aspect | Details |
-|--------|---------|
-| **Strengths** | Supervisor + specialized agents, flexible compute scaling |
-| **Limitations** | Not publicly available |
-| **Best for** | Complex scientific reasoning at scale |
+**Key insight:** Scientific agents provide deep domain expertise but are typically single-domain and lack software engineering capabilities. SciAgent spans multiple domains and includes full SWE functionality.
 
 ---
 
-## What Makes SciAgent Different
+## Key Differentiators
 
 ### 1. Three-Tier Verification System
 
-No other agent framework includes built-in verification gates:
+No other agent framework includes built-in verification gates for scientific computing:
 
 ```
 Task Execution
@@ -197,15 +86,15 @@ EXEC GATE    → Verify commands ran, check exit codes
 LLM VERIFY   → Independent verifier subagent (fresh context, adversarial)
 ```
 
-This prevents fabricated results—a critical issue in scientific computing where agents can silently generate plausible-looking but incorrect data.
+This addresses a critical issue: agents can generate plausible-looking but incorrect scientific results. Verification ensures reproducibility and prevents fabrication.
 
-### 2. Containerized Scientific Services
+### 2. Cross-Domain Containerized Services
 
-27 isolated Docker environments spanning 10 domains:
+27 isolated Docker environments spanning 10 scientific domains:
 
 | Domain | Services |
 |--------|----------|
-| Math & Optimisation | scipy-base, sympy, cvxpy, optuna |
+| Math & Optimization | scipy-base, sympy, cvxpy, optuna |
 | Chemistry & Materials | rdkit, ase, lammps, dwsim |
 | Molecular Dynamics | gromacs, lammps |
 | Photonics & Optics | rcwa, meep, pyoptools |
@@ -216,7 +105,7 @@ This prevents fabricated results—a critical issue in scientific computing wher
 | Network Analysis | networkx |
 | Scientific ML | sciml-julia |
 
-Unlike ChemCrow (chemistry-only) or Coscientist (single domain), SciAgent handles cross-domain pipelines (e.g., rdkit → gromacs → scipy).
+Unlike single-domain agents, SciAgent handles cross-domain pipelines (e.g., RDKit → GROMACS → SciPy for molecular design → simulation → analysis).
 
 ### 3. Research-First Workflow
 
@@ -228,65 +117,69 @@ The `sci-compute` skill enforces documentation research before code generation:
 4. **Execute** – Run in isolated container
 5. **Debug** – Search for error solutions if needed
 
-This mirrors the Coscientist approach but generalizes across all scientific domains.
+This mirrors the Coscientist approach [11] but generalizes across all scientific domains.
 
-### 4. Scientific Integrity Built-In
+### 4. SWE + Science Combined
 
-Core prompt includes integrity guidelines:
-- Never fabricate or generate synthetic data without permission
-- Report ALL runs (successes and failures)
-- Document provenance, uncertainty, and parameters
-- Cite methods and data sources
-
-### 5. Software Engineering + Science
-
-Unlike pure scientific agents (ChemCrow, Coscientist) that focus on domain tasks, SciAgent is a full software engineering agent that can:
-- Navigate and refactor codebases
-- Debug complex issues
-- Handle Git operations
-- Build and publish Docker services
-
-Unlike pure coding agents (Claude Code, Cursor) that lack scientific capabilities, SciAgent can:
-- Run containerized simulations
-- Validate scientific results
-- Chain multi-domain computations
+| Capability | Pure Coding Agents | Pure Scientific Agents | SciAgent |
+|------------|-------------------|------------------------|----------|
+| Navigate codebases | ✓ | ✗ | ✓ |
+| Debug complex issues | ✓ | ✗ | ✓ |
+| Git operations | ✓ | ✗ | ✓ |
+| Run simulations | ✗ | ✓ | ✓ |
+| Validate results | ✗ | Varies | ✓ |
+| Cross-domain compute | ✗ | ✗ | ✓ |
 
 ---
 
-## When to Use SciAgent
+## When to Use Each Approach
 
-**Choose SciAgent when you need:**
-- Scientific simulations with reproducibility (containerized execution)
-- Multi-domain pipelines (chemistry → MD → analysis)
-- Verification that results aren't fabricated
-- Research-first approach with documentation lookup
-- Open-source solution without subscription costs
-
-**Choose other tools when:**
-- Pure coding tasks with no scientific computing → Claude Code, Cursor, Aider
-- Enterprise multi-agent workflows → Microsoft AutoGen, AG2
-- Chemistry-only with lab integration → ChemCrow, Coscientist
-- Maximum coding autonomy → Devin, OpenHands
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| Pure software engineering (no scientific computing) | Coding agents (Claude Code, Cursor, Aider, etc.) |
+| Custom multi-agent architectures | Orchestration frameworks (AG2, LangChain) |
+| Chemistry with lab automation | ChemCrow, Coscientist |
+| Materials science with HPC | FORUM-AI (institutional) |
+| Scientific computing + software engineering | SciAgent |
+| Cross-domain scientific pipelines | SciAgent |
+| Verified/reproducible computational results | SciAgent |
 
 ---
 
-## Links
+## References
 
 **Coding Agents**
-- [Claude Code](https://claude.ai/code)
-- [Cursor](https://cursor.sh)
-- [Aider](https://github.com/paul-gauthier/aider)
-- [OpenHands](https://github.com/All-Hands-AI/OpenHands)
-- [SWE-Agent](https://github.com/SWE-agent/SWE-agent)
-- [Devin](https://devin.ai)
+
+[1] Anthropic. "Claude Code." https://claude.ai/code
+
+[2] Cursor. "The AI Code Editor." https://cursor.sh
+
+[3] P. Gauthier. "Aider: AI pair programming in your terminal." https://github.com/paul-gauthier/aider
+
+[4] All-Hands-AI. "OpenHands: Platform for AI software developers." https://github.com/All-Hands-AI/OpenHands
+
+[5] C. Yang et al. "SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering." *arXiv preprint* arXiv:2405.15793, 2024. https://github.com/SWE-agent/SWE-agent
+
+[6] Cognition AI. "Devin: The first AI software engineer." https://devin.ai
 
 **Multi-Agent Frameworks**
-- [AG2](https://github.com/ag2ai/ag2)
-- [Microsoft AutoGen](https://github.com/microsoft/autogen)
-- [LangChain](https://github.com/langchain-ai/langchain)
 
-**Scientific AI**
-- [ChemCrow](https://github.com/ur-whitelab/chemcrow-pub)
-- [Coscientist](https://www.nature.com/articles/s41586-023-06792-0)
-- [FORUM-AI](https://newscenter.lbl.gov/2026/02/03/berkeley-lab-leads-effort-to-build-ai-assistant-for-energy-materials-discovery/)
-- [AI for Science (awesome list)](https://github.com/ai-boost/awesome-ai-for-science)
+[7] C. Wang et al. "AG2: Community-driven AutoGen fork." https://github.com/ag2ai/ag2
+
+[8] Microsoft. "AutoGen: Multi-agent conversation framework." https://github.com/microsoft/autogen
+
+[9] LangChain. "LangGraph: Build stateful, multi-actor applications." https://github.com/langchain-ai/langgraph
+
+**Scientific AI Agents**
+
+[10] A. M. Bran et al. "ChemCrow: Augmenting large language models with chemistry tools." *Nature Machine Intelligence*, 6, 525–535, 2024. https://doi.org/10.1038/s42256-024-00832-8
+
+[11] D. A. Boiko et al. "Autonomous chemical research with large language models." *Nature*, 624, 570–578, 2023. https://doi.org/10.1038/s41586-023-06792-0
+
+[12] Berkeley Lab. "Berkeley Lab Leads Effort to Build AI Assistant for Energy Materials Discovery (FORUM-AI)." *Berkeley Lab News Center*, 2026. https://newscenter.lbl.gov/2026/02/03/berkeley-lab-leads-effort-to-build-ai-assistant-for-energy-materials-discovery/
+
+[13] Google Research. "AI Co-Scientist: Accelerating scientific discovery." 2024.
+
+**Additional Resources**
+
+[14] J. M. Zhang et al. "Awesome AI for Science." https://github.com/ai-boost/awesome-ai-for-science
