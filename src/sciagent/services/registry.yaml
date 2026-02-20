@@ -65,6 +65,71 @@ services:
       integral, _ = integrate.quad(lambda x: np.sin(x), 0, np.pi)
       print(f"∫sin(x)dx from 0 to π = {integral}")
 
+  sci-core:
+    description: "Core scientific computing - covers most scientific tasks"
+    image: ghcr.io/sciagent-ai/sci-core
+    dockerfile: services/sci-core/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    packages:
+      # Fundamentals
+      - numpy
+      - scipy
+      - pandas
+      - matplotlib
+      - seaborn
+      # Math & Symbolic
+      - sympy
+      - mpmath
+      # Optimization
+      - cvxpy
+      - optuna
+      - scikit-optimize
+      # Networks & Graphs
+      - networkx
+      - igraph
+      # Data & ML
+      - scikit-learn
+      - statsmodels
+      # File formats
+      - h5py
+      - netcdf4
+      - xarray
+    extends: null
+    capabilities:
+      - "Numerical computing (numpy, scipy)"
+      - "Data analysis (pandas, statsmodels)"
+      - "Visualization (matplotlib, seaborn)"
+      - "Symbolic math (sympy, mpmath)"
+      - "Convex optimization (cvxpy)"
+      - "Hyperparameter optimization (optuna)"
+      - "Bayesian optimization (scikit-optimize)"
+      - "Graph/network analysis (networkx, igraph)"
+      - "Machine learning (scikit-learn)"
+      - "Scientific file formats (h5py, netcdf4, xarray)"
+    example: |
+      import numpy as np
+      from scipy import optimize, integrate
+      import pandas as pd
+      import matplotlib.pyplot as plt
+      from sympy import symbols, solve
+      import cvxpy as cp
+      import networkx as nx
+      from sklearn.linear_model import LinearRegression
+
+      # Numerical optimization
+      result = optimize.minimize(lambda x: (x[0]-1)**2 + (x[1]-2)**2, [0, 0])
+      print(f"Minimum at: {result.x}")
+
+      # Symbolic math
+      x = symbols('x')
+      print(f"Roots of x^2-4: {solve(x**2 - 4, x)}")
+
+      # Graph analysis
+      G = nx.karate_club_graph()
+      print(f"Graph has {G.number_of_nodes()} nodes")
+
   rdkit:
     description: "RDKit - Cheminformatics toolkit for molecular manipulation and analysis"
     image: ghcr.io/sciagent-ai/rdkit
@@ -480,12 +545,25 @@ services:
       write_def output.def
 
   biopython:
-    description: "Biopython - Computational biology and bioinformatics toolkit"
+    description: "Biopython - Computational biology and bioinformatics toolkit (extends sci-core)"
     image: ghcr.io/sciagent-ai/biopython
     dockerfile: services/biopython/Dockerfile
     license: BSD-3-Clause
     runtime: python3
     workdir: /workspace
+    packages:
+      - biopython
+      # Inherited from sci-core
+      - numpy
+      - scipy
+      - pandas
+      - matplotlib
+      - seaborn
+      - sympy
+      - networkx
+      - scikit-learn
+      - h5py
+    extends: sci-core
     capabilities:
       - "DNA/RNA/protein sequence manipulation and analysis"
       - "Sequence file parsing (FASTA, GenBank, FASTQ, etc.)"
