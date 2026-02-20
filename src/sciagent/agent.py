@@ -9,6 +9,7 @@ This implements the classic agent loop:
 import os
 import json
 import signal
+import subprocess
 import threading
 import traceback
 from typing import Dict, Any, List, Optional, Callable
@@ -494,6 +495,7 @@ class AgentLoop:
         "importerror", "modulenotfounderror", "no module named",
         # Container issues
         "image not found", "no such image", "pull access denied",
+        "unable to find image",  # Docker's exact error when image not pulled
         # Execution failures
         "exec failed", "container failed", "exited with code",
     ]
@@ -544,6 +546,40 @@ class AgentLoop:
         # Check error output for container-specific failures
         error_text = str(result.error or "").lower() + str(result.output or "").lower()
         return any(sig in error_text for sig in self.CONTAINER_FAILURE_SIGNALS + self.FAILURE_SIGNALS)
+
+    def _extract_missing_image(self, error_text: str) -> Optional[str]:
+        """Extract image name from 'Unable to find image' error."""
+        import re
+        # Docker error format: "Unable to find image 'ghcr.io/org/image:tag' locally"
+        match = re.search(r"unable to find image ['\"]([^'\"]+)['\"]", error_text.lower())
+        if match:
+            # Return original case from error text
+            original_match = re.search(r"[Uu]nable to find image ['\"]([^'\"]+)['\"]", error_text)
+            return original_match.group(1) if original_match else match.group(1)
+        return None
+
+    def _auto_pull_image(self, image: str) -> bool:
+        """Attempt to pull a docker image. Returns True if successful."""
+        self.display.info(f"Image not found locally, pulling {image}...")
+        try:
+            result = subprocess.run(
+                ["docker", "pull", image],
+                capture_output=True,
+                text=True,
+                timeout=300  # 5 min timeout for pull
+            )
+            if result.returncode == 0:
+                self.display.success(f"Successfully pulled {image}")
+                return True
+            else:
+                self.display.warning(f"Failed to pull {image}: {result.stderr[:200]}")
+                return False
+        except subprocess.TimeoutExpired:
+            self.display.warning(f"Timeout pulling {image}")
+            return False
+        except Exception as e:
+            self.display.warning(f"Error pulling {image}: {e}")
+            return False
 
     def _collect_evidence_summary(self) -> Dict[str, int]:
         """Action 3: Collect evidence summary for final output."""
@@ -972,11 +1008,38 @@ Provide a concise summary (max 500 words):"""
             if result.success:
                 self._evidence["execs_ok"] += 1
 
-            # Fail-fast: docker/container command failed → pause for user
+            # Fail-fast: docker/container command failed → handle intelligently
             cmd = tool_call.arguments.get("command", "")
             if self._is_container_failure(cmd, result):
+                error_text = str(result.error or "") + str(result.output or "")
+
+                # Check for "unable to find image" - auto-pull and retry
+                missing_image = self._extract_missing_image(error_text)
+                if missing_image:
+                    if self._auto_pull_image(missing_image):
+                        # Retry the original command
+                        self.display.info("Retrying command after pull...")
+                        retry_result = self.tools.execute(tool_call)
+                        if retry_result.success:
+                            self._evidence["execs_ok"] += 1
+                            return retry_result
+                        # If retry still fails, fall through to pause
+                        result = retry_result
+                        error_text = str(result.error or "") + str(result.output or "")
+
+                # Show clear error with actual Docker output, not just exit code
+                # Extract first meaningful error line from output
+                display_error = result.error or "Unknown error"
+                if result.output:
+                    # Look for actual error content in output
+                    for line in str(result.output).split('\n'):
+                        line = line.strip()
+                        if line and any(sig in line.lower() for sig in ['error', 'unable', 'cannot', 'failed', 'not found', 'denied']):
+                            display_error = line[:200]  # Truncate long lines
+                            break
+
                 return self._pause_for_user(
-                    f"Container execution failed: {result.error}",
+                    f"Container execution failed: {display_error}",
                     options=[
                         "Use build-service to add missing package",
                         "Install at runtime (pip install in container)",
