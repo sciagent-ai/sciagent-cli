@@ -31,7 +31,11 @@ NEVER mark a task complete without verification.
 
 ---
 
-## Universal Checklists
+## Scientific Verification
+
+**Apply this section when doing computational science, simulations, or data analysis.**
+
+### Universal Checklists
 
 ### Data Integrity
 

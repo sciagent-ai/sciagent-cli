@@ -7,7 +7,7 @@ triggers:
   - "plot|visualize|graph|figure"
   - "service|registry|container|docker|package|library|install"
   - "scientific|engineering|numerical|mathematical"
-  - "data|dataset|download|fetch"
+  - "dataset"  # For data analysis, not fetching - downloading uses direct bash
 
   # === GENERAL SCIENCE/ENGINEERING ===
   - "simulat|analys|optimi|minimi|maximi"

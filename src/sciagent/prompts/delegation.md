@@ -6,9 +6,10 @@ You have a `task` tool to spawn isolated sub-agents. Use it when you need fresh 
 
 | Need | Use |
 |------|-----|
-| Scientific computation | `skill(skill_name="sci-compute")` |
-| Build a container | `skill(skill_name="build-service")` |
-| Code review | `skill(skill_name="code-review")` |
+| Scientific computation | `skill(sci-compute)` + `skill(build-service)` together |
+| Code review | `skill(code-review)` |
+
+Load both sci-compute and build-service together for scientific work - this lets you use existing containers OR build new ones seamlessly.
 
 ### When to Delegate (Sub-Agents)
 

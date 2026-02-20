@@ -73,7 +73,7 @@ When creating a task that generates output, declare what it produces:
 
 ```
 {
-  "content": "Research metasurface designs",
+  "content": "Research authentication libraries",
   "produces": "file:_outputs/research_data.json",
   "result_key": "research_data"
 }

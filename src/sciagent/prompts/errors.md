@@ -52,24 +52,16 @@ Read findings → Fix based on root cause
 
 **Approach Changes:**
 - Switching from real to synthetic data
-- Need to simplify problem/physics to make tractable
 - Changing methodology from what user requested
 - Using different data source than specified
 
-**Results Issues:**
+**When doing computational science, also ask for:**
 - Results differ >20% from reference/expected values
 - Convergence not achieved after reasonable iterations
 - Results violate physical constraints (conservation laws, bounds)
-- Results seem "too good to be true" (e.g., 99% accuracy on hard problem)
-
-**Numerical Issues:**
-- NaN or Inf in results (division by zero, overflow, log of negative)
-- Ill-conditioned matrix (condition number too high to invert reliably)
-- Negative values where physically impossible (numerical instability)
-
-**Resource Issues:**
+- Results seem "too good to be true"
+- NaN or Inf in results (numerical instability)
 - Computation will exceed reasonable time (>10 min without progress)
-- Insufficient data for statistically robust analysis
 
 ### ask_user Template
 ```
