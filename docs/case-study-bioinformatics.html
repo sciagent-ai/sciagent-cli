@@ -1,0 +1,330 @@
+<!-- SciAgent Case Study - Bioinformatics - Embeddable HTML -->
+<style>
+.sciagent-case-study {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  color: #1a1a2e;
+  line-height: 1.6;
+}
+
+.sciagent-case-study h2 {
+  color: #0f3460;
+  border-bottom: 3px solid #e94560;
+  padding-bottom: 0.5rem;
+  margin-top: 2rem;
+}
+
+.sciagent-case-study h3 {
+  color: #16213e;
+  margin-top: 1.5rem;
+}
+
+.sciagent-case-study .paper-badge {
+  background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+  color: white;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.sciagent-case-study .prompt-box {
+  background: #1a1a2e;
+  color: #00ff88;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.9rem;
+  margin: 1rem 0;
+  border-left: 4px solid #00ff88;
+  white-space: pre-wrap;
+}
+
+.sciagent-case-study .workflow-diagram {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  font-family: monospace;
+  white-space: pre;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  border: 1px solid #dee2e6;
+}
+
+.sciagent-case-study table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+
+.sciagent-case-study th {
+  background: #0f3460;
+  color: white;
+  padding: 0.75rem;
+  text-align: left;
+}
+
+.sciagent-case-study td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.sciagent-case-study tr:nth-child(even) {
+  background: #f8f9fa;
+}
+
+.sciagent-case-study .results-image {
+  width: 100%;
+  max-width: 800px;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  margin: 1.5rem 0;
+}
+
+.sciagent-case-study .validation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .validation-card {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  border-left: 4px solid #28a745;
+}
+
+.sciagent-case-study .validation-card.pass {
+  border-left-color: #28a745;
+}
+
+.sciagent-case-study .status-pass {
+  color: #28a745;
+  font-weight: bold;
+}
+
+.sciagent-case-study .phase-list {
+  list-style: none;
+  padding: 0;
+}
+
+.sciagent-case-study .phase-list li {
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border-left: 4px solid #11998e;
+}
+
+.sciagent-case-study .phase-list li strong {
+  color: #0f3460;
+}
+
+.sciagent-case-study .metrics-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .metric-box {
+  background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+  color: white;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  text-align: center;
+  min-width: 120px;
+}
+
+.sciagent-case-study .metric-box .value {
+  font-size: 1.5rem;
+  font-weight: bold;
+}
+
+.sciagent-case-study .metric-box .label {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.sciagent-case-study .highlight-box {
+  background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+  border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.sciagent-case-study .highlight-box strong {
+  color: #e94560;
+}
+</style>
+
+<div class="sciagent-case-study">
+
+  <h2>Case Study: BRCA1 Mutation Fitness-Structure Analysis</h2>
+
+  <span class="paper-badge">Nature 562, 217-222 (2018)</span>
+
+  <p><strong>Study:</strong> "Accurate classification of BRCA1 variants with saturation genome editing" - Findlay et al.</p>
+
+  <h3>The Challenge</h3>
+  <p>Analyze how BRCA1 mutation fitness scores correlate with protein 3D structure using deep mutational scanning data and AlphaFold predictions. Map 1,837 experimentally-measured mutation effects to structural features and identify patterns relevant for clinical variant interpretation.</p>
+
+  <h3>Prompt Given to SciAgent</h3>
+  <div class="prompt-box">Analyze how BRCA1 mutation fitness scores correlate with protein structure
+using the pre-downloaded data in `_data/`.
+
+Data provided:
+- Deep mutational scanning fitness scores (1,837 mutations)
+- AlphaFold predicted structure (1,863 residues)
+
+Analysis steps:
+1. Parse fitness data and extract mutation positions
+2. Extract per-residue structural features (secondary structure, solvent accessibility)
+3. Map fitness scores to structural positions
+4. Compute statistics by structure type and functional domains
+5. Create visualizations and statistical analysis
+
+Verification targets:
+- 1,837 mutations parsed
+- >95% mapping success to structure positions
+- Statistical comparison of buried vs exposed residue fitness</div>
+
+  <h3>What SciAgent Did Autonomously</h3>
+
+  <ul class="phase-list">
+    <li><strong>Phase 1: Data Exploration</strong> - Parsed fitness CSV, validated 1,837 mutations across 326 positions, identified RING and BRCT domain coverage</li>
+    <li><strong>Phase 2: Structure Feature Extraction</strong> - Calculated secondary structure from φ/ψ angles, solvent accessibility from Cα neighbor counts using BioPython</li>
+    <li><strong>Phase 3: Implementation</strong> - Wrote 530 lines of Python across 4 analysis scripts with sequence verification</li>
+    <li><strong>Phase 4: Debug & Iterate</strong> - Resolved BioPython API issues through web search and code correction across 3 iterations</li>
+  </ul>
+
+  <div class="workflow-diagram">
+Parse Data → Extract Features → Map Fitness → Statistical Analysis
+    ↓              ↓                ↓               ↓
+ 1,837 mut     1,863 res       100% mapped      p < 10⁻¹⁸</div>
+
+  <h3>Results</h3>
+
+  <img src="https://sciagent-ai.github.io/sciagent-cli/images/case-studies/brca1_structure_fitness.png" alt="BRCA1 Structure-Fitness Analysis" class="results-image">
+
+  <h4>Buried vs Exposed Residues</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        <th>Buried</th>
+        <th>Exposed</th>
+        <th>Significance</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Mean Fitness</td><td>-0.778</td><td>-0.278</td><td>p < 10⁻¹⁸</td></tr>
+      <tr><td>Std Dev</td><td>±0.942</td><td>±0.711</td><td>—</td></tr>
+      <tr><td>Sample Size</td><td>n=915</td><td>n=354</td><td>—</td></tr>
+      <tr><td>Effect Size</td><td colspan="2">Cohen's d = -0.600</td><td>(medium-large)</td></tr>
+    </tbody>
+  </table>
+
+  <div class="highlight-box">
+    <strong>Key Finding:</strong> Buried residues are significantly more sensitive to mutation — consistent with their critical role in maintaining protein stability.
+  </div>
+
+  <h4>Functional Domain Analysis</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Domain</th>
+        <th>Mean Fitness</th>
+        <th>Biological Role</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>RING (1-109)</td><td>-0.705</td><td>E3 ubiquitin ligase (most critical)</td></tr>
+      <tr><td>BRCT (1642-1863)</td><td>-0.582</td><td>Phospho-protein binding</td></tr>
+      <tr><td>Other regions</td><td>-0.030</td><td>Linker regions (most tolerant)</td></tr>
+    </tbody>
+  </table>
+  <p><strong>ANOVA:</strong> F=17.091, p=4.42×10⁻⁸</p>
+
+  <h4>Secondary Structure Effect</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Structure</th>
+        <th>Mean Fitness</th>
+        <th>Percent of Protein</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>Beta Sheet</td><td>-0.743</td><td>13.7%</td></tr>
+      <tr><td>Alpha Helix</td><td>-0.646</td><td>9.2%</td></tr>
+      <tr><td>Coil/Loop</td><td>-0.512</td><td>77.0%</td></tr>
+    </tbody>
+  </table>
+  <p><strong>ANOVA:</strong> F=8.887, p=1.44×10⁻⁴</p>
+
+  <h3>Validation Summary</h3>
+
+  <div class="validation-grid">
+    <div class="validation-card pass">
+      <strong>Mutations Parsed</strong><br>
+      <span class="status-pass">PASS (1,837)</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Mapping Success</strong><br>
+      <span class="status-pass">PASS (100%)</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Sequence Match</strong><br>
+      <span class="status-pass">PASS (100%)</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Statistical Tests</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Visualization</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+  </div>
+
+  <h3>Execution Metrics</h3>
+
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="value">8 min</div>
+      <div class="label">Total Time</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">44</div>
+      <div class="label">Agent Turns</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">530</div>
+      <div class="label">Lines of Code</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">3</div>
+      <div class="label">Debug Iterations</div>
+    </div>
+  </div>
+
+  <h3>Generated Artifacts</h3>
+  <ul>
+    <li><code>explore_data.py</code> - Data parsing and exploration (115 LOC)</li>
+    <li><code>extract_structure_simple.py</code> - Structural feature extraction (195 LOC)</li>
+    <li><code>map_fitness_structure.py</code> - Fitness-structure mapping (180 LOC)</li>
+    <li><code>create_analysis_visualizations.py</code> - Analysis and plots (238 LOC)</li>
+    <li><code>structure_features.json</code> - Per-residue structural data (671 KB)</li>
+    <li><code>mapped_data.json</code> - Combined fitness-structure dataset (858 KB)</li>
+    <li><code>brca1_structure_fitness.png</code> - Multi-panel visualization (1.4 MB)</li>
+    <li><code>brca1_analysis_summary.json</code> - Methods and statistics</li>
+  </ul>
+
+</div>
