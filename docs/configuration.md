@@ -29,12 +29,12 @@ SciAgent uses five model tiers for cost-effective operation. Configure in `src/s
 | Tier | Variable | Purpose |
 |------|----------|---------|
 | Scientific | `SCIENTIFIC_MODEL` | Main agent, planning |
-| Vision | `VISION_MODEL` | Image and multimodal analysis (uses Opus) |
+| Vision | `VISION_MODEL` | Image and multimodal analysis |
 | Coding | `CODING_MODEL` | Debug, research, general sub-agents |
 | Verification | `VERIFICATION_MODEL` | Independent verifier subagent |
 | Fast | `FAST_MODEL` | Explore sub-agent (speed/cost) |
 
-The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The vision tier uses Opus for high-quality image analysis. The verification tier powers the independent verifier subagent that validates task outputs. Sub-agents use tier-appropriate models automatically.
+The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The verification tier powers the independent verifier subagent that validates task outputs. Sub-agents use tier-appropriate models automatically.
 
 ### Alternative Models by Provider
 

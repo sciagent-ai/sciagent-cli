@@ -151,11 +151,11 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 | `verifier` | Verification | Independent validation of task outputs |
 
 Model tiers are defined in `src/sciagent/defaults.py`:
-- **Scientific**: Main agent, planning (Sonnet by default)
-- **Vision**: Image and multimodal analysis (Opus)
-- **Coding**: Implementation, debugging, research (Sonnet)
-- **Verification**: Independent verifier subagent (Sonnet)
-- **Fast**: Quick/cheap for exploration and extraction (Haiku)
+- **Scientific**: Main agent, planning 
+- **Vision**: Image and multimodal analysis 
+- **Coding**: Implementation, debugging, research 
+- **Verification**: Independent verifier subagent
+- **Fast**: Quick/cheap for exploration and extraction 
 
 ## Architecture
 
