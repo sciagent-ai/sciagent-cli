@@ -1,37 +1,20 @@
 # sci-core: Core scientific computing foundation
-# Covers most scientific computing tasks
-FROM python:3.11-slim
+# Extends scipy-base with additional math, optimization, and ML packages
+FROM ghcr.io/sciagent-ai/scipy-base:latest
 
 LABEL org.opencontainers.image.source="https://github.com/sciagent-ai/scienv"
 LABEL org.opencontainers.image.description="Core scientific computing - NumPy, SciPy, Pandas, ML, optimization, networks"
 LABEL org.opencontainers.image.licenses="MIT"
 
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV PIP_NO_CACHE_DIR=1
-
-# Install system dependencies for scientific computing
+# Install additional system dependencies (igraph requires libxml2)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Required for numpy/scipy
-    libopenblas0 \
-    libgomp1 \
-    # Required for matplotlib
-    libfreetype6 \
-    libpng16-16 \
-    # Required for igraph
     libxml2 \
-    # Useful utilities
-    curl \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Install core scientific Python stack
+# Install additional scientific packages (scipy-base already has numpy, scipy, pandas, matplotlib, pint, h5py, tqdm, pyyaml, ipython)
 RUN pip install --no-cache-dir \
-    # Fundamentals
-    numpy>=1.26 \
-    scipy>=1.12 \
-    pandas>=2.2 \
-    matplotlib>=3.8 \
+    # Visualization
     seaborn>=0.13 \
     # Math & Symbolic
     sympy>=1.12 \
@@ -47,18 +30,9 @@ RUN pip install --no-cache-dir \
     scikit-learn>=1.4 \
     statsmodels>=0.14 \
     # File formats
-    h5py>=3.10 \
     netcdf4>=1.6 \
     xarray>=2024.1 \
-    # Utilities
-    ipython>=8.0 \
-    pint \
-    tqdm \
-    pyyaml \
     && rm -rf ~/.cache/pip
-
-# Create workspace
-WORKDIR /workspace
 
 # Verify installation
 RUN python -c "\

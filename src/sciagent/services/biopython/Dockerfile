@@ -1,12 +1,12 @@
 # biopython: Computational biology and bioinformatics toolkit
-# Extends sci-core with Bio module for sequence analysis, structure parsing, phylogenetics
+# Extends sci-core with Biopython for sequence analysis and bioinformatics
 FROM ghcr.io/sciagent-ai/sci-core:latest
 
 LABEL org.opencontainers.image.source="https://github.com/sciagent-ai/scienv"
-LABEL org.opencontainers.image.description="Biopython - Computational biology and bioinformatics toolkit (extends sci-core)"
+LABEL org.opencontainers.image.description="Biopython - Computational biology and bioinformatics toolkit"
 LABEL org.opencontainers.image.licenses="BSD-3-Clause"
 
-# Install Biopython (sci-core already has numpy, scipy, pandas, matplotlib, etc.)
+# Install Biopython (sci-core already has numpy, scipy, matplotlib, pandas, etc.)
 RUN pip install --no-cache-dir \
     biopython>=1.86 \
     && rm -rf ~/.cache/pip

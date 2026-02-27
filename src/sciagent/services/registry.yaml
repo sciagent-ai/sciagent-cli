@@ -1,3 +1,5 @@
+schema_version: "1.0"
+
 # Service Registry
 # Defines containerized simulation/compute services available to the agent
 #
@@ -96,7 +98,7 @@ services:
       - h5py
       - netcdf4
       - xarray
-    extends: null
+    extends: scipy-base
     capabilities:
       - "Numerical computing (numpy, scipy)"
       - "Data analysis (pandas, statsmodels)"
@@ -178,6 +180,12 @@ services:
     license: MIT
     runtime: python3
     workdir: /workspace
+    packages:
+      - sympy
+      - mpmath
+      - numpy
+      - matplotlib
+    extends: scipy-base
     capabilities:
       - "Symbolic algebra and simplification"
       - "Calculus (differentiation, integration, limits)"
@@ -222,7 +230,7 @@ services:
       - osqp
       - ecos
       - scs
-    extends: null
+    extends: scipy-base
     capabilities:
       - "Convex optimization problem modeling"
       - "Linear and quadratic programming"
@@ -337,6 +345,11 @@ services:
     license: BSD-3-Clause
     runtime: python3
     workdir: /workspace
+    packages:
+      - PySpice
+      - numpy
+      - matplotlib
+    extends: null
     capabilities:
       - "Analog and digital circuit simulation"
       - "Transient, AC, and DC analysis"
@@ -366,6 +379,12 @@ services:
     license: LGPL-2.1
     runtime: python3
     workdir: /workspace
+    packages:
+      - ase
+      - numpy
+      - scipy
+      - matplotlib
+    extends: null
     capabilities:
       - "Atomic structure creation and manipulation"
       - "Molecular dynamics simulations"
@@ -405,6 +424,10 @@ services:
     license: GPL-2.0
     runtime: python3
     workdir: /workspace
+    packages:
+      - gmsh
+      - numpy
+    extends: null
     capabilities:
       - "2D and 3D mesh generation"
       - "CAD geometry creation and manipulation"
@@ -483,6 +506,8 @@ services:
     license: GPL-2.0
     runtime: bash
     workdir: /workspace
+    packages: []
+    extends: null
     capabilities:
       - "Heat transfer and thermal analysis"
       - "Structural mechanics and elasticity"
@@ -509,10 +534,12 @@ services:
   openroad:
     description: "OpenROAD - RTL-to-GDS flow with ASAP7, SKY130, GF180, IHP-SG13G2 PDKs"
     image: ghcr.io/sciagent-ai/openroad
-    dockerfile: openroad/Dockerfile
+    dockerfile: services/openroad/Dockerfile
     license: BSD-3-Clause
     runtime: bash
     workdir: /workspace
+    packages: []
+    extends: null
     capabilities:
       - "RTL synthesis (Yosys)"
       - "Floorplanning and macro placement"
@@ -597,6 +624,11 @@ services:
     license: Apache-2.0
     runtime: python3
     workdir: /workspace
+    packages:
+      - qiskit
+      - qiskit-aer
+      - numpy
+    extends: sci-core
     capabilities:
       - "Quantum circuit construction and manipulation"
       - "Quantum gate operations (Hadamard, CNOT, Pauli, etc.)"
@@ -626,45 +658,7 @@ services:
       print(f"Measurement results: {counts}")
       # Expected: {'00': ~500, '11': ~500} (Bell state)
 
-  networkx:
-    description: "NetworkX - Python package for complex network analysis"
-    image: ghcr.io/sciagent-ai/networkx
-    dockerfile: services/networkx/Dockerfile
-    license: BSD-3-Clause
-    runtime: python3
-    workdir: /workspace
-    capabilities:
-      - "Graph creation (directed, undirected, multigraph)"
-      - "Graph algorithms (shortest path, centrality, clustering)"
-      - "Network analysis (connectivity, components, flow)"
-      - "Graph generators (random, small-world, scale-free)"
-      - "Graph I/O (GML, GraphML, adjacency list, edge list)"
-      - "Visualization with matplotlib integration"
-      - "Social network analysis"
-    example: |
-      import networkx as nx
-      import matplotlib.pyplot as plt
-
-      # Create a graph
-      G = nx.karate_club_graph()
-      print(f"Nodes: {G.number_of_nodes()}, Edges: {G.number_of_edges()}")
-
-      # Compute centrality measures
-      degree_cent = nx.degree_centrality(G)
-      betweenness = nx.betweenness_centrality(G)
-      print(f"Most central node (degree): {max(degree_cent, key=degree_cent.get)}")
-
-      # Find shortest path
-      path = nx.shortest_path(G, source=0, target=33)
-      print(f"Shortest path 0->33: {path}")
-
-      # Detect communities
-      communities = nx.community.greedy_modularity_communities(G)
-      print(f"Number of communities: {len(communities)}")
-
-      # Graph properties
-      print(f"Clustering coefficient: {nx.average_clustering(G):.3f}")
-      print(f"Density: {nx.density(G):.3f}")
+  # NOTE: networkx removed - use sci-core instead (networkx is included there)
 
   blast:
     description: "NCBI BLAST+ - Basic Local Alignment Search Tool for sequence similarity searching"
@@ -673,6 +667,9 @@ services:
     license: Unlicense
     runtime: bash
     workdir: /workspace
+    packages:
+      - biopython
+    extends: null
     capabilities:
       - "Nucleotide-nucleotide BLAST (blastn)"
       - "Protein-protein BLAST (blastp)"
@@ -702,10 +699,15 @@ services:
   pyoptools:
     description: "pyOpTools - Optical design and ray tracing simulation library"
     image: ghcr.io/sciagent-ai/pyoptools
-    dockerfile: pyoptools/Dockerfile
+    dockerfile: services/pyoptools/Dockerfile
     license: GPL-3.0
     runtime: python3
     workdir: /workspace
+    packages:
+      - pyoptools
+      - numpy
+      - matplotlib
+    extends: null
     capabilities:
       - "3D non-sequential ray tracing"
       - "Optical system design and simulation"
@@ -739,7 +741,7 @@ services:
   optuna:
     description: "Optuna - Hyperparameter optimization framework for machine learning"
     image: ghcr.io/sciagent-ai/optuna
-    dockerfile: optuna/Dockerfile
+    dockerfile: services/optuna/Dockerfile
     license: MIT
     runtime: python3
     workdir: /workspace
@@ -749,7 +751,7 @@ services:
       - scipy
       - scikit-learn
       - plotly
-    extends: null
+    extends: scipy-base
     capabilities:
       - "Automatic hyperparameter optimization"
       - "Define-by-run API for search spaces"
@@ -833,11 +835,13 @@ services:
   iic-osic-tools:
     description: "IIC-OSIC-TOOLS - All-in-one open-source IC design environment with 80+ EDA tools"
     image: ghcr.io/sciagent-ai/iic-osic-tools
-    dockerfile: iic-osic-tools/Dockerfile
+    dockerfile: services/iic-osic-tools/Dockerfile
     license: Apache-2.0
     runtime: bash
     invoke: "--skip bash -c {cmd}"
     workdir: /workspace
+    packages: []
+    extends: null
     capabilities:
       - "SPICE simulation (ngspice)"
       - "Layout editing and DRC (Magic, KLayout)"
@@ -929,6 +933,8 @@ services:
     license: MIT
     runtime: julia
     workdir: /workspace
+    packages: []
+    extends: null
     capabilities:
       - "ODE, SDE, DDE, DAE solving (DifferentialEquations.jl)"
       - "Symbolic modeling and simulation (ModelingToolkit.jl)"
