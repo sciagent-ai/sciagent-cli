@@ -338,6 +338,38 @@ services:
       icoFoam
       paraFoam
 
+  openfoam-swak4foam:
+    description: "OpenFOAM with swak4Foam - Expression-based field manipulation for CFD"
+    image: ghcr.io/sciagent-ai/openfoam-swak4foam
+    dockerfile: services/openfoam-swak4foam/Dockerfile
+    license: GPL-3.0
+    runtime: bash
+    workdir: /workspace
+    packages: []
+    extends: openfoam
+    capabilities:
+      - "All OpenFOAM CFD capabilities"
+      - "Expression-based field creation (funkySetFields)"
+      - "Expression-based boundary conditions (funkySetBoundaryField)"
+      - "Field calculations and statistics (funkyDoCalc)"
+      - "Field reporting and analysis (fieldReport)"
+      - "Mesh warping with expressions (funkyWarpMesh)"
+      - "Lagrangian field manipulation (funkySetLagrangianField)"
+      - "Boundary condition testing (replayTransientBC)"
+    example: |
+      # Create a parabolic velocity inlet profile
+      funkySetFields -field U -expression "vector(0, 4*Umax*y*(H-y)/(H*H), 0)" \
+        -condition "patch(inlet)" -create
+
+      # Set initial temperature field based on position
+      funkySetFields -field T -expression "300 + 100*pos().x/L" -create
+
+      # Calculate average pressure on a patch
+      funkyDoCalc -expression "average(patch(outlet), p)"
+
+      # Generate field statistics report
+      fieldReport -field U
+
   ngspice:
     description: "NGSpice - Open-source SPICE circuit simulator with PySpice bindings"
     image: ghcr.io/sciagent-ai/ngspice
@@ -967,3 +999,45 @@ services:
       # Plot the solution
       plot(sol, idxs=(1, 2, 3), title="Lorenz Attractor")
 
+  paraview:
+    description: "ParaView - Scientific visualization and data analysis with headless rendering"
+    image: ghcr.io/sciagent-ai/paraview
+    dockerfile: services/paraview/Dockerfile
+    license: BSD-3-Clause
+    runtime: bash
+    workdir: /workspace
+    packages: []
+    extends: null
+    capabilities:
+      - "3D scientific data visualization"
+      - "VTK/VTU mesh and field visualization"
+      - "OpenFOAM native format support"
+      - "Time series and animation"
+      - "Python scripting (pvpython, pvbatch)"
+      - "Batch rendering for HPC workflows"
+      - "ParaView server (pvserver) for remote visualization"
+      - "Filters: slice, contour, streamlines, glyphs"
+    example: |
+      # Python scripting with pvpython
+      pvpython render_script.py
+
+      # Batch processing
+      pvbatch process_all.py
+
+      # Start ParaView server for remote connection
+      pvserver --server-port=11111
+
+      # Example Python script (render_script.py):
+      from paraview.simple import *
+
+      # Load VTK file
+      reader = OpenDataFile("simulation.vtk")
+
+      # Create a slice
+      slice1 = Slice(Input=reader)
+      slice1.SliceType.Normal = [0, 0, 1]
+
+      # Render and save
+      Show(slice1)
+      view = GetActiveViewOrCreate('RenderView')
+      SaveScreenshot("output.png", view)
