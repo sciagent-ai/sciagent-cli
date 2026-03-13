@@ -1,7 +1,7 @@
 """
 Atomic tools - minimal set of composable primitives.
 
-These 7 tools handle 90% of scientific/engineering tasks:
+Core tools handle 90% of scientific/engineering tasks:
 - shell: Execute bash commands (including Docker for simulation services)
 - file_ops: Read/write/edit files (filesystem is memory)
 - search: Find files (glob) and content (grep)
@@ -10,7 +10,14 @@ These 7 tools handle 90% of scientific/engineering tasks:
 - ask_user: Request user input for decisions/clarifications
 - skill: Load specialized workflow skills
 
+Background job management:
+- bg_status: Check status of background jobs
+- bg_output: Get output from a background job
+- bg_wait: Wait for a background job to complete
+- bg_kill: Terminate a background job
+
 For simulation services (RCWA, MEEP, etc.), use shell to run Docker directly.
+Use shell(background=True) for long-running simulations.
 See services/registry.yaml for available images.
 """
 
@@ -21,6 +28,7 @@ from .web import WebTool, FetchLogger, get_fetch_logger
 from .todo import TodoTool, ContentValidator
 from .ask_user import AskUserTool
 from .skill import SkillTool
+from .bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
 
 __all__ = [
     "ShellTool",
@@ -35,4 +43,8 @@ __all__ = [
     "ContentValidator",
     "AskUserTool",
     "SkillTool",
+    "BgStatusTool",
+    "BgOutputTool",
+    "BgWaitTool",
+    "BgKillTool",
 ]

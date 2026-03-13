@@ -3,7 +3,7 @@ Tool collection package.
 
 Architecture v2: Filesystem-as-Memory Model
 
-This package provides 7 atomic tools that handle 90% of tasks:
+This package provides atomic tools that handle 90% of tasks:
 - bash (shell.py): Execute shell commands (including Docker for services)
 - file_ops (file_ops.py): Read/write/edit files - THIS IS MEMORY
 - search (search.py): Find files (glob) and content (grep)
@@ -12,7 +12,14 @@ This package provides 7 atomic tools that handle 90% of tasks:
 - ask_user (ask_user.py): Request user input for decisions/clarifications
 - skill (skill.py): Load specialized workflow skills
 
+Background job management:
+- bg_status: Check status of background jobs
+- bg_output: Get output from a background job
+- bg_wait: Wait for a background job to complete
+- bg_kill: Terminate a background job
+
 For simulation services (RCWA, MEEP, etc.), use bash to run Docker directly.
+Use bash(background=True) for long-running simulations.
 See services/registry.yaml for available images.
 """
 
@@ -24,6 +31,10 @@ from .atomic import (
     TodoTool,
     AskUserTool,
     SkillTool,
+    BgStatusTool,
+    BgOutputTool,
+    BgWaitTool,
+    BgKillTool,
 )
 
 from .registry import (
@@ -45,6 +56,11 @@ __all__ = [
     "TodoTool",
     "AskUserTool",
     "SkillTool",
+    # Background job tools
+    "BgStatusTool",
+    "BgOutputTool",
+    "BgWaitTool",
+    "BgKillTool",
     # Registry
     "ToolRegistry",
     "ToolResult",

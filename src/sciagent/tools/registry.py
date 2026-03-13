@@ -193,7 +193,7 @@ class ToolRegistry:
 
 def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegistry:
     """
-    Create registry with the 7 atomic tools.
+    Create registry with the atomic tools.
 
     This is the minimal tool set for scientific/engineering tasks:
     - bash: Shell execution (including Docker commands for simulation services)
@@ -204,14 +204,17 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     - ask_user: Request user input for decisions/clarifications
     - skill: Load specialized workflow skills (if skills exist)
 
-    Background tasks:
-    - Use bash(command="...", run_in_background=True) for long-running commands
-    - Use file_ops or bash("tail -f <output_file>") to check progress
+    Background task management:
+    - Use bash(command="...", background=True) for long-running commands
+    - bg_status: Check status of background jobs
+    - bg_output: Get output from a background job
+    - bg_wait: Wait for a background job to complete
+    - bg_kill: Terminate a background job
 
     For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
     Docker directly via bash. See services/registry.yaml for available images.
 
-    Total: 6-7 tools (skill tool only added if skills exist)
+    Total: 10-11 tools (skill tool only added if skills exist)
     """
     from .atomic.shell import ShellTool
     from .atomic.file_ops import FileOpsTool
@@ -219,15 +222,23 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.web import WebTool
     from .atomic.todo import TodoTool
     from .atomic.ask_user import AskUserTool
+    from .atomic.bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
 
     registry = ToolRegistry()
 
+    # Core tools
     registry.register(ShellTool(working_dir))
     registry.register(FileOpsTool(working_dir))
     registry.register(SearchTool(working_dir))
     registry.register(WebTool())
     registry.register(TodoTool())
     registry.register(AskUserTool())
+
+    # Background job management tools
+    registry.register(BgStatusTool(working_dir))
+    registry.register(BgOutputTool(working_dir))
+    registry.register(BgWaitTool(working_dir))
+    registry.register(BgKillTool(working_dir))
 
     # Add skill tool if skills exist
     try:

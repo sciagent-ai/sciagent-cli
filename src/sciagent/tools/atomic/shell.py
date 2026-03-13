@@ -12,6 +12,11 @@ Token Optimization:
 Visual Output:
 - Detects generated image files (png, jpg, svg, pdf)
 - Automatically opens them for viewing on macOS
+
+Background Execution:
+- Use background=True for long-running commands
+- Returns job_id immediately
+- Use bg_status, bg_output, bg_wait, bg_kill tools to manage
 """
 
 from __future__ import annotations
@@ -24,8 +29,11 @@ import platform
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Set, List
+from typing import Dict, Any, Optional, Set, List, TYPE_CHECKING
 from dataclasses import dataclass
+
+if TYPE_CHECKING:
+    from sciagent.process_manager import ProcessManager
 
 
 @dataclass
@@ -127,9 +135,25 @@ class ExecLogger:
         timeout: bool = False,
         working_dir: str = None,
         error: str = None,
+        job_id: str = None,
+        is_background: bool = False,
+        event_type: str = "completed",
     ) -> Dict[str, Any]:
         """
         Log a command execution with analysis.
+
+        Args:
+            command: The command that was executed
+            exit_code: Exit code (-1 for running/error)
+            stdout: Standard output
+            stderr: Standard error
+            duration_seconds: Execution duration
+            timeout: Whether command timed out
+            working_dir: Working directory
+            error: Error message if any
+            job_id: Background job ID (for async commands)
+            is_background: Whether this is a background job
+            event_type: "started", "completed", or "failed" (for background jobs)
 
         Returns the log entry (useful for immediate validation).
         """
@@ -167,6 +191,12 @@ class ExecLogger:
             "is_verification": is_verification,
             "error": error,
         }
+
+        # Add background job fields if applicable
+        if is_background:
+            entry["is_background"] = True
+            entry["job_id"] = job_id
+            entry["event_type"] = event_type
 
         # Append to log file
         try:
@@ -254,8 +284,13 @@ class ShellTool:
             },
             "timeout": {
                 "type": "integer",
-                "description": "Timeout in seconds (default: 120)",
+                "description": "Timeout in seconds (default: 120). Ignored for background jobs.",
                 "default": 120
+            },
+            "background": {
+                "type": "boolean",
+                "description": "Run command in background. Returns job_id immediately. Use bg_status/bg_output/bg_wait to monitor.",
+                "default": False
             }
         },
         "required": ["command"]
@@ -425,7 +460,7 @@ class ShellTool:
 
         return base_timeout
 
-    def execute(self, command: str = None, timeout: int = 120) -> ToolResult:
+    def execute(self, command: str = None, timeout: int = 120, background: bool = False) -> ToolResult:
         """Execute a bash command with smart output truncation.
 
         Token Optimization:
@@ -436,6 +471,11 @@ class ShellTool:
         Visual Output:
         - Detects newly generated image files (png, jpg, svg, pdf, etc.)
         - Automatically opens them for viewing
+
+        Background Execution:
+        - Set background=True for long-running commands (simulations, builds, etc.)
+        - Returns immediately with job_id
+        - Use bg_status, bg_output, bg_wait, bg_kill to manage the job
 
         Execution Logging:
         - All executions logged to _logs/exec_log.jsonl for audit trail
@@ -448,8 +488,14 @@ class ShellTool:
                 error="No command provided. The 'command' argument is required."
             )
 
-        timeout = self._adjust_timeout(command, timeout)
         logger = get_exec_logger(str(self._logs_dir))
+
+        # Handle background execution
+        if background:
+            return self._execute_background(command, logger)
+
+        # Foreground execution (original behavior)
+        timeout = self._adjust_timeout(command, timeout)
         start_time = time.time()
 
         # Capture existing images before running command
@@ -547,6 +593,67 @@ class ShellTool:
                 error=str(e),
             )
             return ToolResult(success=False, output=None, error=str(e))
+
+    def _execute_background(self, command: str, logger: ExecLogger) -> ToolResult:
+        """Execute a command in the background using ProcessManager.
+
+        Returns immediately with job_id for tracking.
+        """
+        from sciagent.process_manager import ProcessManager
+
+        try:
+            pm = ProcessManager.get_instance(str(self._logs_dir / "background_jobs"))
+            job_id = pm.launch(command, working_dir=self.working_dir)
+
+            # Log the start of background execution
+            logger.log_execution(
+                command=command,
+                exit_code=-1,  # Still running
+                stdout="",
+                stderr="",
+                duration_seconds=0,
+                timeout=False,
+                working_dir=self.working_dir,
+                error=None,
+                job_id=job_id,
+                is_background=True,
+                event_type="started",
+            )
+
+            # Get job info for response
+            job_status = pm.get_status(job_id)
+
+            output = (
+                f"Background job started successfully.\n"
+                f"\n"
+                f"Job ID: {job_id}\n"
+                f"Command: {command[:100]}{'...' if len(command) > 100 else ''}\n"
+                f"Status: running\n"
+                f"PID: {job_status.get('pid', 'unknown')}\n"
+                f"\n"
+                f"To monitor this job:\n"
+                f"  - bg_status(job_id=\"{job_id}\")  - Check status\n"
+                f"  - bg_output(job_id=\"{job_id}\")  - View output\n"
+                f"  - bg_wait(job_id=\"{job_id}\")    - Wait for completion\n"
+                f"  - bg_kill(job_id=\"{job_id}\")    - Terminate job\n"
+                f"\n"
+                f"Output files:\n"
+                f"  stdout: {job_status.get('stdout_file', 'unknown')}\n"
+                f"  stderr: {job_status.get('stderr_file', 'unknown')}"
+            )
+
+            return ToolResult(
+                success=True,
+                output=output,
+                error=None
+            )
+
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"Failed to start background job: {e}"
+            )
 
     def to_schema(self) -> Dict:
         """Convert to OpenAI-style tool schema."""
