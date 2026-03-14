@@ -211,10 +211,13 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     - bg_wait: Wait for a background job to complete
     - bg_kill: Terminate a background job
 
-    For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
-    Docker directly via bash. See services/registry.yaml for available images.
+    Compute:
+    - compute_run: Run containerized compute jobs (background by default)
 
-    Total: 10-11 tools (skill tool only added if skills exist)
+    For simulation services (RCWA, MEEP, OpenFOAM, etc.), the agent uses
+    compute_run with service= parameter. See services/registry.yaml for available images.
+
+    Total: 11-12 tools (skill tool only added if skills exist)
     """
     from .atomic.shell import ShellTool
     from .atomic.file_ops import FileOpsTool
@@ -223,6 +226,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.todo import TodoTool
     from .atomic.ask_user import AskUserTool
     from .atomic.bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
+    from .atomic.compute import ComputeTool
 
     registry = ToolRegistry()
 
@@ -239,6 +243,9 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     registry.register(BgOutputTool(working_dir))
     registry.register(BgWaitTool(working_dir))
     registry.register(BgKillTool(working_dir))
+
+    # Compute tool for containerized jobs
+    registry.register(ComputeTool(working_dir))
 
     # Add skill tool if skills exist
     try:
