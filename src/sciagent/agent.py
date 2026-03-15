@@ -486,6 +486,9 @@ class AgentLoop:
     # External tools that access resources outside the agent's control
     EXTERNAL_TOOLS = {"web", "fetch", "http_request", "service", "web_search", "read_url"}
 
+    # Compute tools that run jobs (local Docker or cloud via SkyPilot)
+    COMPUTE_TOOLS = {"compute_run"}
+
     # Failure signals for external resources
     FAILURE_SIGNALS = ["403", "404", "500", "timeout", "refused", "unavailable", "connection error"]
 
@@ -498,6 +501,21 @@ class AgentLoop:
         "unable to find image",  # Docker's exact error when image not pulled
         # Execution failures
         "exec failed", "container failed", "exited with code",
+    ]
+
+    # SkyPilot/cloud compute failure signals
+    COMPUTE_FAILURE_SIGNALS = [
+        # Architecture mismatch (common when local image doesn't match cloud)
+        "no matching manifest", "manifest unknown", "platform mismatch",
+        "linux/amd64", "linux/arm64",  # Architecture specs in errors
+        # SkyPilot specific
+        "cluster launch failed", "sky.exceptions", "resource not available",
+        "no cloud satisfies", "no launchable resource",
+        # Cloud/credential issues
+        "credentials", "authentication", "access denied", "permission denied",
+        "quota exceeded", "capacity",
+        # Generic cloud failures
+        "cloud error", "provider error", "instance failed",
     ]
 
     def _check_gates(self, tool_call: ToolCall) -> Optional[str]:

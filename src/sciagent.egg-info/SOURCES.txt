@@ -8,6 +8,7 @@ src/sciagent/display.py
 src/sciagent/llm.py
 src/sciagent/main.py
 src/sciagent/orchestrator.py
+src/sciagent/process_manager.py
 src/sciagent/provenance.py
 src/sciagent/startup.py
 src/sciagent/state.py
@@ -18,6 +19,12 @@ src/sciagent.egg-info/dependency_links.txt
 src/sciagent.egg-info/entry_points.txt
 src/sciagent.egg-info/requires.txt
 src/sciagent.egg-info/top_level.txt
+src/sciagent/compute/__init__.py
+src/sciagent/compute/job.py
+src/sciagent/compute/router.py
+src/sciagent/compute/backends/__init__.py
+src/sciagent/compute/backends/local.py
+src/sciagent/compute/backends/skypilot.py
 src/sciagent/prompts/__init__.py
 src/sciagent/prompts/core.md
 src/sciagent/prompts/delegation.md
@@ -33,6 +40,8 @@ src/sciagent/tools/__init__.py
 src/sciagent/tools/registry.py
 src/sciagent/tools/atomic/__init__.py
 src/sciagent/tools/atomic/ask_user.py
+src/sciagent/tools/atomic/bg_tools.py
+src/sciagent/tools/atomic/compute.py
 src/sciagent/tools/atomic/file_ops.py
 src/sciagent/tools/atomic/search.py
 src/sciagent/tools/atomic/shell.py

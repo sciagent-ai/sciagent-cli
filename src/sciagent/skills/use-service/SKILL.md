@@ -29,7 +29,22 @@ This skill enables the execution of scientific and engineering computations by l
 
 ## Workflow
 
-### Phase 0: Service Selection (BEFORE writing any code)
+## Compute Options
+
+Use `compute_run` to execute containerized workloads:
+
+- `compute_run(service="...")` → Uses registry image (ghcr.io/sciagent-ai/{service})
+- `compute_run(image="...")` → Uses any Docker image directly (Docker Hub, GHCR, etc.)
+
+**Follow user intent:**
+- If user specifies an image or says "official image" → use `image=` parameter directly
+- If user names a tool/package → check registry; if not found, offer to build via `build-service` skill
+- If user is exploratory → show registry options
+
+Registry services are pre-tested and optimized. Direct images give flexibility for official releases, custom containers, or testing.
+
+<!--
+### Phase 0: Service Selection (BEFORE writing any code) [COMMENTED - too prescriptive]
 
 **CRITICAL**: Each Docker service is an **isolated container** with its own packages. Do NOT assume a package exists—verify it.
 
@@ -80,7 +95,7 @@ This skill enables the execution of scientific and engineering computations by l
    docker run --rm <image> python3 -c "import <package>; print('OK')"
    ```
 
-### Phase 1: Discovery
+### Phase 1: Discovery [COMMENTED - too prescriptive]
 
 1. **Locate the Service Registry**: Read the registry at `{registry_path}` to see all available services.
 
@@ -92,6 +107,7 @@ This skill enables the execution of scientific and engineering computations by l
    - `example`: Sample code
 
 3. **Select a Service**: Based on Phase 0 analysis, select the service with all required packages.
+-->
 
 ### Phase 2: Research (IMPORTANT - Do this before writing code)
 

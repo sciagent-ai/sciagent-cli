@@ -58,6 +58,17 @@ class SearchTool:
                 "description": "Lines of context around grep matches",
                 "default": 0
             },
+            "output_mode": {
+                "type": "string",
+                "enum": ["files_with_matches", "content", "count"],
+                "description": "Output mode: files_with_matches (default, just paths), content (matching lines), count (match counts per file)",
+                "default": "files_with_matches"
+            },
+            "max_matches": {
+                "type": "integer",
+                "description": "Maximum matches to return",
+                "default": 50
+            },
             "recursive": {
                 "type": "boolean",
                 "description": "Search recursively",
@@ -90,7 +101,9 @@ class SearchTool:
                 kwargs.get("path", "."),
                 kwargs.get("file_pattern", "*"),
                 kwargs.get("case_sensitive", True),
-                kwargs.get("context_lines", 0)
+                kwargs.get("context_lines", 0),
+                kwargs.get("output_mode", "files_with_matches"),
+                kwargs.get("max_matches", 50)
             )
         else:
             return ToolResult(success=False, output=None, error=f"Unknown command: {command}")
@@ -141,7 +154,9 @@ class SearchTool:
         search_path: str = ".",
         file_pattern: str = "*",
         case_sensitive: bool = True,
-        context_lines: int = 0
+        context_lines: int = 0,
+        output_mode: str = "files_with_matches",
+        max_matches: int = 50
     ) -> ToolResult:
         """Search for pattern in file contents."""
         try:
@@ -149,6 +164,7 @@ class SearchTool:
             regex = re.compile(pattern, flags)
 
             matches: List[Dict[str, Any]] = []
+            files_with_matches: Dict[str, int] = {}  # file -> match count
             files_searched = 0
 
             # Determine files to search
@@ -161,7 +177,13 @@ class SearchTool:
                 )
                 files_to_search = [f for f in files_to_search if os.path.isfile(f)]
 
+            # Skip binary/cache files
+            skip_extensions = {'.pyc', '.pyo', '.so', '.o', '.a', '.dll', '.exe', '.bin', '.pkl', '.npy', '.npz'}
+
             for file_path in files_to_search:
+                # Skip binary files
+                if Path(file_path).suffix.lower() in skip_extensions:
+                    continue
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         lines = f.readlines()
@@ -169,42 +191,73 @@ class SearchTool:
 
                     for i, line in enumerate(lines):
                         if regex.search(line):
-                            match_info = {
-                                "file": file_path,
-                                "line_number": i + 1,
-                                "line": line.strip(),
-                                "language": self._detect_language(file_path)
-                            }
+                            # Track file matches
+                            files_with_matches[file_path] = files_with_matches.get(file_path, 0) + 1
 
-                            if context_lines > 0:
-                                context = []
-                                start = max(0, i - context_lines)
-                                end = min(len(lines), i + context_lines + 1)
-                                for j in range(start, end):
-                                    if j != i:
-                                        context.append(f"{j+1}: {lines[j].strip()}")
-                                match_info["context"] = context
+                            # Only collect full match info if needed
+                            if output_mode == "content" and len(matches) < max_matches:
+                                match_info = {
+                                    "file": file_path,
+                                    "line_number": i + 1,
+                                    "line": line.strip()[:200],  # Truncate long lines
+                                }
 
-                            matches.append(match_info)
+                                if context_lines > 0:
+                                    context = []
+                                    start = max(0, i - context_lines)
+                                    end = min(len(lines), i + context_lines + 1)
+                                    for j in range(start, end):
+                                        if j != i:
+                                            context.append(f"{j+1}: {lines[j].strip()[:200]}")
+                                    match_info["context"] = context
+
+                                matches.append(match_info)
                 except Exception:
                     continue
 
-            # Format output
-            output_lines = [
-                f"Pattern: '{pattern}' ({'case sensitive' if case_sensitive else 'case insensitive'})",
-                f"Files searched: {files_searched}, Matches: {len(matches)}",
-                ""
-            ]
+            total_matches = sum(files_with_matches.values())
 
-            for match in matches[:20]:
-                output_lines.append(f"{match['file']}:{match['line_number']}: {match['line']}")
-                if match.get("context"):
-                    for ctx in match["context"]:
-                        output_lines.append(f"    {ctx}")
-                    output_lines.append("")
+            # Format output based on mode
+            if output_mode == "files_with_matches":
+                # Just file paths (most token-efficient)
+                output_lines = [
+                    f"Pattern: '{pattern}'",
+                    f"Files: {len(files_with_matches)}, Total matches: {total_matches}",
+                    ""
+                ]
+                for fp in list(files_with_matches.keys())[:max_matches]:
+                    output_lines.append(fp)
+                if len(files_with_matches) > max_matches:
+                    output_lines.append(f"... and {len(files_with_matches) - max_matches} more files")
 
-            if len(matches) > 20:
-                output_lines.append(f"... and {len(matches) - 20} more matches")
+            elif output_mode == "count":
+                # File paths with counts
+                output_lines = [
+                    f"Pattern: '{pattern}'",
+                    f"Files: {len(files_with_matches)}, Total matches: {total_matches}",
+                    ""
+                ]
+                sorted_files = sorted(files_with_matches.items(), key=lambda x: -x[1])
+                for fp, count in sorted_files[:max_matches]:
+                    output_lines.append(f"{fp}: {count}")
+                if len(files_with_matches) > max_matches:
+                    output_lines.append(f"... and {len(files_with_matches) - max_matches} more files")
+
+            else:  # content mode
+                output_lines = [
+                    f"Pattern: '{pattern}' ({'case sensitive' if case_sensitive else 'case insensitive'})",
+                    f"Files searched: {files_searched}, Matches: {total_matches}",
+                    ""
+                ]
+                for match in matches[:max_matches]:
+                    output_lines.append(f"{match['file']}:{match['line_number']}: {match['line']}")
+                    if match.get("context"):
+                        for ctx in match["context"]:
+                            output_lines.append(f"    {ctx}")
+                        output_lines.append("")
+
+                if total_matches > max_matches:
+                    output_lines.append(f"... and {total_matches - max_matches} more matches")
 
             return ToolResult(
                 success=True,

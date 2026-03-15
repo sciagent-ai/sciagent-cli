@@ -45,6 +45,19 @@ dev = [
     "black>=23.0.0",
     "ruff>=0.1.0",
 ]
+# Cloud compute backends
+cloud = [
+    "skypilot[aws]>=0.6.0",
+]
+cloud-gcp = [
+    "skypilot[gcp]>=0.6.0",
+]
+cloud-azure = [
+    "skypilot[azure]>=0.6.0",
+]
+cloud-all = [
+    "skypilot[aws,gcp,azure]>=0.6.0",
+]
 
 [project.scripts]
 sciagent = "sciagent.main:main"

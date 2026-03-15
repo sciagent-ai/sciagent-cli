@@ -43,6 +43,10 @@ try:
     from litellm.caching import Cache
     LITELLM_AVAILABLE = True
 
+    # Suppress LiteLLM's verbose INFO logging (e.g., "LiteLLM completion() model=...")
+    import logging
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+
     # Apply pydantic warning suppression after litellm loads
     _suppress_pydantic_serializer_warnings()
 

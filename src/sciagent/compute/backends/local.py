@@ -40,17 +40,14 @@ class LocalBackend:
         """Check if this backend can handle the requirements.
 
         Local Docker can't do GPU (Mac Docker limitation) or very large memory.
+        Uses simple threshold rather than checking current available memory
+        (which is unreliable due to other running processes).
         """
         if req.gpus > 0:
             return False
-        # Check available memory (rough estimate)
-        try:
-            import psutil
-            available_gb = psutil.virtual_memory().available / (1024**3)
-            return req.memory_gb < available_gb * 0.8
-        except ImportError:
-            # Assume 16GB available if psutil not installed
-            return req.memory_gb <= 16
+        # Simple threshold: local can handle up to 16GB memory requests
+        # Larger requests route to cloud for more headroom
+        return req.memory_gb <= 16
 
     def run(self, job: Job, background: bool = True) -> str:
         """Run job, return job_id.
@@ -163,4 +160,5 @@ class LocalBackend:
                 exit_code=status.get("exit_code", 1),
                 summary=f"Failed with exit code {status.get('exit_code', 1)}",
                 error_preview=stderr[:500] if stderr else "",
+                output_file=status.get("stderr_file", ""),
             )

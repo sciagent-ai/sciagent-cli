@@ -6,6 +6,18 @@ beautifulsoup4>=4.12.0
 pypdf>=4.0.0
 prompt_toolkit>=3.0.0
 
+[cloud]
+skypilot[aws]>=0.6.0
+
+[cloud-all]
+skypilot[aws,azure,gcp]>=0.6.0
+
+[cloud-azure]
+skypilot[azure]>=0.6.0
+
+[cloud-gcp]
+skypilot[gcp]>=0.6.0
+
 [dev]
 pytest>=7.0.0
 pytest-cov>=4.0.0

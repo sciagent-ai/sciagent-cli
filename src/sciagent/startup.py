@@ -40,6 +40,30 @@ API_KEYS = {
     },
 }
 
+# Cloud provider credentials for SkyPilot compute backend
+CLOUD_CREDENTIALS = {
+    "aws": {
+        "env_key": "AWS_ACCESS_KEY_ID",
+        "env_secret": "AWS_SECRET_ACCESS_KEY",
+        "env_region": "AWS_DEFAULT_REGION",
+        "url": "https://console.aws.amazon.com/iam/home#/security_credentials",
+        "name": "AWS",
+        "setup": "aws configure",
+    },
+    "gcp": {
+        "env": "GOOGLE_APPLICATION_CREDENTIALS",
+        "url": "https://console.cloud.google.com/iam-admin/serviceaccounts",
+        "name": "Google Cloud",
+        "setup": "gcloud auth application-default login",
+    },
+    "azure": {
+        "env": "AZURE_SUBSCRIPTION_ID",
+        "url": "https://portal.azure.com/#blade/Microsoft_Azure_Billing/SubscriptionsBlade",
+        "name": "Azure",
+        "setup": "az login && az account set -s <subscription_id>",
+    },
+}
+
 
 def detect_provider_from_model(model: str) -> str:
     """Detect the provider from model name."""
@@ -242,3 +266,49 @@ def check_optional_keys() -> List[str]:
         )
 
     return recommendations
+
+
+def check_cloud_credentials(cloud: str) -> bool:
+    """Check if cloud credentials are configured."""
+    if cloud not in CLOUD_CREDENTIALS:
+        return False
+
+    cred = CLOUD_CREDENTIALS[cloud]
+
+    if cloud == "aws":
+        # AWS needs both key ID and secret
+        return (
+            check_api_key(cred["env_key"]) and
+            check_api_key(cred["env_secret"])
+        )
+    else:
+        # GCP/Azure need their main env var
+        return check_api_key(cred.get("env", ""))
+
+
+def get_cloud_credentials_status() -> Dict[str, bool]:
+    """Get status of all cloud provider credentials."""
+    return {name: check_cloud_credentials(name) for name in CLOUD_CREDENTIALS}
+
+
+def get_skypilot_setup_instructions() -> str:
+    """Get instructions for setting up SkyPilot with cloud credentials."""
+    return """
+Cloud Compute Setup (for GPU jobs via SkyPilot):
+
+  AWS:
+    $ aws configure
+    Permissions: https://docs.skypilot.co/en/latest/cloud-setup/cloud-permissions/aws.html
+
+  GCP:
+    $ gcloud auth application-default login
+    Permissions: https://docs.skypilot.co/en/latest/cloud-setup/cloud-permissions/gcp.html
+
+  Azure:
+    $ az login && az account set -s <subscription_id>
+    Permissions: https://docs.skypilot.co/en/latest/cloud-setup/cloud-permissions/azure.html
+
+After setup, run: sky check
+
+Full guide: https://docs.skypilot.co/en/latest/getting-started/installation.html
+"""

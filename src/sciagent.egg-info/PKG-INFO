@@ -36,6 +36,14 @@ Requires-Dist: pytest>=7.0.0; extra == "dev"
 Requires-Dist: pytest-cov>=4.0.0; extra == "dev"
 Requires-Dist: black>=23.0.0; extra == "dev"
 Requires-Dist: ruff>=0.1.0; extra == "dev"
+Provides-Extra: cloud
+Requires-Dist: skypilot[aws]>=0.6.0; extra == "cloud"
+Provides-Extra: cloud-gcp
+Requires-Dist: skypilot[gcp]>=0.6.0; extra == "cloud-gcp"
+Provides-Extra: cloud-azure
+Requires-Dist: skypilot[azure]>=0.6.0; extra == "cloud-azure"
+Provides-Extra: cloud-all
+Requires-Dist: skypilot[aws,azure,gcp]>=0.6.0; extra == "cloud-all"
 Dynamic: license-file
 
 # SciAgent
@@ -188,12 +196,14 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 | `research` | Coding | Web research, documentation, literature review |
 | `plan` | Scientific | Break down complex problems (needs deep reasoning) |
 | `general` | Coding | Complex multi-step implementation tasks |
+| `verifier` | Verification | Independent validation of task outputs |
 
 Model tiers are defined in `src/sciagent/defaults.py`:
-- **Scientific**: Best quality for scientific code and planning
-- **Vision**: Image and multimodal analysis (uses Scientific tier)
-- **Coding**: Good for implementation, debugging, research
-- **Fast**: Quick/cheap for exploration and extraction
+- **Scientific**: Main agent, planning 
+- **Vision**: Image and multimodal analysis 
+- **Coding**: Implementation, debugging, research 
+- **Verification**: Independent verifier subagent
+- **Fast**: Quick/cheap for exploration and extraction 
 
 ## Architecture
 

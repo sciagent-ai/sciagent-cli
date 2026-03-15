@@ -26,7 +26,7 @@ class BgStatusTool:
     """Check status of background jobs."""
 
     name = "bg_status"
-    description = "Check status of background jobs. Call with no args to list all jobs, or with job_id to check a specific job."
+    description = "Check status of background jobs. Call with no args to list all jobs, or with job_id to check a specific job. Works for both local (bash) and compute (SkyPilot) jobs."
 
     parameters = {
         "type": "object",
@@ -47,6 +47,30 @@ class BgStatusTool:
     def __init__(self, working_dir: str = "."):
         self.working_dir = working_dir
 
+    def _is_compute_job(self, job_id: str) -> bool:
+        """Check if job_id is a compute/SkyPilot job."""
+        return job_id and job_id.startswith("sciagent-")
+
+    def _get_compute_status(self, job_id: str) -> Optional[Dict[str, Any]]:
+        """Get status from compute router for SkyPilot jobs."""
+        try:
+            from sciagent.compute.router import ComputeRouter
+            router = ComputeRouter()
+            result = router.get_status(job_id)
+            return {
+                "job_id": job_id,
+                "status": result.status.value,
+                "summary": result.summary,
+                "error_preview": result.error_preview,  # Include actual error content
+                "output_file": result.output_file,  # Log file path for agent to read
+                "backend": "skypilot",
+                "command": "(compute job)",
+                "working_dir": self.working_dir,
+                "start_time": "",
+            }
+        except Exception:
+            return None
+
     def execute(self, job_id: str = None, running_only: bool = False) -> ToolResult:
         """Get status of background jobs."""
         from sciagent.process_manager import ProcessManager, JobStatus
@@ -55,7 +79,19 @@ class BgStatusTool:
             pm = ProcessManager.get_instance()
 
             if job_id:
-                # Get specific job status
+                # Check if it's a compute job (SkyPilot)
+                if self._is_compute_job(job_id):
+                    status = self._get_compute_status(job_id)
+                    if status is None:
+                        return ToolResult(
+                            success=False,
+                            output=None,
+                            error=f"Compute job '{job_id}' not found or SkyPilot not available."
+                        )
+                    output = self._format_compute_status(status)
+                    return ToolResult(success=True, output=output, error=None)
+
+                # Get specific job status from ProcessManager
                 status = pm.get_status(job_id)
                 if status is None:
                     return ToolResult(
@@ -156,6 +192,33 @@ class BgStatusTool:
 
         return '\n'.join(lines)
 
+    def _format_compute_status(self, status: Dict[str, Any]) -> str:
+        """Format compute job status for display."""
+        lines = [
+            f"Compute Job: {status['job_id']}",
+            f"Backend: {status.get('backend', 'skypilot')}",
+            f"Status: {status['status']}",
+            f"Summary: {status.get('summary', '')}",
+        ]
+
+        # Include error content if present (critical for debugging failures)
+        error_preview = status.get('error_preview', '')
+        if error_preview:
+            lines.append("")
+            lines.append("Error output:")
+            lines.append(error_preview)
+
+        # Include log file path if available (agent can read for full details)
+        output_file = status.get('output_file', '')
+        if output_file:
+            lines.append("")
+            lines.append(f"Full logs: {output_file}")
+
+        lines.append("")
+        lines.append(f"Use 'sky logs {status['job_id']}' to view full logs.")
+        lines.append(f"Use 'sky down {status['job_id']}' to terminate and stop billing.")
+        return '\n'.join(lines)
+
     def to_schema(self) -> Dict:
         """Convert to OpenAI-style tool schema."""
         return {
@@ -169,7 +232,7 @@ class BgOutputTool:
     """Get output from a background job."""
 
     name = "bg_output"
-    description = "Get stdout/stderr output from a background job. Use tail_lines to get only recent output."
+    description = "Get stdout/stderr output from a background job. Use tail_lines to get only recent output. For compute jobs, retrieves logs from the cloud cluster."
 
     parameters = {
         "type": "object",
@@ -196,6 +259,24 @@ class BgOutputTool:
     def __init__(self, working_dir: str = "."):
         self.working_dir = working_dir
 
+    def _is_compute_job(self, job_id: str) -> bool:
+        """Check if job_id is a compute/SkyPilot job."""
+        return job_id and job_id.startswith("sciagent-")
+
+    def _get_compute_output(self, job_id: str, tail_lines: int = None) -> ToolResult:
+        """Get logs from a compute/SkyPilot job."""
+        try:
+            from sciagent.compute.backends.skypilot import SkyPilotBackend
+            backend = SkyPilotBackend()
+            logs = backend.get_logs(job_id, tail=tail_lines or 100)
+            return ToolResult(
+                success=True,
+                output=logs if logs else "(no output available)",
+                error=None
+            )
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=str(e))
+
     def execute(
         self,
         job_id: str = None,
@@ -211,6 +292,10 @@ class BgOutputTool:
                 output=None,
                 error="job_id is required. Use bg_status() to list available jobs."
             )
+
+        # Handle compute jobs (SkyPilot)
+        if self._is_compute_job(job_id):
+            return self._get_compute_output(job_id, tail_lines)
 
         try:
             pm = ProcessManager.get_instance()
@@ -271,7 +356,7 @@ class BgWaitTool:
     """Wait for a background job to complete."""
 
     name = "bg_wait"
-    description = "Wait for a background job to complete. Returns final status and exit code."
+    description = "Wait for a background job to complete. Returns final status and exit code. Works for both local (bash) and compute (SkyPilot) jobs."
 
     parameters = {
         "type": "object",
@@ -292,6 +377,80 @@ class BgWaitTool:
     def __init__(self, working_dir: str = "."):
         self.working_dir = working_dir
 
+    def _is_compute_job(self, job_id: str) -> bool:
+        """Check if job_id is a compute/SkyPilot job."""
+        return job_id and job_id.startswith("sciagent-")
+
+    def _wait_compute_job(self, job_id: str, timeout: int = None) -> ToolResult:
+        """Wait for a compute/SkyPilot job to complete.
+
+        Unlike local jobs, cloud jobs should NOT block indefinitely.
+        Default timeout is 30s - check status and return, let agent decide next step.
+        """
+        import time
+        try:
+            from sciagent.compute.router import ComputeRouter
+            from sciagent.compute.job import JobStatus
+            router = ComputeRouter()
+
+            # Default 30s timeout for cloud jobs (don't block forever like Claude Code)
+            if timeout is None:
+                timeout = 30
+
+            start_time = time.time()
+            poll_interval = 5  # Check every 5 seconds
+
+            while True:
+                result = router.get_status(job_id)
+
+                if result.status == JobStatus.COMPLETED:
+                    return ToolResult(
+                        success=True,
+                        output=f"Compute job {job_id} completed.\n\n"
+                               f"Status: {result.status.value}\n"
+                               f"Summary: {result.summary}\n\n"
+                               f"Use 'sky logs {job_id}' to view full logs.\n"
+                               f"Use 'sky down {job_id}' to terminate cluster.",
+                        error=None
+                    )
+
+                if result.status == JobStatus.FAILED:
+                    output_lines = [
+                        f"Compute job {job_id} failed.",
+                        "",
+                        f"Summary: {result.summary}",
+                    ]
+                    if result.error_preview:
+                        output_lines.extend(["", "Error preview:", result.error_preview])
+                    if result.output_file:
+                        output_lines.extend(["", f"Full logs: {result.output_file}"])
+                    output_lines.extend(["", f"Use 'sky logs {job_id}' to view error logs."])
+                    return ToolResult(
+                        success=False,
+                        output="\n".join(output_lines),
+                        error=result.error_preview or result.summary
+                    )
+
+                # Check timeout - return current status instead of blocking forever
+                if timeout and (time.time() - start_time) >= timeout:
+                    elapsed = int(time.time() - start_time)
+                    return ToolResult(
+                        success=True,
+                        output=f"Cloud job {job_id} still {result.status.value} after {elapsed}s.\n\n"
+                               f"Status: {result.summary}\n\n"
+                               f"Options:\n"
+                               f"  - bg_status('{job_id}') to check current status\n"
+                               f"  - bg_wait('{job_id}', timeout=60) to wait longer\n"
+                               f"  - sky logs {job_id} to view live logs\n"
+                               f"  - Continue with other tasks while job runs",
+                        error=None
+                    )
+
+                time.sleep(poll_interval)
+
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=str(e))
+
     def execute(self, job_id: str = None, timeout: int = None) -> ToolResult:
         """Wait for a background job to complete."""
         from sciagent.process_manager import ProcessManager
@@ -302,6 +461,10 @@ class BgWaitTool:
                 output=None,
                 error="job_id is required."
             )
+
+        # Handle compute jobs (SkyPilot)
+        if self._is_compute_job(job_id):
+            return self._wait_compute_job(job_id, timeout)
 
         try:
             pm = ProcessManager.get_instance()
@@ -366,7 +529,7 @@ class BgKillTool:
     """Terminate a background job."""
 
     name = "bg_kill"
-    description = "Terminate a running background job. Use force=True for SIGKILL instead of SIGTERM."
+    description = "Terminate a running background job. For compute jobs, this terminates the cloud cluster. Use force=True for SIGKILL instead of SIGTERM (local jobs only)."
 
     parameters = {
         "type": "object",
@@ -377,7 +540,7 @@ class BgKillTool:
             },
             "force": {
                 "type": "boolean",
-                "description": "Use SIGKILL instead of SIGTERM (immediate termination)",
+                "description": "Use SIGKILL instead of SIGTERM (immediate termination, local jobs only)",
                 "default": False
             }
         },
@@ -386,6 +549,32 @@ class BgKillTool:
 
     def __init__(self, working_dir: str = "."):
         self.working_dir = working_dir
+
+    def _is_compute_job(self, job_id: str) -> bool:
+        """Check if job_id is a compute/SkyPilot job."""
+        return job_id and job_id.startswith("sciagent-")
+
+    def _kill_compute_job(self, job_id: str) -> ToolResult:
+        """Terminate a compute/SkyPilot cluster."""
+        try:
+            from sciagent.compute.router import ComputeRouter
+            router = ComputeRouter()
+
+            if router.cleanup(job_id):
+                return ToolResult(
+                    success=True,
+                    output=f"Compute cluster {job_id} terminated.\n\n"
+                           f"Billing has stopped for this cluster.",
+                    error=None
+                )
+            else:
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"Failed to terminate cluster '{job_id}'. It may have already been terminated."
+                )
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=str(e))
 
     def execute(self, job_id: str = None, force: bool = False) -> ToolResult:
         """Terminate a background job."""
@@ -397,6 +586,10 @@ class BgKillTool:
                 output=None,
                 error="job_id is required."
             )
+
+        # Handle compute jobs (SkyPilot)
+        if self._is_compute_job(job_id):
+            return self._kill_compute_job(job_id)
 
         try:
             pm = ProcessManager.get_instance()

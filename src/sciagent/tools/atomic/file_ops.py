@@ -82,6 +82,19 @@ class FileOpsTool:
                 "type": "integer",
                 "description": "End line for read (1-indexed, -1 for EOF)"
             },
+            "max_lines": {
+                "type": "integer",
+                "description": "Max lines to return (default 200). Use search tool for specific content in large files.",
+                "default": 200
+            },
+            "pattern": {
+                "type": "string",
+                "description": "Search pattern - only return lines containing this (like grep)"
+            },
+            "tail": {
+                "type": "integer",
+                "description": "Read last N lines (like tail -n). Useful for logs/errors."
+            },
             "recursive": {
                 "type": "boolean",
                 "description": "Recursive listing",
@@ -126,7 +139,14 @@ class FileOpsTool:
     def execute(self, command: str, path: str, **kwargs) -> ToolResult:
         """Execute file operation."""
         if command == "read":
-            return self._read(path, kwargs.get("start_line"), kwargs.get("end_line"))
+            return self._read(
+                path,
+                kwargs.get("start_line"),
+                kwargs.get("end_line"),
+                kwargs.get("max_lines", 200),
+                kwargs.get("pattern"),
+                kwargs.get("tail")
+            )
         elif command == "write":
             return self._write(path, kwargs.get("content", ""))
         elif command == "edit":
@@ -136,7 +156,15 @@ class FileOpsTool:
         else:
             return ToolResult(success=False, output=None, error=f"Unknown command: {command}")
 
-    def _read(self, path: str, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
+    def _read(
+        self,
+        path: str,
+        start_line: Optional[int] = None,
+        end_line: Optional[int] = None,
+        max_lines: int = 200,
+        pattern: Optional[str] = None,
+        tail: Optional[int] = None
+    ) -> ToolResult:
         """Read file contents. Supports text files, PDFs, and images."""
         try:
             p = self._resolve_path(path)
@@ -160,6 +188,23 @@ class FileOpsTool:
 
             content = p.read_text(encoding="utf-8")
             lines = content.splitlines()
+            total_lines = len(lines)
+
+            # Tail mode - read last N lines (like tail -n)
+            if tail is not None:
+                tail_start = max(0, total_lines - tail)
+                lines = lines[tail_start:]
+                # Format with line numbers
+                numbered = []
+                for i, line in enumerate(lines):
+                    line_num = tail_start + i + 1
+                    if len(line) > 500:
+                        line = line[:500] + "..."
+                    numbered.append(f"{line_num:4d} | {line}")
+                output = "\n".join(numbered)
+                if total_lines > tail:
+                    output = f"[Showing last {tail} of {total_lines} lines]\n\n" + output
+                return ToolResult(success=True, output=output, error=None)
 
             # Apply line range if specified
             if start_line is not None:
@@ -170,15 +215,47 @@ class FileOpsTool:
             else:
                 line_offset = 0
 
+            # Filter by pattern if specified (like grep)
+            if pattern:
+                matching = []
+                for i, line in enumerate(lines):
+                    if pattern.lower() in line.lower():
+                        line_num = i + line_offset + 1
+                        matching.append(f"{line_num:4d} | {line}")
+                if not matching:
+                    return ToolResult(
+                        success=True,
+                        output=f"No lines matching '{pattern}' in {path} ({total_lines} total lines)",
+                        error=None
+                    )
+                return ToolResult(
+                    success=True,
+                    output="\n".join(matching[:max_lines]),
+                    error=None
+                )
+
+            # Truncate if too many lines
+            truncated = False
+            if len(lines) > max_lines:
+                lines = lines[:max_lines]
+                truncated = True
+
             # Add line numbers
             numbered = []
             for i, line in enumerate(lines):
                 line_num = i + line_offset + 1
+                # Truncate long lines
+                if len(line) > 500:
+                    line = line[:500] + "..."
                 numbered.append(f"{line_num:4d} | {line}")
+
+            output = "\n".join(numbered)
+            if truncated:
+                output += f"\n\n[Truncated: showing {max_lines}/{total_lines} lines. Use start_line/end_line or pattern to find specific content]"
 
             return ToolResult(
                 success=True,
-                output="\n".join(numbered),
+                output=output,
                 error=None
             )
 

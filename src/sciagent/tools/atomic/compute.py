@@ -66,9 +66,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "type": "string",
                 "description": "Command to run in container"
             },
+            "cpus": {
+                "type": "integer",
+                "description": "Number of CPUs",
+                "default": 2
+            },
             "memory_gb": {
                 "type": "number",
-                "description": "Memory requirement in GB",
+                "description": "Memory in GB (>16 routes to cloud)",
                 "default": 4
             },
             "gpus": {
@@ -76,10 +81,26 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "description": "Number of GPUs (0 for CPU only)",
                 "default": 0
             },
+            "gpu_type": {
+                "type": "string",
+                "description": "GPU type (e.g., 'T4', 'A10G', 'V100', 'A100')",
+                "default": "T4"
+            },
             "background": {
                 "type": "boolean",
                 "description": "Run in background (default: true)",
                 "default": True
+            },
+            "estimate_only": {
+                "type": "boolean",
+                "description": "Only estimate cost, don't run job",
+                "default": False
+            },
+            "backend": {
+                "type": "string",
+                "enum": ["local", "skypilot", "auto"],
+                "description": "Backend: 'auto' (default) routes based on resources, 'local' for Docker, 'skypilot' for cloud",
+                "default": "auto"
             },
         },
         "required": ["command"]
@@ -101,9 +122,13 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         command: str,
         service: str = None,
         image: str = None,
+        cpus: int = 2,
         memory_gb: float = 4,
         gpus: int = 0,
+        gpu_type: str = "T4",
         background: bool = True,
+        estimate_only: bool = False,
+        backend: str = "auto",
     ) -> ToolResult:
         """Execute compute job.
 
@@ -111,12 +136,16 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             command: Command to run in container
             service: Service name from registry (e.g., 'scipy-base', 'openfoam')
             image: Direct Docker image (e.g., 'python:3.11')
-            memory_gb: Memory requirement in GB (default: 4)
-            gpus: Number of GPUs (default: 0)
+            cpus: Number of CPUs (default: 2, >8 routes to cloud)
+            memory_gb: Memory in GB (default: 4, >16 routes to cloud)
+            gpus: Number of GPUs (default: 0, >0 routes to cloud)
+            gpu_type: GPU type for cloud (default: T4)
             background: Run in background (default: True)
+            estimate_only: Only show cost estimate (default: False)
+            backend: 'auto' (default), 'local', or 'skypilot'
 
         Returns:
-            ToolResult with job_id and status
+            ToolResult with job_id, status, and cost estimate for cloud jobs
         """
         from sciagent.compute.job import Job, ComputeRequirements, JobStatus
 
@@ -147,14 +176,41 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             command=command,
             working_dir=self._working_dir,
             requirements=ComputeRequirements(
+                cpus=cpus,
                 memory_gb=memory_gb,
                 gpus=gpus,
+                gpu_type=gpu_type if gpus > 0 else None,
             ),
         )
 
         try:
             router = self._get_router()
-            job_id = router.run(job, background=background)
+
+            # Select backend and get cost estimate
+            preferred = backend if backend != "auto" else None
+            selected_backend, routing_reason = router.select(job.requirements, preferred=preferred)
+            cost_estimate = router.estimate_cost(job, duration_hours=1.0)
+
+            # If estimate_only, return cost without running
+            if estimate_only:
+                return ToolResult(
+                    success=True,
+                    output={
+                        "backend": selected_backend.name,
+                        "routing_reason": routing_reason,
+                        "cost_estimate": cost_estimate,
+                        "resources": {
+                            "cpus": cpus,
+                            "memory_gb": memory_gb,
+                            "gpus": gpus,
+                            "gpu_type": gpu_type if gpus > 0 else None,
+                        },
+                        "image": resolved_image,
+                    }
+                )
+
+            # Run the job
+            job_id = router.run(job, backend=preferred, background=background)
 
             if background:
                 # Token-light response for background jobs
@@ -163,6 +219,9 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     output={
                         "job_id": job_id,
                         "status": "running",
+                        "backend": selected_backend.name,
+                        "routing_reason": routing_reason,
+                        "cost_estimate": cost_estimate,
                         "image": resolved_image,
                         "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
                     }
@@ -173,7 +232,10 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 return ToolResult(
                     success=result.status == JobStatus.COMPLETED,
                     output={
+                        "job_id": job_id,
                         "status": result.status.value,
+                        "backend": selected_backend.name,
+                        "cost_estimate": cost_estimate,
                         "summary": result.summary,
                         "output_preview": result.output_preview,
                         "output_file": result.output_file,
@@ -182,7 +244,17 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 )
 
         except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
+            error_msg = str(e) if str(e) else f"{type(e).__name__}: (no message)"
+            return ToolResult(
+                success=False,
+                output={
+                    "service": service,
+                    "image": resolved_image,
+                    "command": command[:100],
+                    "backend_attempted": backend,
+                },
+                error=f"Compute job failed: {error_msg}"
+            )
 
     def to_schema(self) -> Dict:
         """Convert to OpenAI-style tool schema."""

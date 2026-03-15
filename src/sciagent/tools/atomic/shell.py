@@ -273,7 +273,14 @@ class ShellTool:
     """
 
     name = "bash"
-    description = "Execute bash commands. Use for running scripts, installing packages, executing Python, etc."
+    description = """Execute bash commands. Use for running scripts, installing packages, executing Python, etc.
+
+For long-running commands (docker, simulations, builds), use background=True:
+  bash(command="docker run ...", background=True)  → returns job_id immediately
+  bg_status(job_id)  → check if still running
+  bg_output(job_id)  → get output so far
+
+This prevents blocking while waiting for slow operations."""
 
     parameters = {
         "type": "object",

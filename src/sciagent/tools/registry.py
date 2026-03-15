@@ -244,7 +244,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     registry.register(BgWaitTool(working_dir))
     registry.register(BgKillTool(working_dir))
 
-    # Compute tool for containerized jobs
+    # Compute tool
     registry.register(ComputeTool(working_dir))
 
     # Add skill tool if skills exist
