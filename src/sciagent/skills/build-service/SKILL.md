@@ -77,41 +77,145 @@ If the package is not in `registry.yaml`, add an entry following the existing fo
 
 **Note:** The `license` field should match the SPDX identifier used in the Dockerfile label.
 
-## 5. Build, Push, and Verify
+## 5. Choose Build Method
 
-**Architecture Note:** Images are built for the host machine's architecture only. If building on Apple Silicon (ARM64), the image will only run natively on ARM64 systems. Intel/AMD users would need emulation (slow) or a separate build. For multi-arch support in the future, use:
+**Ask the user which build method to use:**
+
+| Method | Platform | Use When |
+|--------|----------|----------|
+| **GitHub Actions** (Recommended) | linux/amd64 | Production builds, cloud execution (SkyPilot) |
+| **Local Docker** | Host arch only | Quick iteration, testing Dockerfile changes |
+| **Local Buildx** | linux/amd64 | Cross-compile on Mac (slower, but works) |
+
+### Option A: GitHub Actions (Recommended for Cloud)
+
+This builds on GitHub's linux/amd64 runners and pushes to GHCR. Required for SkyPilot cloud execution.
+
+**First-time setup:** Ensure `.github/workflows/build-images.yml` exists (see Section 5.1).
+
+**Trigger a build:**
 ```bash
-docker buildx build --platform linux/amd64,linux/arm64 -t ghcr.io/sciagent-ai/{package}:latest --push .
+# Via GitHub CLI
+gh workflow run build-images.yml -f images="{package}" -f push=true
+
+# Or via GitHub UI: Actions → Build and Push Docker Images → Run workflow
 ```
 
-Execute these steps in order, using the TodoWrite tool to track progress:
+**Monitor progress:**
+```bash
+gh run list --workflow=build-images.yml --limit=5
+gh run watch  # Watch latest run
+```
 
-1. **Build locally**:
-   ```bash
-   cd services/{package} && docker build -t ghcr.io/sciagent-ai/{package}:latest .
-   ```
+### Option B: Local Docker (Quick Iteration)
 
-2. **Push to GHCR**:
-   ```bash
-   docker push ghcr.io/sciagent-ai/{package}:latest
-   ```
+Builds for host architecture only. Use for testing Dockerfile changes before pushing.
 
-3. **Remove local image(s)**:
-   ```bash
-   docker rmi ghcr.io/sciagent-ai/{package}:latest
-   ```
+```bash
+cd services/{package} && docker build -t ghcr.io/sciagent-ai/{package}:latest .
+docker run --rm ghcr.io/sciagent-ai/{package}:latest <verification-command>
+```
 
-4. **Pull from GHCR to verify**:
+**Warning:** Images built on Mac ARM won't work on SkyPilot cloud (x86_64).
+
+### Option C: Local Buildx (Cross-compile)
+
+Cross-compiles for linux/amd64 on Mac. Slower due to emulation but works without GitHub Actions.
+
+```bash
+docker buildx build --platform linux/amd64 \
+  -t ghcr.io/sciagent-ai/{package}:latest \
+  --push \
+  services/{package}
+```
+
+---
+
+## 5.1 GitHub Actions Workflow Setup
+
+If `.github/workflows/build-images.yml` doesn't exist, create it:
+
+```yaml
+name: Build and Push Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: 'Service to build (e.g., openfoam, scipy-base)'
+        required: true
+      push:
+        description: 'Push to ghcr.io'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: inputs.push
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ./src/sciagent/services
+          file: ./src/sciagent/services/${{ inputs.images }}/Dockerfile
+          platforms: linux/amd64
+          push: ${{ inputs.push }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ inputs.images }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+```
+
+**Commit and push the workflow:**
+```bash
+git add .github/workflows/build-images.yml
+git commit -m "Add GitHub Actions workflow for building Docker images"
+git push
+```
+
+---
+
+## 5.2 Verify After Build
+
+After GitHub Actions completes (or local push):
+
+1. **Pull from GHCR to verify:**
    ```bash
    docker pull ghcr.io/sciagent-ai/{package}:latest
    ```
 
-5. **Test the image**:
+2. **Check architecture:**
+   ```bash
+   docker inspect ghcr.io/sciagent-ai/{package}:latest | grep Architecture
+   # Should show: "Architecture": "amd64"
+   ```
+
+3. **Test the image:**
    ```bash
    docker run --rm ghcr.io/sciagent-ai/{package}:latest <verification-command>
    ```
 
-6. **Cleanup** (optional):
+4. **Cleanup (optional):**
    ```bash
    docker rmi ghcr.io/sciagent-ai/{package}:latest
    ```

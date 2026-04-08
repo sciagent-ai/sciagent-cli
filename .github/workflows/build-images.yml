@@ -1,0 +1,83 @@
+name: Build and Push Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      images:
+        description: 'Service to build (e.g., openfoam, openfoam-swak4foam, paraview)'
+        required: true
+        type: string
+      push:
+        description: 'Push to ghcr.io'
+        type: boolean
+        default: true
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: ${{ inputs.push }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract service info
+        id: info
+        run: |
+          SERVICE="${{ inputs.images }}"
+          echo "service=${SERVICE}" >> $GITHUB_OUTPUT
+
+          # Check if Dockerfile exists
+          if [ -f "src/sciagent/services/${SERVICE}/Dockerfile" ]; then
+            echo "dockerfile=src/sciagent/services/${SERVICE}/Dockerfile" >> $GITHUB_OUTPUT
+            echo "context=src/sciagent/services" >> $GITHUB_OUTPUT
+          else
+            echo "::error::Dockerfile not found at src/sciagent/services/${SERVICE}/Dockerfile"
+            exit 1
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ steps.info.outputs.context }}
+          file: ${{ steps.info.outputs.dockerfile }}
+          platforms: linux/amd64
+          push: ${{ inputs.push }}
+          tags: |
+            ${{ env.IMAGE_PREFIX }}/${{ steps.info.outputs.service }}:latest
+          cache-from: type=gha,scope=${{ steps.info.outputs.service }}
+          cache-to: type=gha,mode=max,scope=${{ steps.info.outputs.service }}
+
+      - name: Summary
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Service:** \`${{ steps.info.outputs.service }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Platform:** linux/amd64" >> $GITHUB_STEP_SUMMARY
+          echo "**Pushed:** ${{ inputs.push }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ inputs.push }}" = "true" ]; then
+            echo "**Image:** \`${{ env.IMAGE_PREFIX }}/${{ steps.info.outputs.service }}:latest\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Test with SciAgent" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "Test ${{ steps.info.outputs.service }} on skypilot with 32GB memory" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
