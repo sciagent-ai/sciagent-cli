@@ -97,3 +97,4 @@ Thumbs.db
 
 # Project specific
 .agent_states/
+_logs/
