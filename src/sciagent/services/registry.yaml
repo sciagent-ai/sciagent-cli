@@ -24,13 +24,33 @@ schema_version: "1.0"
 #   packages: List of key importable packages in the container
 #   extends: The base sciagent service this was built on (null if external base)
 #
+# Architecture support:
+#   architectures: List of supported platforms [linux/amd64, linux/arm64]
+#   - Default (in defaults section): both amd64 and arm64
+#   - Override per-service for those with arch-specific binaries
+#   - SkyPilot (cloud) requires linux/amd64
+#   - Local Mac M1/M2/M3 uses linux/arm64
+#
 # Use 'packages' to determine if a container has the libraries you need.
 # Use 'extends' to find compatible bases for building combined containers.
+# Use 'architectures' to check cloud vs local compatibility.
 
 defaults:
   organization: sciagent-ai
   registry: ghcr.io
   tag: latest
+  # Default architectures - most services support both via pip/apt
+  # Override per-service for those with arch-specific binaries
+  architectures:
+    - linux/amd64
+    - linux/arm64
+  # Default resource requirements - override per-service for heavy workloads
+  resources:
+    min_memory_gb: 4
+    recommended_memory_gb: 8
+    min_cpus: 2
+    gpu_beneficial: false
+    gpu_required: false
 
 services:
   scipy-base:
@@ -307,6 +327,12 @@ services:
       - matplotlib
       - h5py
     extends: null
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 32
+      min_cpus: 4
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "Time-domain electromagnetic simulations"
       - "Waveguide design and analysis"
@@ -327,6 +353,12 @@ services:
     license: GPL-3.0
     runtime: bash
     workdir: /workspace
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 32
+      min_cpus: 4
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "Incompressible and compressible flow"
       - "Turbulence modeling (RANS, LES, DNS)"
@@ -460,6 +492,12 @@ services:
       - gmsh
       - numpy
     extends: null
+    resources:
+      min_memory_gb: 4
+      recommended_memory_gb: 8
+      min_cpus: 2
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "2D and 3D mesh generation"
       - "CAD geometry creation and manipulation"
@@ -505,6 +543,12 @@ services:
       - MDAnalysis
       - numpy
     extends: null
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 32
+      min_cpus: 4
+      gpu_beneficial: true
+      gpu_required: false
     capabilities:
       - "Molecular dynamics simulations"
       - "Energy minimization"
@@ -540,6 +584,12 @@ services:
     workdir: /workspace
     packages: []
     extends: null
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 16
+      min_cpus: 4
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "Heat transfer and thermal analysis"
       - "Structural mechanics and elasticity"
@@ -572,6 +622,14 @@ services:
     workdir: /workspace
     packages: []
     extends: null
+    # Uses official openroad/orfs image which is amd64 only
+    architectures: [linux/amd64]
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 16
+      min_cpus: 4
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "RTL synthesis (Yosys)"
       - "Floorplanning and macro placement"
@@ -661,6 +719,12 @@ services:
       - qiskit-aer
       - numpy
     extends: sci-core
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 16
+      min_cpus: 4
+      gpu_beneficial: true
+      gpu_required: false
     capabilities:
       - "Quantum circuit construction and manipulation"
       - "Quantum gate operations (Hadamard, CNOT, Pauli, etc.)"
@@ -817,6 +881,14 @@ services:
     license: GPL-3.0
     runtime: python3
     workdir: /workspace
+    # DWSIM only available as amd64 binary (.NET runtime)
+    architectures: [linux/amd64]
+    resources:
+      min_memory_gb: 2
+      recommended_memory_gb: 4
+      min_cpus: 2
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "Steady-state and dynamic process simulation"
       - "Thermodynamic property calculations (NRTL, UNIQUAC, Peng-Robinson, SRK, etc.)"
@@ -874,6 +946,12 @@ services:
     workdir: /workspace
     packages: []
     extends: null
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 16
+      min_cpus: 4
+      gpu_beneficial: false
+      gpu_required: false
     capabilities:
       - "SPICE simulation (ngspice)"
       - "Layout editing and DRC (Magic, KLayout)"
@@ -912,6 +990,12 @@ services:
     license: GPL-2.0
     runtime: python3
     workdir: /workspace
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 32
+      min_cpus: 4
+      gpu_beneficial: true
+      gpu_required: false
     capabilities:
       - "Classical molecular dynamics simulations"
       - "Soft matter simulations (polymers, biomolecules, colloids)"
@@ -1008,6 +1092,12 @@ services:
     workdir: /workspace
     packages: []
     extends: null
+    resources:
+      min_memory_gb: 8
+      recommended_memory_gb: 16
+      min_cpus: 2
+      gpu_beneficial: true
+      gpu_required: false
     capabilities:
       - "3D scientific data visualization"
       - "VTK/VTU mesh and field visualization"

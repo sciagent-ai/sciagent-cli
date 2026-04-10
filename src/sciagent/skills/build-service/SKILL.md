@@ -64,12 +64,17 @@ gh run watch  # Watch latest run
 
 ### 2. Research Official Sources
 
-**Use web search to find official installation instructions:**
-- Official installation docs (pip, conda, source build?)
-- Recommended base image (some have official Docker images)
-- System dependencies (BLAS, MPI, OpenGL, etc.)
-- License (for Dockerfile label)
+**Use web search to find official installation instructions.** Scientific software often has specific requirements that aren't obvious.
+
+Look up:
+- **Official installation docs** - pip, conda, or source build?
+- **Recommended base image** - some packages have official Docker images (e.g., OpenFOAM, FEniCS)
+- **System dependencies** - many scientific packages need specific libraries (BLAS, MPI, OpenGL, etc.)
+- **License** - needed for the Dockerfile label and registry entry
+- **Known issues** - version conflicts, deprecated methods
 - **Architecture support** - check if binaries exist for both amd64 and arm64
+
+This step prevents trial-and-error builds and ensures we use the recommended approach.
 
 ### 3. Check for Architecture-Specific Downloads
 
@@ -245,6 +250,53 @@ gh workflow run build-images.yml -f images="{package}"
 - Use pre-built wheels: `pip install --prefer-binary`
 - Use smaller base image: `python:3.11-slim` instead of `python:3.11`
 - Split into layers for better caching
+
+---
+
+---
+
+## 9. Capture Package Manifest
+
+After successful build and verification, record installed packages in the registry.
+
+**For Python runtimes:**
+```bash
+docker run --rm ghcr.io/sciagent-ai/{package}:latest pip list --format=freeze | cut -d= -f1
+```
+
+**For Julia runtimes:**
+```bash
+docker run --rm ghcr.io/sciagent-ai/{package}:latest julia -e 'using Pkg; for (k,v) in Pkg.dependencies(); println(k); end'
+```
+
+**Update registry.yaml** with the key packages (not every transitive dependency, just the main ones):
+
+```yaml
+{package-name}:
+  # ... existing fields ...
+  packages:
+    - main-package
+    - numpy
+    - scipy
+  extends: scipy-base  # if Dockerfile uses FROM ghcr.io/sciagent-ai/scipy-base
+```
+
+- `packages`: List of key importable packages in the container
+- `extends`: The base sciagent service this was built on (null if external base like python:slim)
+
+This enables the agent to determine which container has the libraries needed for a task.
+
+---
+
+## 10. Report Results
+
+Summarize:
+- Image location: `ghcr.io/sciagent-ai/{package}:latest`
+- Architectures built: `linux/amd64`, `linux/arm64` (or just one)
+- Files created/modified
+- Packages captured
+- Verification status
+- Any issues encountered
 
 ---
 

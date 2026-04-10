@@ -13,7 +13,10 @@ Use existing bg_status, bg_wait, bg_output, bg_kill for job management.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Any, Optional
+
+import yaml
 
 
 @dataclass
@@ -22,6 +25,59 @@ class ToolResult:
     success: bool
     output: Any
     error: Optional[str] = None
+
+
+# Cache for registry to avoid repeated YAML parsing
+_registry_cache: Dict[str, Any] = {}
+
+
+def _load_service_registry() -> Dict[str, Any]:
+    """Load the service registry.yaml and cache it."""
+    if _registry_cache:
+        return _registry_cache
+
+    # Find registry.yaml relative to this file
+    registry_path = Path(__file__).parent.parent.parent / "services" / "registry.yaml"
+    if not registry_path.exists():
+        return {}
+
+    try:
+        with open(registry_path) as f:
+            data = yaml.safe_load(f)
+            _registry_cache.update(data)
+            return _registry_cache
+    except Exception:
+        return {}
+
+
+def _get_service_resources(service: str) -> Dict[str, Any]:
+    """Get resource hints for a service from the registry.
+
+    Returns dict with:
+        min_memory_gb, recommended_memory_gb, min_cpus,
+        gpu_beneficial, gpu_required
+
+    Falls back to defaults if service not found.
+    """
+    registry = _load_service_registry()
+
+    # Get defaults
+    defaults = registry.get("defaults", {})
+    default_resources = defaults.get("resources", {
+        "min_memory_gb": 4,
+        "recommended_memory_gb": 8,
+        "min_cpus": 2,
+        "gpu_beneficial": False,
+        "gpu_required": False,
+    })
+
+    # Get service-specific resources
+    services = registry.get("services", {})
+    service_config = services.get(service, {})
+    service_resources = service_config.get("resources", {})
+
+    # Merge: service overrides defaults
+    return {**default_resources, **service_resources}
 
 
 class ComputeTool:
@@ -194,9 +250,27 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 error="Specify 'service' OR 'image', not both"
             )
 
-        # Resolve image from service
+        # Resolve image from service and get resource hints
+        gpu_hint = None
         if service:
             resolved_image = f"ghcr.io/sciagent-ai/{service}:latest"
+
+            # Get resource hints from registry
+            hints = _get_service_resources(service)
+
+            # Use registry hints as defaults if user didn't override
+            # (check if user passed explicit values vs defaults)
+            if memory_gb == 4:  # Default value
+                memory_gb = hints.get("recommended_memory_gb", 8)
+            if cpus == 2:  # Default value
+                cpus = max(cpus, hints.get("min_cpus", 2))
+
+            # Handle GPU hints
+            if hints.get("gpu_required") and gpus == 0:
+                gpus = 1  # Auto-enable GPU for services that require it
+                gpu_hint = "gpu_required"
+            elif hints.get("gpu_beneficial") and gpus == 0:
+                gpu_hint = "gpu_beneficial"  # Inform user but don't auto-enable
         else:
             resolved_image = image
 
@@ -240,21 +314,23 @@ For long jobs, use bg_wait(job_id) to block until complete."""
 
             # If estimate_only, return cost without running
             if estimate_only:
-                return ToolResult(
-                    success=True,
-                    output={
-                        "backend": selected_backend.name,
-                        "routing_reason": routing_reason,
-                        "cost_estimate": cost_estimate,
-                        "resources": {
-                            "cpus": cpus,
-                            "memory_gb": memory_gb,
-                            "gpus": gpus,
-                            "gpu_type": gpu_type if gpus > 0 else None,
-                        },
-                        "image": resolved_image,
-                    }
-                )
+                output = {
+                    "backend": selected_backend.name,
+                    "routing_reason": routing_reason,
+                    "cost_estimate": cost_estimate,
+                    "resources": {
+                        "cpus": cpus,
+                        "memory_gb": memory_gb,
+                        "gpus": gpus,
+                        "gpu_type": gpu_type if gpus > 0 else None,
+                    },
+                    "image": resolved_image,
+                }
+                if gpu_hint:
+                    output["gpu_hint"] = gpu_hint
+                    if gpu_hint == "gpu_beneficial":
+                        output["gpu_note"] = f"Service '{service}' benefits from GPU (5-13x speedup). Add gpus=1 for better performance."
+                return ToolResult(success=True, output=output)
 
             # Run the job
             job_id = router.run(job, backend=preferred, background=background)
@@ -268,8 +344,16 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     "routing_reason": routing_reason,
                     "cost_estimate": cost_estimate,
                     "image": resolved_image,
+                    "resources_used": {
+                        "cpus": cpus,
+                        "memory_gb": memory_gb,
+                        "gpus": gpus,
+                    },
                     "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
                 }
+                # Add GPU hint if applicable
+                if gpu_hint == "gpu_beneficial":
+                    output["gpu_hint"] = f"Service '{service}' benefits from GPU. Consider adding gpus=1 for 5-13x speedup."
                 # Add workspace info if enabled
                 if actual_session_id:
                     output["workspace"] = {
