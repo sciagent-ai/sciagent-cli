@@ -1,6 +1,8 @@
 # paraview: Scientific visualization and data analysis
-# Multi-arch: amd64 uses official binary, arm64 uses apt package
-# Size: ~1.2GB (amd64), ~800MB (arm64)
+# Multi-arch: amd64 uses official EGL binary, arm64 uses apt package
+# Size: ~1.1GB (amd64), ~800MB (arm64)
+# NOTE: Using EGL build instead of OSMesa - OSMesa has glibc>=2.35 compatibility issues
+# See: https://discourse.paraview.org/t/segmentation-fault-with-osmesa-binary-on-ubuntu-24-04/15486
 FROM ubuntu:22.04
 
 LABEL org.opencontainers.image.source="https://github.com/sciagent-ai/scienv"
@@ -10,12 +12,18 @@ LABEL org.opencontainers.image.licenses="BSD-3-Clause"
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# Install common dependencies
+# Install common dependencies including EGL libraries for headless rendering
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
+    curl \
     ca-certificates \
     libgl1-mesa-glx \
+    libgl1-mesa-dri \
     libglu1-mesa \
+    libegl1 \
+    libegl-mesa0 \
+    libgbm1 \
+    libgles2 \
     libxt6 \
     libxrender1 \
     libxcursor1 \
@@ -31,12 +39,12 @@ ARG TARGETARCH
 ENV PARAVIEW_VERSION=5.13.3
 
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
-      # amd64: Use official ParaView binary with OSMesa (headless rendering)
-      echo "Installing ParaView ${PARAVIEW_VERSION} from official binary (amd64)..." && \
-      wget -q "https://www.paraview.org/files/v5.13/ParaView-${PARAVIEW_VERSION}-osmesa-MPI-Linux-Python3.10-x86_64.tar.gz" -O /tmp/paraview.tar.gz && \
+      # amd64: Use official ParaView EGL binary (headless rendering, works with glibc>=2.35)
+      echo "Installing ParaView ${PARAVIEW_VERSION} EGL build from official binary (amd64)..." && \
+      wget -q "https://www.paraview.org/files/v5.13/ParaView-${PARAVIEW_VERSION}-egl-MPI-Linux-Python3.10-x86_64.tar.gz" -O /tmp/paraview.tar.gz && \
       tar -xzf /tmp/paraview.tar.gz -C /opt && \
       rm /tmp/paraview.tar.gz && \
-      mv /opt/ParaView-${PARAVIEW_VERSION}-osmesa-MPI-Linux-Python3.10-x86_64 /opt/paraview && \
+      mv /opt/ParaView-${PARAVIEW_VERSION}-egl-MPI-Linux-Python3.10-x86_64 /opt/paraview && \
       echo "export PATH=/opt/paraview/bin:\$PATH" >> /etc/profile.d/paraview.sh && \
       echo "# NOTE: LD_LIBRARY_PATH intentionally NOT set here - breaks system curl" >> /etc/profile.d/paraview.sh && \
       echo "# ParaView wrapper scripts set LD_LIBRARY_PATH only when running ParaView binaries" >> /etc/profile.d/paraview.sh && \
