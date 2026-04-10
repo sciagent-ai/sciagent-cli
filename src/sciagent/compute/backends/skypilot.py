@@ -52,6 +52,50 @@ class SkyPilotBackend:
         """SkyPilot can run anything if available."""
         return self.is_available()
 
+    def get_enabled_store(self) -> str:
+        """Get the storage type for the first enabled cloud."""
+        try:
+            sky = self._get_sky()
+            from sky.clouds import CloudCapability
+            enabled = sky.check.get_cached_enabled_clouds_or_refresh(
+                CloudCapability.STORAGE
+            )
+            if not enabled:
+                # Fall back to compute-enabled clouds
+                enabled = sky.check.get_cached_enabled_clouds_or_refresh(
+                    CloudCapability.COMPUTE
+                )
+
+            # Map cloud to store type
+            cloud_to_store = {
+                "AWS": "s3",
+                "GCP": "gcs",
+                "Azure": "azure",
+                "Cloudflare": "r2",
+            }
+            for cloud in enabled:
+                cloud_name = str(cloud).upper()
+                for key, store in cloud_to_store.items():
+                    if key.upper() in cloud_name:
+                        return store
+            return "s3"  # Default
+        except Exception:
+            return "s3"
+
+    def get_workspace_mount(self, session_id: str) -> "StorageMount":
+        """Get a StorageMount for the session workspace bucket."""
+        from ..job import StorageMount, StorageMode
+
+        bucket_name = f"sciagent-workspace-{session_id}"
+        store = self.get_enabled_store()
+
+        return StorageMount(
+            path="/workspace",
+            bucket=bucket_name,
+            store=store,
+            mode=StorageMode.MOUNT,
+        )
+
     def run(self, job: Job, background: bool = True) -> str:
         """Launch job on cloud via SkyPilot.
 
@@ -118,7 +162,45 @@ class SkyPilotBackend:
         )
         task.set_resources(resources)
 
+        # Add storage mounts if specified
+        if job.requirements.storage:
+            storage_mounts = self._build_storage_mounts(job.requirements.storage)
+            task.set_storage_mounts(storage_mounts)
+
         return task
+
+    def _build_storage_mounts(self, storage_mounts) -> Dict[str, Any]:
+        """Build SkyPilot storage_mounts dict from StorageMount list."""
+        sky = self._get_sky()
+        file_mounts = {}
+
+        for mount in storage_mounts:
+            # Map mode
+            mode_map = {
+                "MOUNT": sky.StorageMode.MOUNT,
+                "COPY": sky.StorageMode.COPY,
+                "MOUNT_CACHED": sky.StorageMode.MOUNT_CACHED,
+            }
+            mode = mode_map.get(mount.mode.value, sky.StorageMode.MOUNT)
+
+            # Map store type to StoreType enum
+            stores = None
+            if mount.store:
+                store_type = getattr(sky.StoreType, mount.store.upper(), None)
+                if store_type:
+                    stores = [store_type]
+
+            # Create SkyPilot Storage object with all params in constructor
+            storage = sky.Storage(
+                name=mount.bucket,
+                source=mount.source,
+                stores=stores,
+                mode=mode,
+            )
+
+            file_mounts[mount.path] = storage
+
+        return file_mounts
 
     def _build_task_yaml(self, job: Job) -> Dict[str, Any]:
         """Build SkyPilot task definition as YAML dict (for debugging/export)."""

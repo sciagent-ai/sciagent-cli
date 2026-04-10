@@ -102,13 +102,26 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "description": "Backend: 'auto' (default) routes based on resources, 'local' for Docker, 'skypilot' for cloud",
                 "default": "auto"
             },
+            "workspace": {
+                "type": "boolean",
+                "description": "Mount shared workspace bucket (for multi-job workflows on skypilot)",
+                "default": False
+            },
+            "session_id": {
+                "type": "string",
+                "description": "Session ID for workspace bucket (auto-generated if not provided)"
+            },
         },
         "required": ["command"]
     }
 
-    def __init__(self, working_dir: str = "."):
+    # Class-level session ID for workspace sharing across jobs
+    _shared_session_id: str = None
+
+    def __init__(self, working_dir: str = ".", session_id: str = None):
         self._working_dir = working_dir
         self._router = None  # Lazy init
+        self._session_id = session_id
 
     def _get_router(self):
         """Lazy init router to avoid import at module load."""
@@ -116,6 +129,20 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             from sciagent.compute.router import ComputeRouter
             self._router = ComputeRouter()
         return self._router
+
+    def _get_session_id(self, session_id: str = None) -> str:
+        """Get or create session ID for workspace sharing."""
+        import uuid
+        if session_id:
+            return session_id
+        if self._session_id:
+            return self._session_id
+        if ComputeTool._shared_session_id:
+            return ComputeTool._shared_session_id
+        # Generate new session ID
+        new_id = uuid.uuid4().hex[:8]
+        ComputeTool._shared_session_id = new_id
+        return new_id
 
     def execute(
         self,
@@ -129,6 +156,8 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         background: bool = True,
         estimate_only: bool = False,
         backend: str = "auto",
+        workspace: bool = False,
+        session_id: str = None,
     ) -> ToolResult:
         """Execute compute job.
 
@@ -143,6 +172,8 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             background: Run in background (default: True)
             estimate_only: Only show cost estimate (default: False)
             backend: 'auto' (default), 'local', or 'skypilot'
+            workspace: Mount shared workspace bucket (default: False)
+            session_id: Session ID for workspace (auto-generated if not provided)
 
         Returns:
             ToolResult with job_id, status, and cost estimate for cloud jobs
@@ -169,18 +200,34 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         else:
             resolved_image = image
 
+        # Build compute requirements
+        requirements = ComputeRequirements(
+            cpus=cpus,
+            memory_gb=memory_gb,
+            gpus=gpus,
+            gpu_type=gpu_type if gpus > 0 else None,
+        )
+
+        # Add workspace storage mount if requested (skypilot only)
+        actual_session_id = None
+        if workspace and (backend == "skypilot" or (backend == "auto" and gpus > 0)):
+            actual_session_id = self._get_session_id(session_id)
+            try:
+                router = self._get_router()
+                if "skypilot" in router.list_backends():
+                    skypilot_backend = router._backends["skypilot"]
+                    workspace_mount = skypilot_backend.get_workspace_mount(actual_session_id)
+                    requirements.storage = [workspace_mount]
+            except Exception:
+                pass  # Fall back to no workspace if unavailable
+
         # Build job
         job = Job(
             service=service or "custom",
             image=resolved_image,
             command=command,
             working_dir=self._working_dir,
-            requirements=ComputeRequirements(
-                cpus=cpus,
-                memory_gb=memory_gb,
-                gpus=gpus,
-                gpu_type=gpu_type if gpus > 0 else None,
-            ),
+            requirements=requirements,
         )
 
         try:
@@ -214,18 +261,24 @@ For long jobs, use bg_wait(job_id) to block until complete."""
 
             if background:
                 # Token-light response for background jobs
-                return ToolResult(
-                    success=True,
-                    output={
-                        "job_id": job_id,
-                        "status": "running",
-                        "backend": selected_backend.name,
-                        "routing_reason": routing_reason,
-                        "cost_estimate": cost_estimate,
-                        "image": resolved_image,
-                        "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
+                output = {
+                    "job_id": job_id,
+                    "status": "running",
+                    "backend": selected_backend.name,
+                    "routing_reason": routing_reason,
+                    "cost_estimate": cost_estimate,
+                    "image": resolved_image,
+                    "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
+                }
+                # Add workspace info if enabled
+                if actual_session_id:
+                    output["workspace"] = {
+                        "session_id": actual_session_id,
+                        "bucket": f"sciagent-workspace-{actual_session_id}",
+                        "mount_path": "/workspace",
                     }
-                )
+                    output["message"] += f" Workspace mounted at /workspace (session: {actual_session_id})"
+                return ToolResult(success=True, output=output)
             else:
                 # Foreground - wait and return result
                 result = router.get_status(job_id)
@@ -265,6 +318,6 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         }
 
 
-def get_tool(working_dir: str = ".") -> ComputeTool:
+def get_tool(working_dir: str = ".", session_id: str = None) -> ComputeTool:
     """Factory function for tool discovery."""
-    return ComputeTool(working_dir)
+    return ComputeTool(working_dir, session_id=session_id)

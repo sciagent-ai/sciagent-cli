@@ -7,7 +7,7 @@ Provides container-based compute job execution with:
 - Integration with existing ProcessManager and bg_* tools
 """
 
-from .job import Job, JobResult, JobStatus, ComputeRequirements
+from .job import Job, JobResult, JobStatus, ComputeRequirements, StorageMount, StorageMode
 from .router import ComputeRouter
 
 __all__ = [
@@ -16,4 +16,6 @@ __all__ = [
     "JobStatus",
     "ComputeRequirements",
     "ComputeRouter",
+    "StorageMount",
+    "StorageMode",
 ]
