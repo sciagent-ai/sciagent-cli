@@ -766,6 +766,7 @@ services:
     packages:
       - biopython
     extends: null
+    architectures: [linux/amd64]
     capabilities:
       - "Nucleotide-nucleotide BLAST (blastn)"
       - "Protein-protein BLAST (blastp)"
