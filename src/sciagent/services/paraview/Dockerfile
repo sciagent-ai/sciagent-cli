@@ -38,7 +38,8 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
       rm /tmp/paraview.tar.gz && \
       mv /opt/ParaView-${PARAVIEW_VERSION}-osmesa-MPI-Linux-Python3.10-x86_64 /opt/paraview && \
       echo "export PATH=/opt/paraview/bin:\$PATH" >> /etc/profile.d/paraview.sh && \
-      echo "export LD_LIBRARY_PATH=/opt/paraview/lib:\$LD_LIBRARY_PATH" >> /etc/profile.d/paraview.sh && \
+      echo "# NOTE: LD_LIBRARY_PATH intentionally NOT set here - breaks system curl" >> /etc/profile.d/paraview.sh && \
+      echo "# ParaView wrapper scripts set LD_LIBRARY_PATH only when running ParaView binaries" >> /etc/profile.d/paraview.sh && \
       echo "export PYTHONPATH=/opt/paraview/lib/python3.10/site-packages:\$PYTHONPATH" >> /etc/profile.d/paraview.sh; \
     elif [ "$TARGETARCH" = "arm64" ]; then \
       # arm64: Use apt package (older version but works)
