@@ -20,6 +20,10 @@ on:
         description: 'Push to ghcr.io'
         type: boolean
         default: true
+      no_cache:
+        description: 'Build without cache'
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -106,7 +110,8 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
             ${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.sha }}
-          cache-from: type=gha,scope=${{ matrix.service }}
+          no-cache: ${{ inputs.no_cache }}
+          cache-from: ${{ inputs.no_cache && '' || format('type=gha,scope={0}', matrix.service) }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
       - name: Job summary

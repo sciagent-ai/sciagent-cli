@@ -52,9 +52,24 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     fi
 
 # Set up environment for amd64 (arm64 uses system paths)
+# NOTE: Do NOT set LD_LIBRARY_PATH globally - ParaView bundles libcurl.so.4
+# which breaks system curl (needed by SkyPilot). Instead, use wrapper scripts.
 ENV PATH="/opt/paraview/bin:${PATH}"
-ENV LD_LIBRARY_PATH="/opt/paraview/lib:${LD_LIBRARY_PATH}"
 ENV PYTHONPATH="/opt/paraview/lib/python3.10/site-packages:${PYTHONPATH}"
+
+# Create wrapper scripts that set LD_LIBRARY_PATH only for ParaView binaries
+RUN if [ -d /opt/paraview/bin ]; then \
+      mkdir -p /usr/local/bin && \
+      for bin in pvpython pvbatch paraview; do \
+        if [ -f /opt/paraview/bin/$bin ]; then \
+          mv /opt/paraview/bin/$bin /opt/paraview/bin/${bin}.real && \
+          echo '#!/bin/bash' > /opt/paraview/bin/$bin && \
+          echo 'export LD_LIBRARY_PATH="/opt/paraview/lib:${LD_LIBRARY_PATH}"' >> /opt/paraview/bin/$bin && \
+          echo 'exec /opt/paraview/bin/'${bin}'.real "$@"' >> /opt/paraview/bin/$bin && \
+          chmod +x /opt/paraview/bin/$bin; \
+        fi; \
+      done; \
+    fi
 
 # Create workspace
 WORKDIR /workspace
