@@ -32,7 +32,10 @@ ENV FOAM_INST=/usr/lib/openfoam/openfoam2012
 
 RUN echo "source ${FOAM_INST}/etc/bashrc" >> /etc/bash.bashrc
 
-# Build deps + system metis (the metisDecomp link target).
+# Build deps + system metis (the metisDecomp link target) + OpenFOAM source.
+# opencfd/openfoam-default:2012 is a runtime image; it does not ship src/ by
+# default, so the openfoam2012-source apt package is required to rebuild the
+# metisDecomp libso below.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         bison \
         flex \
@@ -43,6 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python-is-python3 \
         libmetis-dev \
+        openfoam2012-source \
     && rm -rf /var/lib/apt/lists/*
 
 # ---- Rebuild metisDecomp against system libmetis -------------------------
@@ -50,13 +54,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # decomposePar uses method metis. Setting METIS_ARCH_PATH=/usr (where the
 # apt libmetis-dev headers + .so live) and rebuilding the metisDecomp libso
 # yields a real implementation linked to /usr/lib/x86_64-linux-gnu/libmetis.so.
-RUN bash -c 'set -e; \
+#
+# `set -ex` makes every command echo so a failure inside the bash subshell is
+# attributable from the buildx log. The `find` fallback handles the case where
+# opencfd later ships the source tree at a different path.
+RUN bash -c 'set -ex; \
     source ${FOAM_INST}/etc/bashrc; \
+    : "WM_PROJECT_DIR=$WM_PROJECT_DIR"; \
+    : "FOAM_LIBBIN=$FOAM_LIBBIN"; \
+    SRC="$WM_PROJECT_DIR/src/parallel/decompose/metisDecomp"; \
+    if [ ! -d "$SRC" ]; then \
+      echo "metisDecomp source not at $SRC; searching..."; \
+      SRC="$(find / -type d -name metisDecomp 2>/dev/null | head -1)"; \
+    fi; \
+    [ -n "$SRC" ] && [ -d "$SRC" ] || { \
+      echo "FAIL: metisDecomp source dir not found"; \
+      apt list --installed 2>/dev/null | grep -i openfoam; \
+      exit 1; }; \
+    echo "Using metisDecomp source at: $SRC"; \
     export METIS_ARCH_PATH=/usr; \
-    cd $WM_PROJECT_DIR/src/parallel/decompose/metisDecomp; \
-    wclean; \
+    cd "$SRC"; \
+    wclean || true; \
     wmake libso 2>&1 | tee /tmp/metisDecomp_build.log; \
-    test -f $FOAM_LIBBIN/libmetisDecomp.so'
+    LIB="$(find "$FOAM_LIBBIN" -name libmetisDecomp.so | head -1)"; \
+    [ -n "$LIB" ] || { echo "FAIL: libmetisDecomp.so not produced under $FOAM_LIBBIN"; ls -la "$FOAM_LIBBIN" | head -50; exit 1; }; \
+    echo "metisDecomp rebuilt at: $LIB"'
 
 # ---- swak4Foam, pinned for v2012 compatibility ---------------------------
 # vcompile/p2106 (hg 495d94c458976b821598e28eee8a49ab6f0a4901, 2021-07-02) is
