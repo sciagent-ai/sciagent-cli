@@ -62,29 +62,50 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # (_foamAddLibAuto, etc.) that `return 1` as normal control flow when an
 # optional ThirdParty package is absent. With `set -e` active during sourcing,
 # those returns kill the shell. So we source first WITHOUT strict mode, then
-# turn `set -ex` on for our own commands.
+# turn `set -exo pipefail` on for our own commands. `pipefail` is essential
+# so `wmake ... | tee log` reports wmake's exit code, not tee's.
+#
+# Three things have to be right for the rebuild to succeed:
+#
+#   1. The lnInclude symlink farm under decompositionMethods must contain
+#      metisLikeDecomp.H. The opencfd openfoam2012-source apt package ships
+#      the .C/.H files but not the wmake-generated lnInclude links, so we
+#      populate it explicitly with `wmakeLnInclude -update`.
+#
+#   2. metisDecomp/Make/options uses $(METIS_INC_DIR) and $(METIS_LIB_DIR)
+#      verbatim (verified against gitlab.com/openfoam/core/openfoam @ v2012).
+#      Setting METIS_ARCH_PATH alone does NOT propagate to those vars after
+#      etc/bashrc has already been sourced; we set them directly.
+#
+#   3. Success check must distinguish the real rebuild from the dummy stub.
+#      The base image ships the stub at $FOAM_LIBBIN/dummy/libmetisDecomp.so;
+#      the real rebuild lands at $FOAM_LIBBIN/libmetisDecomp.so (top-level).
+#      Both export Foam::metisDecomp symbols (the stub just throws), so we
+#      use `ldd` for the libmetis dependency as the discriminating check.
 RUN bash -c '\
     source ${FOAM_INST}/etc/bashrc; \
-    set -ex; \
-    : "WM_PROJECT_DIR=$WM_PROJECT_DIR"; \
-    : "FOAM_LIBBIN=$FOAM_LIBBIN"; \
+    set -exo pipefail; \
     SRC="$WM_PROJECT_DIR/src/parallel/decompose/metisDecomp"; \
-    if [ ! -d "$SRC" ]; then \
-      echo "metisDecomp source not at $SRC; searching..."; \
-      SRC="$(find / -type d -name metisDecomp 2>/dev/null | head -1)"; \
-    fi; \
-    [ -n "$SRC" ] && [ -d "$SRC" ] || { \
-      echo "FAIL: metisDecomp source dir not found"; \
-      apt list --installed 2>/dev/null | grep -i openfoam; \
-      exit 1; }; \
-    echo "Using metisDecomp source at: $SRC"; \
+    [ -d "$SRC" ] || { echo "FAIL: $SRC missing (openfoam2012-source not installed?)"; exit 1; }; \
+    DM="$WM_PROJECT_DIR/src/parallel/decompose/decompositionMethods"; \
+    wmakeLnInclude -update "$DM"; \
+    [ -e "$DM/lnInclude/metisLikeDecomp.H" ] \
+        || { echo "FAIL: metisLikeDecomp.H not in $DM/lnInclude (apt source package incomplete?)"; \
+             find "$DM" -name "metisLikeDecomp*" -ls; exit 1; }; \
     export METIS_ARCH_PATH=/usr; \
+    export METIS_INC_DIR=/usr/include; \
+    export METIS_LIB_DIR=/usr/lib/x86_64-linux-gnu; \
     cd "$SRC"; \
     wclean || true; \
     wmake libso 2>&1 | tee /tmp/metisDecomp_build.log; \
-    LIB="$(find "$FOAM_LIBBIN" -name libmetisDecomp.so | head -1)"; \
-    [ -n "$LIB" ] || { echo "FAIL: libmetisDecomp.so not produced under $FOAM_LIBBIN"; ls -la "$FOAM_LIBBIN" | head -50; exit 1; }; \
-    echo "metisDecomp rebuilt at: $LIB"'
+    LIB="$FOAM_LIBBIN/libmetisDecomp.so"; \
+    [ -f "$LIB" ] \
+        || { echo "FAIL: $LIB not produced (the dummy stub at $FOAM_LIBBIN/dummy/ does not count)"; \
+             ls -la "$FOAM_LIBBIN" | head; exit 1; }; \
+    ldd "$LIB" | grep -q "libmetis\\.so" \
+        || { echo "FAIL: $LIB has no libmetis.so dependency (still effectively a stub)"; \
+             ldd "$LIB"; exit 1; }; \
+    echo "OK: real metisDecomp at $LIB, links libmetis"'
 
 # ---- swak4Foam, pinned for v2012 compatibility ---------------------------
 # vcompile/p2106 (hg 495d94c458976b821598e28eee8a49ab6f0a4901, 2021-07-02) is

@@ -41,16 +41,19 @@ for tool in funkySetFields funkyDoCalc blockMesh snappyHexMesh decomposePar \
 done
 echo "OK: utilities present"
 
-# -- 2. Real metisDecomp symbol -------------------------------------------
-say "metisDecomp symbol check"
-LIB="$(find "$FOAM_LIBBIN" -name libmetisDecomp.so | head -1)"
-[ -n "$LIB" ] || fail "libmetisDecomp.so not found under $FOAM_LIBBIN"
-if ! nm -D --defined-only "$LIB" | c++filt | grep -E 'T +Foam::metisDecomp' >/dev/null; then
-  echo "--- defined symbols in $LIB ---"
-  nm -D --defined-only "$LIB" | c++filt
-  fail "$LIB does not export real Foam::metisDecomp symbols (still a stub)"
+# -- 2. Real metisDecomp (not the stub) ----------------------------------
+# Both stub and real libs export the same Foam::metisDecomp symbols, so an
+# nm check cannot distinguish them. The discriminating signal is whether
+# libmetisDecomp.so depends on libmetis.so (only the real rebuild does)
+# and whether it lives at $FOAM_LIBBIN/ (real) vs $FOAM_LIBBIN/dummy/ (stub).
+say "metisDecomp lib check (must be the real rebuild, not the dummy stub)"
+LIB="$FOAM_LIBBIN/libmetisDecomp.so"
+[ -f "$LIB" ] || fail "$LIB missing (only the dummy stub at $FOAM_LIBBIN/dummy/ is present)"
+if ! ldd "$LIB" | grep -q 'libmetis\.so'; then
+  echo "--- ldd $LIB ---"; ldd "$LIB"
+  fail "$LIB does not link against libmetis (still effectively a stub)"
 fi
-echo "OK: real metisDecomp in $LIB"
+echo "OK: real metisDecomp at $LIB, links libmetis"
 
 # -- 3. Linker check on the four buoyant solvers --------------------------
 say "buoyant solver -help check"
