@@ -402,6 +402,23 @@ services:
       # Generate field statistics report
       fieldReport -field U
 
+  openfoam-swak4foam-2012:
+    description: "OpenFOAM v2012 + swak4Foam - matched ABI build, metis decomposition enabled"
+    image: ghcr.io/sciagent-ai/openfoam-swak4foam-2012
+    dockerfile: services/openfoam-swak4foam-2012/Dockerfile
+    license: GPL-3.0
+    runtime: bash
+    workdir: /workspace
+    packages: []
+    extends: openfoam-swak4foam
+    # opencfd/openfoam-default:2012 ships an amd64-only manifest.
+    architectures: [linux/amd64]
+    capabilities:
+      - "All openfoam-swak4foam capabilities, pinned to OpenFOAM v2012"
+      - "metisDecomp linked against system libmetis (not the dummy stub)"
+      - "swak4Foam (groovyBC, funkySetFields, etc.) built against v2012 headers"
+      - "Includes v2012-era BCs and options (outletMappedUniformInletHeatAddition, omegaWallFunction 'binomial2' blending, etc.)"
+
   ngspice:
     description: "NGSpice - Open-source SPICE circuit simulator with PySpice bindings"
     image: ghcr.io/sciagent-ai/ngspice
