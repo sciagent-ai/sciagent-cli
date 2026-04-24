@@ -58,8 +58,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # `set -ex` makes every command echo so a failure inside the bash subshell is
 # attributable from the buildx log. The `find` fallback handles the case where
 # opencfd later ships the source tree at a different path.
-RUN bash -c 'set -ex; \
+# NOTE on `set -e`: OpenFOAM's etc/bashrc invokes internal helper functions
+# (_foamAddLibAuto, etc.) that `return 1` as normal control flow when an
+# optional ThirdParty package is absent. With `set -e` active during sourcing,
+# those returns kill the shell. So we source first WITHOUT strict mode, then
+# turn `set -ex` on for our own commands.
+RUN bash -c '\
     source ${FOAM_INST}/etc/bashrc; \
+    set -ex; \
     : "WM_PROJECT_DIR=$WM_PROJECT_DIR"; \
     : "FOAM_LIBBIN=$FOAM_LIBBIN"; \
     SRC="$WM_PROJECT_DIR/src/parallel/decompose/metisDecomp"; \
@@ -99,8 +105,10 @@ RUN hg clone http://hg.code.sf.net/p/openfoam-extend/swak4Foam /opt/swak4Foam \
 # to every solver/utility without per-user shell tweaks. The v2406 image left
 # them under /root/OpenFOAM/user-v2406/... and forced manual sourcing.
 WORKDIR /opt/swak4Foam
-RUN bash -c 'set -e; \
+# Source bashrc WITHOUT strict mode (see metis step above for rationale).
+RUN bash -c '\
     source ${FOAM_INST}/etc/bashrc; \
+    set -e; \
     export FOAM_USER_LIBBIN=$FOAM_SITE_LIBBIN; \
     export FOAM_USER_APPBIN=$FOAM_SITE_APPBIN; \
     mkdir -p $FOAM_USER_LIBBIN $FOAM_USER_APPBIN; \

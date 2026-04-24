@@ -15,9 +15,13 @@
 # Runs both during image build (Dockerfile RUN) and as a CI step against the
 # built image before push.
 
+# OpenFOAM's etc/bashrc invokes internal helpers (_foamAddLibAuto, ...) that
+# `return 1` as normal control flow when an optional ThirdParty package is
+# absent. With `set -e` active during sourcing, those returns kill the shell.
+# So we source first WITHOUT strict mode, then enable it.
+source /usr/lib/openfoam/openfoam2012/etc/bashrc
 set -euo pipefail
 
-source /usr/lib/openfoam/openfoam2012/etc/bashrc
 export FOAM_USER_LIBBIN="$FOAM_SITE_LIBBIN"
 export FOAM_USER_APPBIN="$FOAM_SITE_APPBIN"
 
