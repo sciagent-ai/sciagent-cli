@@ -70,9 +70,13 @@ jobs:
           echo "matrix={\"service\":$SERVICES_JSON}" >> $GITHUB_OUTPUT
           echo "build_2012=$BUILD_2012" >> $GITHUB_OUTPUT
 
-  # Build each service in parallel
+  # Build each service in parallel.
+  # Skip when the matrix is empty (e.g. the only requested service was
+  # openfoam-swak4foam-2012, which is handled by its dedicated job below) --
+  # otherwise GitHub Actions marks an empty-matrix job as a workflow failure.
   build:
     needs: prepare
+    if: ${{ fromJson(needs.prepare.outputs.matrix).service[0] != null }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
