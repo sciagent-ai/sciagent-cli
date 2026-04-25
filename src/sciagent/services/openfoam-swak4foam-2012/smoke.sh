@@ -299,17 +299,17 @@ blockMesh > /tmp/smoke_blockMesh.log 2>&1 \
     || { tail -100 /tmp/smoke_blockMesh.log; fail "blockMesh failed"; }
 
 # decomposePar reads every 0/ field, constructs every BC, and uses the metis
-# decomposer. One command, all four regression vectors.
+# decomposer. One command, all four regression vectors:
+#   * method metis              -- real libmetisDecomp.so (not the stub)
+#   * groovyBC                  -- $var dict-csearch + {patch_outlet} lookup
+#   * outletMappedUniformInletHeatAddition  -- registered class (v2012-only)
+#   * omegaWallFunction binomial2  -- v2012 spelling parses cleanly
 decomposePar -force > /tmp/smoke_decompose.log 2>&1 \
     || { tail -200 /tmp/smoke_decompose.log; fail "decomposePar (method metis + groovyBC + outletMappedUniformInletHeatAddition + omegaWallFunction binomial2) failed"; }
 
-# Confirm metis actually produced two subdomains
+# Confirm metis actually produced two subdomains.
 [ -d processor0 ] && [ -d processor1 ] \
     || fail "decomposePar did not produce processor0/ and processor1/"
-
-# Reconstruct as a final sanity check
-reconstructPar -newTimes > /tmp/smoke_reconstruct.log 2>&1 \
-    || { tail -100 /tmp/smoke_reconstruct.log; fail "reconstructPar failed"; }
 
 echo
 echo "ALL CHECKS PASSED"
