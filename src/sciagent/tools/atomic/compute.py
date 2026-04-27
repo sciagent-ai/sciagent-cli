@@ -163,6 +163,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "description": "Mount shared workspace bucket (for multi-job workflows on skypilot)",
                 "default": False
             },
+            "workspace_source": {
+                "type": "string",
+                "description": (
+                    "Source for the workspace mount: a cloud URI like 's3://bucket[/prefix]' "
+                    "(reuses that bucket directly) or a local path Sky should sync up. "
+                    "Setting this auto-enables the workspace mount on skypilot."
+                )
+            },
             "session_id": {
                 "type": "string",
                 "description": "Session ID for workspace bucket (auto-generated if not provided)"
@@ -218,6 +226,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         estimate_only: bool = False,
         backend: str = "auto",
         workspace: bool = False,
+        workspace_source: str = None,
         session_id: str = None,
     ) -> ToolResult:
         """Execute compute job.
@@ -234,6 +243,9 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             estimate_only: Only show cost estimate (default: False)
             backend: 'auto' (default), 'local', or 'skypilot'
             workspace: Mount shared workspace bucket (default: False)
+            workspace_source: Optional source URI/path for the workspace mount
+                (e.g. 's3://bucket/prefix' or a local path). When set, the
+                workspace mount is auto-enabled on skypilot.
             session_id: Session ID for workspace (auto-generated if not provided)
 
         Returns:
@@ -287,15 +299,21 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             gpu_type=gpu_type if gpus > 0 else None,
         )
 
-        # Add workspace storage mount if requested (skypilot only)
+        # Add workspace storage mount if requested (skypilot only).
+        # workspace_source implies workspace=True so callers can pass a single
+        # arg (`workspace_source="s3://…"`) without also setting `workspace=True`.
+        wants_workspace = workspace or bool(workspace_source)
         actual_session_id = None
-        if workspace and (backend == "skypilot" or (backend == "auto" and gpus > 0)):
+        if wants_workspace and (backend == "skypilot" or (backend == "auto" and gpus > 0)):
             actual_session_id = self._get_session_id(session_id)
             try:
                 router = self._get_router()
                 if "skypilot" in router.list_backends():
                     skypilot_backend = router._backends["skypilot"]
-                    workspace_mount = skypilot_backend.get_workspace_mount(actual_session_id)
+                    workspace_mount = skypilot_backend.get_workspace_mount(
+                        actual_session_id,
+                        workspace_source=workspace_source,
+                    )
                     requirements.storage = [workspace_mount]
             except Exception:
                 pass  # Fall back to no workspace if unavailable
@@ -359,16 +377,22 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 # Add GPU hint if applicable
                 if gpu_hint == "gpu_beneficial":
                     output["gpu_hint"] = f"Service '{service}' benefits from GPU. Consider adding gpus=1 for 5-13x speedup."
-                # Add workspace info if enabled
-                if actual_session_id:
-                    bucket = f"sciagent-workspace-{actual_session_id}"
-                    output["workspace"] = {
+                # Add workspace info if enabled. Read bucket/mount_path from the
+                # actual StorageMount we attached so cloud-URI workspace_source
+                # values (which override the synthesized bucket name) report
+                # honestly.
+                if actual_session_id and requirements.storage:
+                    mount = requirements.storage[0]
+                    workspace_info = {
                         "session_id": actual_session_id,
-                        "bucket": bucket,
-                        "mount_path": "/workspace",
-                        "cleanup_hint": f"sky storage delete {bucket}",
+                        "bucket": mount.bucket,
+                        "mount_path": mount.path,
+                        "cleanup_hint": f"sky storage delete {mount.bucket}",
                     }
-                    output["message"] += f" Workspace mounted at /workspace (session: {actual_session_id})"
+                    if workspace_source:
+                        workspace_info["source"] = workspace_source
+                    output["workspace"] = workspace_info
+                    output["message"] += f" Workspace mounted at {mount.path} (session: {actual_session_id})"
                 return ToolResult(success=True, output=output)
             else:
                 # Foreground - wait and return result

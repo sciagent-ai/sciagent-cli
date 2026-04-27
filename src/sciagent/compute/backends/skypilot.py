@@ -9,9 +9,40 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from ..job import Job, JobResult, JobStatus, ComputeRequirements
+
+
+# Cloud URI prefix → sciagent store name. Restricted to schemes whose first
+# path segment is unambiguously the bucket name. https:// (Azure blob) is
+# excluded — extracting an Azure container from a URL is not a one-liner.
+_CLOUD_URI_PREFIXES: Dict[str, str] = {
+    "s3://": "s3",
+    "gs://": "gcs",
+    "r2://": "r2",
+}
+
+
+def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (store, bucket) for a recognized cloud URI, else (None, None).
+
+    Examples:
+        s3://my-bucket           -> ("s3", "my-bucket")
+        s3://my-bucket/case/foo  -> ("s3", "my-bucket")
+        /local/path              -> (None, None)
+        None                     -> (None, None)
+    """
+    if not uri or not isinstance(uri, str):
+        return None, None
+    for prefix, store in _CLOUD_URI_PREFIXES.items():
+        if uri.startswith(prefix):
+            rest = uri[len(prefix):]
+            bucket = rest.split("/", 1)[0]
+            if bucket:
+                return store, bucket
+            return None, None
+    return None, None
 
 
 class SkyPilotBackend:
@@ -82,18 +113,38 @@ class SkyPilotBackend:
         except Exception:
             return "s3"
 
-    def get_workspace_mount(self, session_id: str) -> "StorageMount":
-        """Get a StorageMount for the session workspace bucket."""
+    def get_workspace_mount(
+        self,
+        session_id: str,
+        workspace_source: Optional[str] = None,
+    ) -> "StorageMount":
+        """Get a StorageMount for the session workspace bucket.
+
+        Args:
+            session_id: agent session id; used to derive the default bucket name.
+            workspace_source: optional URI or local path passed to sky.Storage as
+                `source`. When it is a recognized cloud URI (s3://bucket[/...]),
+                the bucket name is taken from the URI so sky.Storage doesn't try
+                to upload into a different bucket. Local paths fall back to the
+                session-derived bucket name and get synced up by Sky on launch.
+        """
         from ..job import StorageMount, StorageMode
 
-        bucket_name = f"sciagent-workspace-{session_id}"
-        store = self.get_enabled_store()
+        store_from_uri, bucket_from_uri = _parse_cloud_uri(workspace_source)
+        if bucket_from_uri:
+            bucket_name = bucket_from_uri
+            store = store_from_uri
+        else:
+            bucket_name = f"sciagent-workspace-{session_id}"
+            store = self.get_enabled_store()
 
         return StorageMount(
             path="/workspace",
             bucket=bucket_name,
             store=store,
             mode=StorageMode.MOUNT,
+            source=workspace_source,
+            persistent=True,
         )
 
     def run(self, job: Job, background: bool = True) -> str:
@@ -190,12 +241,15 @@ class SkyPilotBackend:
                 if store_type:
                     stores = [store_type]
 
-            # Create SkyPilot Storage object with all params in constructor
+            # Create SkyPilot Storage object with all params in constructor.
+            # persistent=True keeps the bucket after the cluster is torn down,
+            # which is what users expect for a workspace mount.
             storage = sky.Storage(
                 name=mount.bucket,
                 source=mount.source,
                 stores=stores,
                 mode=mode,
+                persistent=mount.persistent,
             )
 
             file_mounts[mount.path] = storage

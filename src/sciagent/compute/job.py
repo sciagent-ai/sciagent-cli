@@ -25,7 +25,8 @@ class StorageMount:
     bucket: str                         # Bucket name (e.g., sciagent-workspace-abc)
     store: str = "s3"                   # s3, gcs, azure, r2
     mode: StorageMode = StorageMode.MOUNT
-    source: Optional[str] = None        # Local path to sync from (optional)
+    source: Optional[str] = None        # Local path or s3://… URI to sync from (optional)
+    persistent: bool = True             # Keep bucket after job ends
 
 
 class JobStatus(Enum):
