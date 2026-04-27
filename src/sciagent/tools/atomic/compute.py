@@ -200,6 +200,11 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         ComputeTool._shared_session_id = new_id
         return new_id
 
+    @classmethod
+    def set_shared_session(cls, session_id: str) -> None:
+        """Set the agent-wide session id used for workspace bucket naming."""
+        cls._shared_session_id = session_id
+
     def execute(
         self,
         command: str,
@@ -356,10 +361,12 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     output["gpu_hint"] = f"Service '{service}' benefits from GPU. Consider adding gpus=1 for 5-13x speedup."
                 # Add workspace info if enabled
                 if actual_session_id:
+                    bucket = f"sciagent-workspace-{actual_session_id}"
                     output["workspace"] = {
                         "session_id": actual_session_id,
-                        "bucket": f"sciagent-workspace-{actual_session_id}",
+                        "bucket": bucket,
                         "mount_path": "/workspace",
+                        "cleanup_hint": f"sky storage delete {bucket}",
                     }
                     output["message"] += f" Workspace mounted at /workspace (session: {actual_session_id})"
                 return ToolResult(success=True, output=output)

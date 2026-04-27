@@ -108,6 +108,11 @@ class AgentLoop:
             temperature=self.config.temperature,
             max_iterations=self.config.max_iterations
         )
+
+        # Propagate session id so per-session SkyPilot workspace buckets
+        # (sciagent-workspace-{session_id}) are scoped to this agent session.
+        from .tools.atomic.compute import ComputeTool
+        ComputeTool.set_shared_session(self.state.session_id)
         
         # Callbacks
         self._on_tool_start: Optional[Callable] = None
