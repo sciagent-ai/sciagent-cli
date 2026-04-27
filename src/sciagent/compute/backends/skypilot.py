@@ -227,16 +227,20 @@ class SkyPilotBackend:
     def _get_clusters(self, job_id: str) -> list:
         """Get cluster status, handling async API."""
         sky = self._get_sky()
-        # SkyPilot now uses async API - status() returns RequestId
-        request_id = sky.status(cluster_names=[job_id], refresh='NONE')
-        # stream_and_get() returns the actual result
+        from sky.utils.common import StatusRefreshMode
+        # sky.status takes cluster_names: List[str] and refresh: StatusRefreshMode (enum, not str).
+        # AUTO lets Sky refresh stale records (preemption / autostop) without forcing a full refresh.
+        request_id = sky.status(
+            cluster_names=[job_id],
+            refresh=StatusRefreshMode.AUTO,
+        )
         return sky.stream_and_get(request_id)
 
     def _get_queue(self, job_id: str) -> list:
         """Get job queue, handling async API."""
         sky = self._get_sky()
-        # SkyPilot now uses async API - queue() returns RequestId
-        request_id = sky.queue(cluster_name=job_id, refresh='NONE')
+        # sky.queue in 0.12 has no `refresh` kwarg; signature is (cluster_name, skip_finished, all_users).
+        request_id = sky.queue(cluster_name=job_id)
         return sky.stream_and_get(request_id)
 
     def get_status(self, job_id: str) -> JobResult:
@@ -349,9 +353,14 @@ class SkyPilotBackend:
 
             return self.get_status(job_id)
 
-        except Exception as e:
-            # Fall back to cluster status
-            return self.get_status(job_id)
+        except Exception:
+            # get_status() calls back into get_job_status() — falling back to it here
+            # produces unbounded recursion when both queries fail. Surface a transient
+            # PENDING result and let the next poll retry.
+            return JobResult(
+                status=JobStatus.PENDING,
+                summary=f"querying job {job_id}",
+            )
 
     def estimate_cost(self, job: Job, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Estimate cost for running job.
