@@ -25,7 +25,8 @@ class StorageMount:
     bucket: str                         # Bucket name (e.g., sciagent-workspace-abc)
     store: str = "s3"                   # s3, gcs, azure, r2
     mode: StorageMode = StorageMode.MOUNT
-    source: Optional[str] = None        # Local path to sync from (optional)
+    source: Optional[str] = None        # Local path or s3://… URI to sync from (optional)
+    persistent: bool = True             # Keep bucket after job ends
 
 
 class JobStatus(Enum):
@@ -56,6 +57,23 @@ class Job:
     command: str = ""
     working_dir: str = "."
     requirements: ComputeRequirements = field(default_factory=ComputeRequirements)
+
+
+class LaunchError(RuntimeError):
+    """Raised when a Sky launch is rejected before the job can run.
+
+    Carries the underlying message and the would-be cluster name so callers
+    can (a) show a structured failure and (b) attempt cleanup on the
+    partially-provisioned cluster — Sky may have brought an instance up
+    before the setup phase failed (e.g. wrong image without /bin/bash).
+
+    B4 fail-fast contract: a deliberately broken job must surface within
+    the fail-fast budget instead of after a 10-min poll loop.
+    """
+
+    def __init__(self, message: str, cluster_name: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.cluster_name = cluster_name
 
 
 @dataclass

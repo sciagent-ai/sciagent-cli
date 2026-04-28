@@ -7,11 +7,50 @@ Cloud credentials must be configured (aws configure, gcloud auth, etc.)
 
 from __future__ import annotations
 
+import shlex
 import tempfile
+import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
-from ..job import Job, JobResult, JobStatus, ComputeRequirements
+from ..job import Job, JobResult, JobStatus, ComputeRequirements, LaunchError
+
+
+# Default wall-clock budget for the fail-fast launch poll (B4). Picked to
+# match v4.1 §2 B9's "structured error within 60 s" acceptance bar.
+_LAUNCH_FAIL_FAST_BUDGET_SEC: float = 60.0
+_LAUNCH_FAIL_FAST_POLL_SEC: float = 2.0
+
+
+# Cloud URI prefix → sciagent store name. Restricted to schemes whose first
+# path segment is unambiguously the bucket name. https:// (Azure blob) is
+# excluded — extracting an Azure container from a URL is not a one-liner.
+_CLOUD_URI_PREFIXES: Dict[str, str] = {
+    "s3://": "s3",
+    "gs://": "gcs",
+    "r2://": "r2",
+}
+
+
+def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """Return (store, bucket) for a recognized cloud URI, else (None, None).
+
+    Examples:
+        s3://my-bucket           -> ("s3", "my-bucket")
+        s3://my-bucket/case/foo  -> ("s3", "my-bucket")
+        /local/path              -> (None, None)
+        None                     -> (None, None)
+    """
+    if not uri or not isinstance(uri, str):
+        return None, None
+    for prefix, store in _CLOUD_URI_PREFIXES.items():
+        if uri.startswith(prefix):
+            rest = uri[len(prefix):]
+            bucket = rest.split("/", 1)[0]
+            if bucket:
+                return store, bucket
+            return None, None
+    return None, None
 
 
 class SkyPilotBackend:
@@ -82,18 +121,38 @@ class SkyPilotBackend:
         except Exception:
             return "s3"
 
-    def get_workspace_mount(self, session_id: str) -> "StorageMount":
-        """Get a StorageMount for the session workspace bucket."""
+    def get_workspace_mount(
+        self,
+        session_id: str,
+        workspace_source: Optional[str] = None,
+    ) -> "StorageMount":
+        """Get a StorageMount for the session workspace bucket.
+
+        Args:
+            session_id: agent session id; used to derive the default bucket name.
+            workspace_source: optional URI or local path passed to sky.Storage as
+                `source`. When it is a recognized cloud URI (s3://bucket[/...]),
+                the bucket name is taken from the URI so sky.Storage doesn't try
+                to upload into a different bucket. Local paths fall back to the
+                session-derived bucket name and get synced up by Sky on launch.
+        """
         from ..job import StorageMount, StorageMode
 
-        bucket_name = f"sciagent-workspace-{session_id}"
-        store = self.get_enabled_store()
+        store_from_uri, bucket_from_uri = _parse_cloud_uri(workspace_source)
+        if bucket_from_uri:
+            bucket_name = bucket_from_uri
+            store = store_from_uri
+        else:
+            bucket_name = f"sciagent-workspace-{session_id}"
+            store = self.get_enabled_store()
 
         return StorageMount(
             path="/workspace",
             bucket=bucket_name,
             store=store,
             mode=StorageMode.MOUNT,
+            source=workspace_source,
+            persistent=True,
         )
 
     def run(self, job: Job, background: bool = True) -> str:
@@ -106,6 +165,12 @@ class SkyPilotBackend:
 
         Returns:
             cluster_name as job_id for tracking
+
+        Raises:
+            LaunchError: when sky reports the launch FAILED/CANCELLED inside
+                the fail-fast budget. Surfaced verbatim so callers can show
+                a structured error rather than letting the agent burn a 10
+                minute poll loop on a launch Sky already gave up on (B4).
         """
         sky = self._get_sky()
 
@@ -124,6 +189,16 @@ class SkyPilotBackend:
             idle_minutes_to_autostop=10 if background else None,
         )
 
+        # B4 fail-fast: poll the launch's request status briefly so a
+        # controller-side rejection (bad image_id, missing creds, no
+        # capacity) surfaces as a LaunchError within the budget rather
+        # than disappearing into the next status-poll cycle.
+        self._await_launch_or_fail(
+            request_id=request_id,
+            cluster_name=cluster_name,
+            budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
+        )
+
         if not background:
             # Wait for completion using sky.stream_and_get
             # This blocks and streams logs
@@ -133,6 +208,87 @@ class SkyPilotBackend:
                 pass  # Job may have completed or failed
 
         return cluster_name
+
+    @staticmethod
+    def _extract_launch_error_msg(payload, status_name: str, cluster_name: str) -> str:
+        """Pick the most useful error string from a sky api_status payload.
+
+        Sky stores empty payload fields as the literal JSON string ``"null"``
+        in the request DB; reading them back you get the four-character
+        string, not Python ``None``. Treat ``None`` / ``""`` / ``"null"``
+        all as "no info" so we never surface a useless ``LaunchError("null")``.
+        """
+        def _meaningful(value) -> Optional[str]:
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                value = str(value)
+            stripped = value.strip()
+            if not stripped or stripped.lower() == "null":
+                return None
+            return stripped
+
+        return (
+            _meaningful(getattr(payload, "status_msg", None))
+            or _meaningful(getattr(payload, "error", None))
+            or f"sky.launch {status_name.lower()} for cluster {cluster_name} "
+               f"(no detail provided; check `sky api logs <request_id>`)"
+        )
+
+    def _await_launch_or_fail(
+        self,
+        request_id,
+        cluster_name: str,
+        budget_sec: float,
+        poll_interval_sec: float = _LAUNCH_FAIL_FAST_POLL_SEC,
+    ) -> None:
+        """Poll sky.api_status briefly; raise LaunchError on FAILED/CANCELLED.
+
+        B4 fail-fast (v4.2 §C5): sky.stream_and_get has no timeout kwarg, so
+        the audit-described mechanism doesn't exist. We use sky.api_status
+        polling instead — non-blocking, returns the request's pre-execution
+        state, and lets us bail out fast on rejection.
+
+        Returns silently when the launch:
+          - has SUCCEEDED inside the budget (cluster is up), or
+          - is still PENDING/RUNNING when the budget elapses (legitimate
+            long provisioning; caller proceeds with normal status polling).
+
+        Raises LaunchError when sky reports FAILED or CANCELLED.
+        """
+        sky = self._get_sky()
+        try:
+            from sky.server.requests.requests import RequestStatus
+        except Exception:
+            # If the import surface drifts on a future Sky upgrade, fall back
+            # to compare-by-name on the status enum. Better than crashing.
+            RequestStatus = None  # type: ignore
+
+        deadline = time.monotonic() + budget_sec
+        while time.monotonic() < deadline:
+            try:
+                payloads = sky.api_status(request_ids=[request_id])
+            except Exception:
+                # Transient API hiccup — retry within the budget. Don't let
+                # an api_status flake convert into a phantom LaunchError.
+                time.sleep(poll_interval_sec)
+                continue
+
+            if payloads:
+                payload = payloads[0]
+                status = getattr(payload, "status", None)
+                status_name = getattr(status, "name", None) or str(status)
+
+                if status_name in ("FAILED", "CANCELLED"):
+                    msg = self._extract_launch_error_msg(payload, status_name, cluster_name)
+                    raise LaunchError(msg, cluster_name=cluster_name)
+
+                if status_name == "SUCCEEDED":
+                    return
+
+            time.sleep(poll_interval_sec)
+        # Budget exceeded; treat as a still-launching cluster.
+        return
 
     def _build_task(self, job: Job):
         """Build SkyPilot Task object."""
@@ -155,10 +311,22 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
+        # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
+        # user command with the GNU `timeout` utility. shlex.quote handles
+        # arbitrary command shapes (multi-line scripts, embedded quotes).
+        # A timeout_sec <= 0 disables the wrapper for callers who have a
+        # legitimate need to run unbounded.
+        run_command = job.command
+        timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
+        if timeout_sec > 0:
+            run_command = (
+                f"timeout {int(timeout_sec)} bash -c {shlex.quote(job.command)}"
+            )
+
         # Create task
         task = sky.Task(
             name=job.id,
-            run=job.command,
+            run=run_command,
         )
         task.set_resources(resources)
 
@@ -190,12 +358,15 @@ class SkyPilotBackend:
                 if store_type:
                     stores = [store_type]
 
-            # Create SkyPilot Storage object with all params in constructor
+            # Create SkyPilot Storage object with all params in constructor.
+            # persistent=True keeps the bucket after the cluster is torn down,
+            # which is what users expect for a workspace mount.
             storage = sky.Storage(
                 name=mount.bucket,
                 source=mount.source,
                 stores=stores,
                 mode=mode,
+                persistent=mount.persistent,
             )
 
             file_mounts[mount.path] = storage
@@ -227,16 +398,20 @@ class SkyPilotBackend:
     def _get_clusters(self, job_id: str) -> list:
         """Get cluster status, handling async API."""
         sky = self._get_sky()
-        # SkyPilot now uses async API - status() returns RequestId
-        request_id = sky.status(cluster_names=[job_id], refresh='NONE')
-        # stream_and_get() returns the actual result
+        from sky.utils.common import StatusRefreshMode
+        # sky.status takes cluster_names: List[str] and refresh: StatusRefreshMode (enum, not str).
+        # AUTO lets Sky refresh stale records (preemption / autostop) without forcing a full refresh.
+        request_id = sky.status(
+            cluster_names=[job_id],
+            refresh=StatusRefreshMode.AUTO,
+        )
         return sky.stream_and_get(request_id)
 
     def _get_queue(self, job_id: str) -> list:
         """Get job queue, handling async API."""
         sky = self._get_sky()
-        # SkyPilot now uses async API - queue() returns RequestId
-        request_id = sky.queue(cluster_name=job_id, refresh='NONE')
+        # sky.queue in 0.12 has no `refresh` kwarg; signature is (cluster_name, skip_finished, all_users).
+        request_id = sky.queue(cluster_name=job_id)
         return sky.stream_and_get(request_id)
 
     def get_status(self, job_id: str) -> JobResult:
@@ -349,9 +524,14 @@ class SkyPilotBackend:
 
             return self.get_status(job_id)
 
-        except Exception as e:
-            # Fall back to cluster status
-            return self.get_status(job_id)
+        except Exception:
+            # get_status() calls back into get_job_status() — falling back to it here
+            # produces unbounded recursion when both queries fail. Surface a transient
+            # PENDING result and let the next poll retry.
+            return JobResult(
+                status=JobStatus.PENDING,
+                summary=f"querying job {job_id}",
+            )
 
     def estimate_cost(self, job: Job, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Estimate cost for running job.
@@ -455,28 +635,47 @@ class SkyPilotBackend:
             return False
 
     def get_logs(self, job_id: str, tail: int = 100) -> str:
-        """Get job logs from cluster.
+        """Get tail of the latest job log for the given cluster.
+
+        Uses the Sky Python API (``sky.tail_logs``) rather than shelling out
+        to ``sky logs``. The subprocess path is unreliable from inside venvs
+        where the ``sky`` script entry-point isn't on PATH, and silently
+        returns an empty stdout when it fails — exactly the failure mode that
+        makes a FAILED job's ``error_preview`` come back blank. The Python
+        path raises real exceptions we can surface verbatim.
 
         Args:
-            job_id: Cluster name
-            tail: Number of lines to retrieve
+            job_id: Cluster name (M0 uses cluster_name as job_id).
+            tail: Number of trailing log lines to return.
 
         Returns:
-            Log output as string
+            Log content as a string, or a structured error string when the
+            cluster is gone / sky raises. Never None — callers (notably
+            ``get_job_status``) write the return value straight to the saved
+            log file used by ``bg_status``.
         """
         sky = self._get_sky()
+        import io
+
+        buf = io.StringIO()
         try:
-            # Use sky logs to get output
-            import subprocess
-            result = subprocess.run(
-                ["sky", "logs", job_id, "--tail", str(tail)],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            # job_id=None: "latest job on this cluster". Our M0 cluster
+            # carries exactly one job, so this is the right semantics.
+            sky.tail_logs(
+                cluster_name=job_id,
+                job_id=None,
+                follow=False,
+                tail=tail,
+                output_stream=buf,
             )
-            return result.stdout if result.returncode == 0 else result.stderr
+            return buf.getvalue()
         except Exception as e:
-            return f"Error fetching logs: {str(e)}"
+            # Anything we got into the buffer before the exception is still
+            # useful; preserve it ahead of the error tag so partial logs
+            # don't disappear into the ether.
+            partial = buf.getvalue()
+            err_line = f"[get_logs error: {type(e).__name__}: {e}]"
+            return f"{partial}\n{err_line}" if partial else err_line
 
     def _write_logs_to_file(self, job_id: str, logs: str) -> str:
         """Write logs to file for agent to read later.

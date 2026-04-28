@@ -52,22 +52,33 @@ class BgStatusTool:
         return job_id and job_id.startswith("sciagent-")
 
     def _get_compute_status(self, job_id: str) -> Optional[Dict[str, Any]]:
-        """Get status from compute router for SkyPilot jobs."""
+        """Get joined status from local task_index manifest + SkyPilot router.
+
+        Either side may be missing — see compute.task_index.join_status for
+        the four cases. A wholly absent sky_result is recovered to a transient
+        PENDING so the formatter has something to show.
+        """
         try:
             from sciagent.compute.router import ComputeRouter
+            from sciagent.compute.task_index import join_status, read_task
+
             router = ComputeRouter()
-            result = router.get_status(job_id)
-            return {
-                "job_id": job_id,
-                "status": result.status.value,
-                "summary": result.summary,
-                "error_preview": result.error_preview,  # Include actual error content
-                "output_file": result.output_file,  # Log file path for agent to read
-                "backend": "skypilot",
-                "command": "(compute job)",
-                "working_dir": self.working_dir,
-                "start_time": "",
-            }
+            try:
+                sky_result = router.get_status(job_id)
+            except Exception:
+                sky_result = None
+
+            local = read_task(job_id)
+
+            # Caller treats a wholly missing pair as "not found".
+            if sky_result is None and local is None:
+                return None
+
+            joined = join_status(job_id=job_id, local=local, sky_result=sky_result)
+            joined.setdefault("command", "(compute job)")
+            joined.setdefault("working_dir", self.working_dir)
+            joined.setdefault("start_time", joined.get("started_at", ""))
+            return joined
         except Exception:
             return None
 
@@ -193,13 +204,32 @@ class BgStatusTool:
         return '\n'.join(lines)
 
     def _format_compute_status(self, status: Dict[str, Any]) -> str:
-        """Format compute job status for display."""
+        """Format compute job status for display.
+
+        Surfaces local task_index fields (intent / expected_artifacts /
+        owner_pid / started_at) underneath the cloud-side status when they
+        are present in the joined dict.
+        """
         lines = [
             f"Compute Job: {status['job_id']}",
             f"Backend: {status.get('backend', 'skypilot')}",
             f"Status: {status['status']}",
             f"Summary: {status.get('summary', '')}",
         ]
+
+        # Local manifest fields (passthrough — opaque shape per v4.2 §C6).
+        if status.get("session_id"):
+            lines.append(f"Session: {status['session_id']}")
+        if status.get("owner_pid"):
+            lines.append(f"Owner PID: {status['owner_pid']}")
+        if status.get("started_at"):
+            lines.append(f"Started: {status['started_at']}")
+        intent = status.get("intent")
+        if intent:
+            lines.append(f"Intent: {intent}")
+        artifacts = status.get("expected_artifacts")
+        if artifacts:
+            lines.append(f"Expected artifacts: {artifacts}")
 
         # Include error content if present (critical for debugging failures)
         error_preview = status.get('error_preview', '')
