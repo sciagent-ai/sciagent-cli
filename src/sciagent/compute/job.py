@@ -62,10 +62,18 @@ class Job:
 class LaunchError(RuntimeError):
     """Raised when a Sky launch is rejected before the job can run.
 
-    Carries the underlying message so callers can surface a structured failure
-    (B4 fail-fast contract: a deliberately broken job must surface within the
-    fail-fast budget instead of after a 10-min poll loop).
+    Carries the underlying message and the would-be cluster name so callers
+    can (a) show a structured failure and (b) attempt cleanup on the
+    partially-provisioned cluster — Sky may have brought an instance up
+    before the setup phase failed (e.g. wrong image without /bin/bash).
+
+    B4 fail-fast contract: a deliberately broken job must surface within
+    the fail-fast budget instead of after a 10-min poll loop.
     """
+
+    def __init__(self, message: str, cluster_name: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.cluster_name = cluster_name
 
 
 @dataclass

@@ -432,15 +432,22 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             try:
                 job_id = router.run(job, backend=preferred, background=background)
             except LaunchError as launch_exc:
+                # cluster_name is set when the failure came from the SkyPilot
+                # backend; propagate it so callers (and our paid AWS tests)
+                # can clean up a partially-provisioned cluster instead of
+                # leaving it billing on the cloud.
+                rejected_output = {
+                    "service": service,
+                    "image": resolved_image,
+                    "command": command[:100],
+                    "backend_attempted": backend,
+                    "failure_type": "launch_rejected",
+                }
+                if launch_exc.cluster_name:
+                    rejected_output["job_id"] = launch_exc.cluster_name
                 return ToolResult(
                     success=False,
-                    output={
-                        "service": service,
-                        "image": resolved_image,
-                        "command": command[:100],
-                        "backend_attempted": backend,
-                        "failure_type": "launch_rejected",
-                    },
+                    output=rejected_output,
                     error=f"sky.launch rejected: {launch_exc}",
                 )
 

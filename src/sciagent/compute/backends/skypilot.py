@@ -209,6 +209,32 @@ class SkyPilotBackend:
 
         return cluster_name
 
+    @staticmethod
+    def _extract_launch_error_msg(payload, status_name: str, cluster_name: str) -> str:
+        """Pick the most useful error string from a sky api_status payload.
+
+        Sky stores empty payload fields as the literal JSON string ``"null"``
+        in the request DB; reading them back you get the four-character
+        string, not Python ``None``. Treat ``None`` / ``""`` / ``"null"``
+        all as "no info" so we never surface a useless ``LaunchError("null")``.
+        """
+        def _meaningful(value) -> Optional[str]:
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                value = str(value)
+            stripped = value.strip()
+            if not stripped or stripped.lower() == "null":
+                return None
+            return stripped
+
+        return (
+            _meaningful(getattr(payload, "status_msg", None))
+            or _meaningful(getattr(payload, "error", None))
+            or f"sky.launch {status_name.lower()} for cluster {cluster_name} "
+               f"(no detail provided; check `sky api logs <request_id>`)"
+        )
+
     def _await_launch_or_fail(
         self,
         request_id,
@@ -254,12 +280,8 @@ class SkyPilotBackend:
                 status_name = getattr(status, "name", None) or str(status)
 
                 if status_name in ("FAILED", "CANCELLED"):
-                    msg = (
-                        getattr(payload, "status_msg", None)
-                        or getattr(payload, "error", None)
-                        or f"sky.launch {status_name.lower()} for cluster {cluster_name}"
-                    )
-                    raise LaunchError(str(msg))
+                    msg = self._extract_launch_error_msg(payload, status_name, cluster_name)
+                    raise LaunchError(msg, cluster_name=cluster_name)
 
                 if status_name == "SUCCEEDED":
                     return

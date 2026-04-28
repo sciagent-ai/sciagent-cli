@@ -8,8 +8,15 @@ process), then prove a fresh process can re-discover the job using:
   - ``sky.queue(cluster_name=job_id)`` directly (M0 mechanism — NOT
     ``sky.jobs.queue``, which is M1A's job)
 
-This test is **PAID**. Cost ~$0.05 (alpine sleep) and ~3–5 min wall-clock.
-CI gates it behind ``RUN_AWS_TESTS=1``.
+This test is **PAID**. Cost ~$0.05 (small Debian-based container running
+sleep) and ~3–5 min wall-clock. CI gates it behind ``RUN_AWS_TESTS=1``.
+
+Image note: SkyPilot starts the container with ``/bin/bash`` as the
+entrypoint. Alpine-style images without bash will fail with
+``exec: "/bin/bash": stat /bin/bash: no such file or directory`` during
+container start, which our fail-fast poll then (correctly) surfaces as
+a LaunchError. Use a Debian/Ubuntu-based image — ``python:3.11-slim``
+is small, widely cached, and has bash.
 
 To run:
 
@@ -55,8 +62,10 @@ def test_b10_crash_resume_via_manifest_and_sky_queue():
     try:
         # First "process": launch an inexpensive job that sleeps long enough
         # for the resume probe to run while it's still on the cluster.
+        # python:3.11-slim has bash (alpine doesn't — Sky's container
+        # entrypoint is /bin/bash so that combination would launch-fail).
         result = tool.execute(
-            image="alpine",
+            image="python:3.11-slim",
             command="sleep 300",
             cpus=2,
             memory_gb=2,
@@ -65,8 +74,12 @@ def test_b10_crash_resume_via_manifest_and_sky_queue():
             timeout_sec=600,
             intent={"test": "B10", "purpose": "crash-resume"},
         )
+        # On a launch failure, ComputeTool surfaces the would-be cluster
+        # name in output["job_id"] so we can still clean up. Capture it
+        # before failing the assert.
+        if result.output and result.output.get("job_id"):
+            job_id = result.output["job_id"]
         assert result.success, f"launch failed: {result.error}"
-        job_id = result.output["job_id"]
         assert job_id
 
         # Wait briefly for the manifest to land + the cluster to register

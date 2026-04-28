@@ -60,7 +60,9 @@ def _job() -> Job:
 
 def test_fail_fast_raises_launch_error_on_failed_status():
     """B4: when sky.api_status reports FAILED, run() must raise LaunchError
-    with the controller's status message (no silent fallthrough)."""
+    with the controller's status message (no silent fallthrough). The
+    LaunchError carries the would-be cluster_name so callers can clean up
+    a partially-provisioned cluster."""
     backend = _backend_with_mock_sky()
     backend._sky.api_status.return_value = [
         _payload("FAILED", status_msg="image pull failed: no matching manifest")
@@ -72,6 +74,32 @@ def test_fail_fast_raises_launch_error_on_failed_status():
         backend.run(_job(), background=True)
 
     assert "no matching manifest" in str(exc_info.value)
+    assert exc_info.value.cluster_name == "sciagent-abc123"
+
+
+def test_fail_fast_falls_back_when_payload_carries_null_strings():
+    """Sky stores empty payload fields as the literal JSON string ``"null"``.
+    Surfacing that as ``LaunchError("null")`` is useless — the helper must
+    treat ``None``/``""``/``"null"`` as "no info" and fall through to a
+    descriptive default that points the user at ``sky api logs``."""
+    backend = _backend_with_mock_sky()
+    backend._sky.api_status.return_value = [
+        SimpleNamespace(
+            status=SimpleNamespace(name="FAILED"),
+            status_msg=None,
+            error="null",  # the literal four-char string Sky persists
+        )
+    ]
+
+    with patch("sciagent.compute.backends.skypilot.time.sleep"), pytest.raises(
+        LaunchError
+    ) as exc_info:
+        backend.run(_job(), background=True)
+
+    msg = str(exc_info.value)
+    assert msg != "null"
+    assert "sciagent-abc123" in msg
+    assert "sky api logs" in msg.lower()
 
 
 def test_fail_fast_raises_on_cancelled_status():
@@ -158,7 +186,10 @@ def test_compute_tool_surfaces_launch_error_as_structured_failure():
         "Using requested backend: skypilot",
     )
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.0}
-    fake_router.run.side_effect = LaunchError("invalid image_id: docker:bogus:tag")
+    fake_router.run.side_effect = LaunchError(
+        "invalid image_id: docker:bogus:tag",
+        cluster_name="sciagent-cluster42",
+    )
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(
@@ -170,6 +201,9 @@ def test_compute_tool_surfaces_launch_error_as_structured_failure():
     assert result.success is False
     assert result.output["failure_type"] == "launch_rejected"
     assert "invalid image_id" in (result.error or "")
+    # The would-be cluster name must propagate so callers can clean up a
+    # partially-provisioned cluster instead of leaving it billing.
+    assert result.output.get("job_id") == "sciagent-cluster42"
 
 
 if __name__ == "__main__":
