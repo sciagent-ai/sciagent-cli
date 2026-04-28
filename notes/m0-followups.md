@@ -48,6 +48,21 @@ logging story should unify how local (ProcessManager) and cloud
 (SkyPilot) jobs surface `output_file` paths. Today they live in different
 roots (`_logs/background_jobs/` vs `_logs/`).
 
+## 4. B8 fixture bucket holds a smoke-shortened controlDict
+
+**State:** `s3://sciagent-b8-typical-c/system/controlDict` is a smoke variant
+(`endTime 0.05`, `writeInterval 0.05`) — NOT the full production
+`endTime 180.1` from the user's local typical_c. The smoke variant runs
+the full toolchain (mesh → solve → reconstruct → postProcess) in
+~3:46 wall-clock at ~$0.02/run; the production case runs ~9 hours at ~$3.
+
+**Hazard:** re-uploading the canonical case from
+`/Users/shrutibadhwar/Documents/2026/SWERunsPackage/casestudy_fluidmechanics_claudecode_native_execution_6_opus/runs/typical_c/`
+will replace the smoke `controlDict` and quietly turn B8 back into a
+9-hour paid test. Either keep the bucket as-is, or check in the smoke
+`controlDict` as a repo fixture and have B8 upload it before running
+(M2A or standalone follow-up).
+
 ---
 
 This file is intentionally lightweight. Once M0 merges, these become
