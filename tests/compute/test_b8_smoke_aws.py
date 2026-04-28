@@ -68,10 +68,16 @@ def test_b8_openfoam_typical_c_smoke():
         # M0-out-of-scope shortcoming), so we override cpus/memory_gb here
         # to give MPI an instance it isn't fighting against. c6i.2xlarge
         # (8 vCPUs / 16 GB) at ~$0.34/hr fits the ~$0.10-0.15 B8 budget.
+        # `cd /workspace && bash Allrun` instead of bare `bash Allrun`:
+        # SkyPilotBackend._build_task does not yet honor the registry's
+        # `workdir:` field, so the task starts in sky's default CWD (the
+        # user home on the cluster), not at the mount path. Captured as
+        # an M0 follow-up below; the cd-prefix is the in-flight workaround
+        # so this milestone closes.
         result = tool.execute(
             service="openfoam-swak4foam-2012",
             workspace_source=workspace_source,
-            command="bash Allrun",
+            command="cd /workspace && bash Allrun",
             backend="skypilot",
             background=True,
             cpus=8,
