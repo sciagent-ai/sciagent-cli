@@ -28,8 +28,10 @@ are passthrough fields (v4.2 §C6). The OpenFOAM repro happens to populate
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .job import JobResult, JobStatus
 
@@ -65,6 +67,71 @@ def read_task(job_id: str) -> Optional[Dict[str, Any]]:
         return data
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
+
+
+def write_task(record: Dict[str, Any]) -> Path:
+    """Write (or overwrite) a job's manifest. Returns the path written.
+
+    Atomic via tempfile + os.replace so a crashed writer never leaves a
+    half-written manifest that read_task would discard as corrupt JSON.
+    """
+    job_id = record.get("job_id")
+    if not job_id or not isinstance(job_id, str):
+        raise ValueError("manifest must contain a non-empty 'job_id' string")
+
+    target_dir = manifest_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / f"{job_id}.json"
+
+    fd, tmp = tempfile.mkstemp(prefix=f".{job_id}.", suffix=".json", dir=str(target_dir))
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(record, f, indent=2, sort_keys=True)
+        os.replace(tmp, target)
+    except Exception:
+        # Best-effort cleanup of the temp file on any failure.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return target
+
+
+def list_tasks() -> List[Dict[str, Any]]:
+    """Return every well-formed manifest in the task directory.
+
+    Skips unreadable / non-dict files silently — the caller is reaping or
+    sweeping, and noisy raises here would mask the real failures we care
+    about (cluster cleanup outcomes).
+    """
+    target_dir = manifest_dir()
+    if not target_dir.exists():
+        return []
+    out: List[Dict[str, Any]] = []
+    for path in sorted(target_dir.glob("*.json")):
+        if path.name.startswith("."):
+            continue  # in-flight tempfiles
+        try:
+            with path.open("r") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def delete_task(job_id: str) -> bool:
+    """Remove a manifest. Returns True if a file was removed, False otherwise."""
+    path = manifest_path(job_id)
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
 
 
 # Manifest fields that join_status passes through verbatim when present.

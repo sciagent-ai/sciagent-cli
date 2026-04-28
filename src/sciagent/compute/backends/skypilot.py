@@ -7,11 +7,19 @@ Cloud credentials must be configured (aws configure, gcloud auth, etc.)
 
 from __future__ import annotations
 
+import shlex
 import tempfile
+import time
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
-from ..job import Job, JobResult, JobStatus, ComputeRequirements
+from ..job import Job, JobResult, JobStatus, ComputeRequirements, LaunchError
+
+
+# Default wall-clock budget for the fail-fast launch poll (B4). Picked to
+# match v4.1 §2 B9's "structured error within 60 s" acceptance bar.
+_LAUNCH_FAIL_FAST_BUDGET_SEC: float = 60.0
+_LAUNCH_FAIL_FAST_POLL_SEC: float = 2.0
 
 
 # Cloud URI prefix → sciagent store name. Restricted to schemes whose first
@@ -157,6 +165,12 @@ class SkyPilotBackend:
 
         Returns:
             cluster_name as job_id for tracking
+
+        Raises:
+            LaunchError: when sky reports the launch FAILED/CANCELLED inside
+                the fail-fast budget. Surfaced verbatim so callers can show
+                a structured error rather than letting the agent burn a 10
+                minute poll loop on a launch Sky already gave up on (B4).
         """
         sky = self._get_sky()
 
@@ -175,6 +189,16 @@ class SkyPilotBackend:
             idle_minutes_to_autostop=10 if background else None,
         )
 
+        # B4 fail-fast: poll the launch's request status briefly so a
+        # controller-side rejection (bad image_id, missing creds, no
+        # capacity) surfaces as a LaunchError within the budget rather
+        # than disappearing into the next status-poll cycle.
+        self._await_launch_or_fail(
+            request_id=request_id,
+            cluster_name=cluster_name,
+            budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
+        )
+
         if not background:
             # Wait for completion using sky.stream_and_get
             # This blocks and streams logs
@@ -184,6 +208,65 @@ class SkyPilotBackend:
                 pass  # Job may have completed or failed
 
         return cluster_name
+
+    def _await_launch_or_fail(
+        self,
+        request_id,
+        cluster_name: str,
+        budget_sec: float,
+        poll_interval_sec: float = _LAUNCH_FAIL_FAST_POLL_SEC,
+    ) -> None:
+        """Poll sky.api_status briefly; raise LaunchError on FAILED/CANCELLED.
+
+        B4 fail-fast (v4.2 §C5): sky.stream_and_get has no timeout kwarg, so
+        the audit-described mechanism doesn't exist. We use sky.api_status
+        polling instead — non-blocking, returns the request's pre-execution
+        state, and lets us bail out fast on rejection.
+
+        Returns silently when the launch:
+          - has SUCCEEDED inside the budget (cluster is up), or
+          - is still PENDING/RUNNING when the budget elapses (legitimate
+            long provisioning; caller proceeds with normal status polling).
+
+        Raises LaunchError when sky reports FAILED or CANCELLED.
+        """
+        sky = self._get_sky()
+        try:
+            from sky.server.requests.requests import RequestStatus
+        except Exception:
+            # If the import surface drifts on a future Sky upgrade, fall back
+            # to compare-by-name on the status enum. Better than crashing.
+            RequestStatus = None  # type: ignore
+
+        deadline = time.monotonic() + budget_sec
+        while time.monotonic() < deadline:
+            try:
+                payloads = sky.api_status(request_ids=[request_id])
+            except Exception:
+                # Transient API hiccup — retry within the budget. Don't let
+                # an api_status flake convert into a phantom LaunchError.
+                time.sleep(poll_interval_sec)
+                continue
+
+            if payloads:
+                payload = payloads[0]
+                status = getattr(payload, "status", None)
+                status_name = getattr(status, "name", None) or str(status)
+
+                if status_name in ("FAILED", "CANCELLED"):
+                    msg = (
+                        getattr(payload, "status_msg", None)
+                        or getattr(payload, "error", None)
+                        or f"sky.launch {status_name.lower()} for cluster {cluster_name}"
+                    )
+                    raise LaunchError(str(msg))
+
+                if status_name == "SUCCEEDED":
+                    return
+
+            time.sleep(poll_interval_sec)
+        # Budget exceeded; treat as a still-launching cluster.
+        return
 
     def _build_task(self, job: Job):
         """Build SkyPilot Task object."""
@@ -206,10 +289,22 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
+        # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
+        # user command with the GNU `timeout` utility. shlex.quote handles
+        # arbitrary command shapes (multi-line scripts, embedded quotes).
+        # A timeout_sec <= 0 disables the wrapper for callers who have a
+        # legitimate need to run unbounded.
+        run_command = job.command
+        timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
+        if timeout_sec > 0:
+            run_command = (
+                f"timeout {int(timeout_sec)} bash -c {shlex.quote(job.command)}"
+            )
+
         # Create task
         task = sky.Task(
             name=job.id,
-            run=job.command,
+            run=run_command,
         )
         task.set_resources(resources)
 

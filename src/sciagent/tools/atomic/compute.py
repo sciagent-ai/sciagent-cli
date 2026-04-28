@@ -175,6 +175,22 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "type": "string",
                 "description": "Session ID for workspace bucket (auto-generated if not provided)"
             },
+            "intent": {
+                "type": "object",
+                "description": (
+                    "Opaque intent blob recorded in the task manifest verbatim "
+                    "(e.g. {paper, case, run} for a reproduction; {} or omitted "
+                    "for ad-hoc jobs). Not validated."
+                )
+            },
+            "expected_artifacts": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Opaque list of expected output paths recorded in the manifest. "
+                    "Used by downstream verification; never validated here."
+                )
+            },
         },
         "required": ["command"]
     }
@@ -213,6 +229,47 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         """Set the agent-wide session id used for workspace bucket naming."""
         cls._shared_session_id = session_id
 
+    @staticmethod
+    def _write_session_manifest(
+        job_id: str,
+        session_id: Optional[str],
+        intent: Optional[Dict[str, Any]],
+        expected_artifacts: Optional[list],
+        command: str,
+        image: Optional[str],
+        service: Optional[str],
+        timeout_sec: int,
+    ) -> None:
+        """B7: write the per-job manifest to ~/.sciagent/tasks/<job_id>.json.
+
+        Best-effort: a write failure is logged but not raised. The job is
+        already running on Sky; losing the local manifest only means the
+        resume + reaper paths won't see it, which is preferable to failing
+        the user-visible compute_run on a manifest write error.
+        """
+        try:
+            import os
+            from datetime import datetime, timezone
+            from sciagent.compute.task_index import write_task
+
+            record: Dict[str, Any] = {
+                "job_id": job_id,
+                "session_id": session_id,
+                # intent / expected_artifacts are opaque-by-design (v4.2 §C6).
+                "intent": intent,
+                "expected_artifacts": list(expected_artifacts) if expected_artifacts else [],
+                "owner_pid": os.getpid(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "command": command,
+                "image": image,
+                "service": service,
+                "timeout_sec": int(timeout_sec) if timeout_sec else 0,
+            }
+            write_task(record)
+        except Exception:
+            # Best-effort; never break the launch path on a manifest write.
+            pass
+
     def execute(
         self,
         command: str,
@@ -228,6 +285,9 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         workspace: bool = False,
         workspace_source: str = None,
         session_id: str = None,
+        intent: Dict[str, Any] = None,
+        expected_artifacts: list = None,
+        timeout_sec: int = None,
     ) -> ToolResult:
         """Execute compute job.
 
@@ -247,11 +307,16 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 (e.g. 's3://bucket/prefix' or a local path). When set, the
                 workspace mount is auto-enabled on skypilot.
             session_id: Session ID for workspace (auto-generated if not provided)
+            intent: Opaque dict recorded in the manifest verbatim (B7).
+            expected_artifacts: Opaque list of expected outputs (B7).
+            timeout_sec: Max runtime in seconds (B6). Defaults to the
+                ComputeRequirements default (3600). Pass 0 to disable the
+                on-VM timeout wrapper.
 
         Returns:
             ToolResult with job_id, status, and cost estimate for cloud jobs
         """
-        from sciagent.compute.job import Job, ComputeRequirements, JobStatus
+        from sciagent.compute.job import Job, ComputeRequirements, JobStatus, LaunchError
 
         # Validate: need service OR image
         if not service and not image:
@@ -291,13 +356,18 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         else:
             resolved_image = image
 
-        # Build compute requirements
-        requirements = ComputeRequirements(
-            cpus=cpus,
-            memory_gb=memory_gb,
-            gpus=gpus,
-            gpu_type=gpu_type if gpus > 0 else None,
-        )
+        # Build compute requirements. timeout_sec keeps its existing default
+        # (3600s) when caller doesn't override; passing 0 disables the on-VM
+        # timeout wrapper (B6 / v4.2 §C2).
+        requirements_kwargs: Dict[str, Any] = {
+            "cpus": cpus,
+            "memory_gb": memory_gb,
+            "gpus": gpus,
+            "gpu_type": gpu_type if gpus > 0 else None,
+        }
+        if timeout_sec is not None:
+            requirements_kwargs["timeout_sec"] = int(timeout_sec)
+        requirements = ComputeRequirements(**requirements_kwargs)
 
         # Add workspace storage mount if requested (skypilot only).
         # workspace_source implies workspace=True so callers can pass a single
@@ -355,8 +425,40 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                         output["gpu_note"] = f"Service '{service}' benefits from GPU (5-13x speedup). Add gpus=1 for better performance."
                 return ToolResult(success=True, output=output)
 
-            # Run the job
-            job_id = router.run(job, backend=preferred, background=background)
+            # Run the job. A LaunchError surfaced from the backend's fail-fast
+            # poll (B4) means Sky rejected the launch outright — return a
+            # structured failure now instead of letting the agent burn a
+            # 10-min status-poll loop.
+            try:
+                job_id = router.run(job, backend=preferred, background=background)
+            except LaunchError as launch_exc:
+                return ToolResult(
+                    success=False,
+                    output={
+                        "service": service,
+                        "image": resolved_image,
+                        "command": command[:100],
+                        "backend_attempted": backend,
+                        "failure_type": "launch_rejected",
+                    },
+                    error=f"sky.launch rejected: {launch_exc}",
+                )
+
+            # B7: after a successful skypilot launch, write a session manifest
+            # so bg_status (PR #3 join) and the orphan sweep / reaper can find
+            # the job after a process restart. Local jobs are tracked by
+            # ProcessManager already; no double-bookkeeping for them.
+            if selected_backend.name == "skypilot":
+                self._write_session_manifest(
+                    job_id=job_id,
+                    session_id=actual_session_id,
+                    intent=intent,
+                    expected_artifacts=expected_artifacts,
+                    command=command,
+                    image=resolved_image,
+                    service=service,
+                    timeout_sec=requirements.timeout_sec,
+                )
 
             if background:
                 # Token-light response for background jobs

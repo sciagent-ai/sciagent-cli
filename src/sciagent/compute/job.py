@@ -59,6 +59,15 @@ class Job:
     requirements: ComputeRequirements = field(default_factory=ComputeRequirements)
 
 
+class LaunchError(RuntimeError):
+    """Raised when a Sky launch is rejected before the job can run.
+
+    Carries the underlying message so callers can surface a structured failure
+    (B4 fail-fast contract: a deliberately broken job must surface within the
+    fail-fast budget instead of after a 10-min poll loop).
+    """
+
+
 @dataclass
 class JobResult:
     """
