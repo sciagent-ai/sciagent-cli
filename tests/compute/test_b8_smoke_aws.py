@@ -63,12 +63,19 @@ def test_b8_openfoam_typical_c_smoke():
     tool = ComputeTool()
     job_id = None
     try:
+        # typical_c's Allrun runs NP=8 MPI ranks. The registry's `extends:`
+        # chain isn't honored by _get_service_resources today (a known
+        # M0-out-of-scope shortcoming), so we override cpus/memory_gb here
+        # to give MPI an instance it isn't fighting against. c6i.2xlarge
+        # (8 vCPUs / 16 GB) at ~$0.34/hr fits the ~$0.10-0.15 B8 budget.
         result = tool.execute(
             service="openfoam-swak4foam-2012",
             workspace_source=workspace_source,
             command="bash Allrun",
             backend="skypilot",
             background=True,
+            cpus=8,
+            memory_gb=16,
             timeout_sec=timeout_sec,
             intent={
                 "test": "B8",
@@ -76,10 +83,15 @@ def test_b8_openfoam_typical_c_smoke():
                 "service": "openfoam-swak4foam-2012",
             },
             expected_artifacts=[
-                "log.icoFoam",
-                "postProcessing/probes/0/U",
+                "logs/EXIT_CODE",
+                "logs/10_solver.log",
+                "postProcessing",
             ],
         )
+        # On a launch failure, ComputeTool surfaces the would-be cluster
+        # name in output["job_id"] so we can still clean up.
+        if result.output and result.output.get("job_id"):
+            job_id = result.output["job_id"]
         assert result.success, f"launch failed: {result.error}"
         job_id = result.output["job_id"]
         assert job_id, "ComputeTool returned no job_id"

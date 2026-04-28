@@ -635,28 +635,47 @@ class SkyPilotBackend:
             return False
 
     def get_logs(self, job_id: str, tail: int = 100) -> str:
-        """Get job logs from cluster.
+        """Get tail of the latest job log for the given cluster.
+
+        Uses the Sky Python API (``sky.tail_logs``) rather than shelling out
+        to ``sky logs``. The subprocess path is unreliable from inside venvs
+        where the ``sky`` script entry-point isn't on PATH, and silently
+        returns an empty stdout when it fails — exactly the failure mode that
+        makes a FAILED job's ``error_preview`` come back blank. The Python
+        path raises real exceptions we can surface verbatim.
 
         Args:
-            job_id: Cluster name
-            tail: Number of lines to retrieve
+            job_id: Cluster name (M0 uses cluster_name as job_id).
+            tail: Number of trailing log lines to return.
 
         Returns:
-            Log output as string
+            Log content as a string, or a structured error string when the
+            cluster is gone / sky raises. Never None — callers (notably
+            ``get_job_status``) write the return value straight to the saved
+            log file used by ``bg_status``.
         """
         sky = self._get_sky()
+        import io
+
+        buf = io.StringIO()
         try:
-            # Use sky logs to get output
-            import subprocess
-            result = subprocess.run(
-                ["sky", "logs", job_id, "--tail", str(tail)],
-                capture_output=True,
-                text=True,
-                timeout=30,
+            # job_id=None: "latest job on this cluster". Our M0 cluster
+            # carries exactly one job, so this is the right semantics.
+            sky.tail_logs(
+                cluster_name=job_id,
+                job_id=None,
+                follow=False,
+                tail=tail,
+                output_stream=buf,
             )
-            return result.stdout if result.returncode == 0 else result.stderr
+            return buf.getvalue()
         except Exception as e:
-            return f"Error fetching logs: {str(e)}"
+            # Anything we got into the buffer before the exception is still
+            # useful; preserve it ahead of the error tag so partial logs
+            # don't disappear into the ether.
+            partial = buf.getvalue()
+            err_line = f"[get_logs error: {type(e).__name__}: {e}]"
+            return f"{partial}\n{err_line}" if partial else err_line
 
     def _write_logs_to_file(self, job_id: str, logs: str) -> str:
         """Write logs to file for agent to read later.
