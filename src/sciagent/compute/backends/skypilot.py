@@ -388,17 +388,32 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
-        # M0 follow-up #1: honor the registry's ``workdir:`` by prepending
-        # ``cd <workdir> && `` to the run command. Sky's managed jobs run
-        # from the cluster user's home by default, so a bare ``bash Allrun``
-        # against an /workspace mount fails with "No such file or directory"
-        # without this. Skip the prepend when the caller already starts the
-        # command with ``cd `` (idempotent — B8's old workaround keeps
-        # working without a doubled cd).
+        # M0 follow-up #1: cd into the workspace mount before running the
+        # command. Sky's managed jobs run from the cluster user's home by
+        # default, ignoring the image's WORKDIR directive — so without this,
+        # ``bash Allrun`` against an /workspace mount fails with "No such
+        # file or directory" (B8 #2 incident).
+        #
+        # We drive off the actual storage-mount path, NOT the registry's
+        # ``workdir:`` hint, because the registry's hint and the mount path
+        # can drift (registry says /workspace; a future caller mounts at
+        # /data). The mount path is the only field guaranteed to point at
+        # data the user just attached. Side benefits:
+        #   - image-only callers with workspace_source= also get the cd
+        #     (they'd be broken by a registry-driven approach since the
+        #     registry isn't consulted without a service).
+        #   - service-only callers without a mount keep the M0 default
+        #     (Sky's home CWD), so images whose Dockerfile WORKDIR isn't
+        #     /workspace (e.g. rcwa: /opt) don't regress.
+        #
+        # Idempotent against M0 cd-prefixed callers: if the command already
+        # starts with ``cd ``, we trust the caller and don't double-prepend.
         run_command = job.command
-        container_workdir = getattr(job, "container_workdir", None)
-        if container_workdir and not run_command.lstrip().startswith("cd "):
-            run_command = f"cd {shlex.quote(container_workdir)} && {run_command}"
+        storage_mounts = getattr(job.requirements, "storage", None) or []
+        if storage_mounts and not run_command.lstrip().startswith("cd "):
+            mount_path = storage_mounts[0].path
+            if mount_path:
+                run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
 
         # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
         # user command with the GNU `timeout` utility. shlex.quote handles

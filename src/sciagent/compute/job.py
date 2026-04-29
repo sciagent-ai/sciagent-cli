@@ -58,23 +58,12 @@ class ComputeRequirements:
 
 @dataclass
 class Job:
-    """A compute job to be executed in a container.
-
-    ``working_dir`` is the *host* working directory (used by LocalBackend's
-    bind-mount). ``container_workdir`` is the *in-container* CWD the run
-    command should execute from — typically the registry's ``workdir:``
-    field (e.g. ``/workspace`` for OpenFOAM-family services). Sky's managed
-    jobs run commands from the cluster user's home by default, ignoring
-    the image's ``WORKDIR`` directive, so the backend must cd into
-    ``container_workdir`` explicitly. None means "use whatever cwd the
-    backend defaults to" (the M0 behavior).
-    """
+    """A compute job to be executed in a container."""
     id: str = field(default_factory=lambda: f"job-{uuid.uuid4().hex[:8]}")
     service: str = ""
     image: str = ""
     command: str = ""
     working_dir: str = "."
-    container_workdir: Optional[str] = None
     requirements: ComputeRequirements = field(default_factory=ComputeRequirements)
 
 

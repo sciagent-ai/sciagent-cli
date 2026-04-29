@@ -62,7 +62,63 @@ the backend directly to update `task_index`, it should call
 sees the integer. Document this in the M2A interface contract; today's
 single caller (ComputeTool) already does the right thing.
 
-## 4. `bg_kill`'s `force=True` is silently ignored for managed jobs
+## 4. Registry's `workdir:` field is currently advisory / redundant
+
+**Status:** by design after the M1A 3c-revision; capture for future use.
+
+**Where:** `src/sciagent/services/registry.yaml` declares `workdir: /workspace`
+on every service. M1A initially read this field to drive an in-container
+cd-prepend, but the registry-driven approach was unsafe in two ways:
+
+  - drift between the registry hint and the actual storage-mount path
+    (registry says `/workspace`, a future caller mounts at `/data` →
+    cd-prepend goes to the wrong place);
+  - missed the image-only-with-workspace-mount case (no service → no
+    registry lookup → no cd-prepend even when the user mounted data).
+
+The 3c revision drives cd off the **mount path** in `Job.requirements.storage`
+instead. The registry's `workdir:` field is now only enforced by convention:
+``get_workspace_mount`` happens to default the mount to `/workspace`, which
+matches every service's registry declaration. Nothing in sciagent reads
+`workdir:` at runtime today.
+
+**Trigger to land:** when the project introduces a service that wants its
+workspace mount at a non-`/workspace` path (e.g. an image whose tooling
+expects `/data` or `/scratch`). The clean future state: have
+`get_workspace_mount(service)` look up the service's registry workdir as
+the default mount path. Single source of truth; both sides stay aligned.
+
+**Until then:** the field is harmless but unused.
+
+## 5. Lesson for M1B's provenance schema (record resolved AND original commands)
+
+**Status:** design hint, not a deferred item.
+
+The 3c revision means the backend rewrites the LLM's command before
+running it (cd-prepend, timeout-wrap). When M1B lands the durable
+provenance log, each cloud-job-launched event should record **both**:
+
+  - ``command_original``: the command as the LLM/atomic-tool layer passed it.
+  - ``command_resolved``: the command the backend actually ran on the cluster.
+
+A cross-LLM verifier reading the log needs to see what the agent intended
+vs. what was executed. They diverge by mechanical, deterministic rules
+(cd, timeout) but the divergence is real and worth surfacing — especially
+if a verification step needs to attribute a failure to "agent's logic" vs
+"backend wrapping."
+
+## 6. Lesson for M2A's watch_index (paths reference the mount, not /workspace)
+
+**Status:** design hint, not a deferred item.
+
+Watches of kind `artifact_present` (per v4.4 §5.2) target paths inside
+the cluster filesystem. After the 3c revision, the mount path is the
+canonical anchor, not `/workspace`. M2A's watch records should express
+artifact paths *relative to the mount* (or use the actual mount path as
+recorded in the task_index manifest), so a future service mounting at
+`/data` doesn't quietly miss its artifacts.
+
+## 7. `bg_kill`'s `force=True` is silently ignored for managed jobs
 
 **Status:** minor wrapper-too-thin; flag for M2A or doc-only fix.
 

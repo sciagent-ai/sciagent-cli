@@ -50,30 +50,6 @@ def _load_service_registry() -> Dict[str, Any]:
         return {}
 
 
-def _get_service_workdir(service: str) -> Optional[str]:
-    """Return the in-container ``workdir:`` declared for a service.
-
-    Walks the same ``extends:`` chain as ``_get_service_resources`` so a
-    leaf without its own ``workdir:`` inherits the nearest ancestor's
-    declaration. Leaf wins by virtue of being the first match.
-
-    Returns None when no service in the chain declares a workdir, leaving
-    the backend free to use whatever default Sky picks (the M0 behavior).
-    """
-    registry = _load_service_registry()
-    services = registry.get("services", {})
-
-    seen: set = set()
-    cursor = service
-    while cursor and cursor not in seen and cursor in services:
-        seen.add(cursor)
-        wd = services[cursor].get("workdir")
-        if wd:
-            return wd
-        cursor = services[cursor].get("extends")
-    return None
-
-
 def _get_service_resources(service: str) -> Dict[str, Any]:
     """Get resource hints for a service from the registry.
 
@@ -470,23 +446,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             except Exception:
                 pass  # Fall back to no workspace if unavailable
 
-        # Build job. ``container_workdir`` is the in-container CWD declared
-        # in the registry (via the ``workdir:`` field, walked through the
-        # extends: chain). Sky's managed jobs run from the cluster user's
-        # home by default, ignoring the image's WORKDIR directive — so
-        # without this, ``bash Allrun`` against an /workspace mount fails
-        # with "Allrun: No such file or directory" (M0 follow-up #1, B8
-        # workaround). The backend prepends ``cd <workdir> && `` only when
-        # the caller hasn't already done so.
-        container_workdir: Optional[str] = (
-            _get_service_workdir(service) if service else None
-        )
+        # Build job. The backend cd's into the workspace mount (when one is
+        # attached) before running the command — see SkyPilotBackend._build_task
+        # for the rationale (M0 follow-up #1).
         job = Job(
             service=service or "custom",
             image=resolved_image,
             command=command,
             working_dir=self._working_dir,
-            container_workdir=container_workdir,
             requirements=requirements,
         )
 

@@ -1,100 +1,42 @@
-"""Tests for M0 follow-up #1: registry's ``workdir:`` honored by the backend.
+"""Tests for M0 follow-up #1: cd into the workspace mount before running.
 
 B8 #2 (sciagent-job-fe0e4e60) failed with ``bash: Allrun: No such file or
 directory`` because Sky's managed jobs run from the cluster user's home
-by default, ignoring the OpenFOAM image's ``WORKDIR /workspace``. The M0
-workaround was to require every caller to prefix ``cd /workspace && ``.
-M1A reads the registry's ``workdir:`` field (walking the extends chain)
-and prepends the cd inside ``_build_task`` so the registry stops needing
-per-caller workarounds.
+by default, ignoring the image's ``WORKDIR /workspace`` even when data
+is mounted there. The M0 workaround required every caller to prefix
+``cd /workspace && `` themselves.
+
+M1A drives the cd off the **actual storage-mount path**, NOT the registry's
+``workdir:`` hint. Driving off the mount is correct because:
+
+  - the registry's hint and the mount path can drift (registry says
+    /workspace; a future caller mounts at /data) — only the mount path is
+    guaranteed to point at user data;
+  - image-only callers (no service in the registry) with workspace_source=
+    also get the cd-prepend, which a registry-driven approach would miss;
+  - service-only callers without a mount keep Sky's default CWD, so
+    images whose Dockerfile WORKDIR isn't /workspace (e.g. rcwa: /opt)
+    don't regress with a phantom ``cd /workspace`` that fails.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 import pytest
 
 from sciagent.compute.backends.skypilot import SkyPilotBackend
-from sciagent.compute.job import ComputeRequirements, Job
-from sciagent.tools.atomic import compute as compute_mod
-from sciagent.tools.atomic.compute import _get_service_workdir
-
-
-@pytest.fixture(autouse=True)
-def _clear_registry_cache():
-    compute_mod._registry_cache.clear()
-    yield
-    compute_mod._registry_cache.clear()
-
-
-def _patched_registry(registry: dict):
-    return patch.object(
-        compute_mod, "_load_service_registry", return_value=registry
-    )
-
-
-# ---- _get_service_workdir chain walk -------------------------------------
-
-
-def test_workdir_walks_extends_chain_leaf_wins():
-    """A leaf without its own workdir: inherits from the nearest ancestor;
-    when the leaf declares one explicitly, leaf wins."""
-    registry = {
-        "defaults": {},
-        "services": {
-            "root": {"extends": None, "workdir": "/workspace"},
-            "mid": {"extends": "root"},  # inherits /workspace
-            "leaf-override": {"extends": "mid", "workdir": "/data"},
-        },
-    }
-    with _patched_registry(registry):
-        assert _get_service_workdir("root") == "/workspace"
-        assert _get_service_workdir("mid") == "/workspace"
-        assert _get_service_workdir("leaf-override") == "/data"
-
-
-def test_workdir_returns_none_when_no_chain_declares_one():
-    """If nobody in the chain declares workdir, the helper returns None
-    so the backend falls back to Sky's default CWD (M0 behavior)."""
-    registry = {
-        "defaults": {},
-        "services": {
-            "no-wd": {"extends": None},
-        },
-    }
-    with _patched_registry(registry):
-        assert _get_service_workdir("no-wd") is None
-        assert _get_service_workdir("not-in-registry") is None
-
-
-def test_workdir_chain_terminates_on_cycle():
-    """Hand-edited registry safety: a cycle must not infinite-loop."""
-    registry = {
-        "defaults": {},
-        "services": {
-            "a": {"extends": "b"},
-            "b": {"extends": "a", "workdir": "/x"},
-        },
-    }
-    with _patched_registry(registry):
-        # 'a' is visited first, then 'b' (which has the workdir).
-        assert _get_service_workdir("a") == "/x"
-
-
-def test_workdir_real_registry_openfoam_chain():
-    """Integration: the on-disk registry's openfoam chain resolves to /workspace."""
-    assert _get_service_workdir("openfoam-swak4foam-2012") == "/workspace"
-
-
-# ---- _build_task prepends cd ---------------------------------------------
+from sciagent.compute.job import (
+    ComputeRequirements,
+    Job,
+    StorageMode,
+    StorageMount,
+)
 
 
 def _build_run_command(job: Job) -> str:
     """Drive _build_task's run-command synthesis without touching real Sky.
 
     sky.Task is mocked away; we just inspect the run= kwarg the backend
-    passes in. That's the surface that decides whether ``cd <workdir> &&``
+    passes in. That's the surface that decides whether a ``cd <mount> &&``
     appears.
     """
     backend = SkyPilotBackend()
@@ -113,47 +55,93 @@ def _build_run_command(job: Job) -> str:
 
     fake_sky = type("FS", (), {})()
     fake_sky.Task = _FakeTask
-    # Resources is a no-op constructor; we don't inspect it here.
     fake_sky.Resources = lambda **kwargs: None
+    fake_sky.StorageMode = StorageMode  # _build_storage_mounts dereferences this
+    fake_sky.Storage = lambda **kwargs: None
+    fake_sky.StoreType = type("ST", (), {"S3": "s3"})
     backend._sky = fake_sky
 
     backend._build_task(job)
     return captured["run"]
 
 
-def test_build_task_prepends_cd_when_container_workdir_set():
+def _mount(path: str = "/workspace") -> StorageMount:
+    return StorageMount(path=path, bucket="test-bucket", store="s3")
+
+
+# ---- mount-attached: cd is prepended ----------------------------------
+
+
+def test_workspace_mount_at_workspace_triggers_cd():
+    """The B8 case: openfoam-style mount at /workspace, bare bash Allrun."""
     job = Job(
         id="abc",
         service="openfoam",
-        image="ghcr.io/sciagent-ai/openfoam",
         command="bash Allrun",
-        container_workdir="/workspace",
-        requirements=ComputeRequirements(timeout_sec=0),
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace")],
+        ),
     )
     run = _build_run_command(job)
     assert run == "cd /workspace && bash Allrun"
 
 
-def test_build_task_does_not_double_prepend_when_caller_already_cd():
-    """Idempotent against the M0 workaround: if the caller already starts
-    with ``cd ...``, we trust them and don't prepend a second cd. Keeps
-    legacy callers green during the migration."""
+def test_image_only_call_with_mount_also_gets_cd():
+    """Image-only caller with workspace_source= attaches a mount the same
+    way; cd must apply. The registry-driven version of this fix would
+    have missed this case (no service -> no registry lookup -> no cd)."""
     job = Job(
         id="abc",
-        command="cd /workspace && bash Allrun",
-        container_workdir="/workspace",
-        requirements=ComputeRequirements(timeout_sec=0),
+        image="custom:tag",  # no service
+        command="bash run.sh",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace")],
+        ),
     )
     run = _build_run_command(job)
-    assert run == "cd /workspace && bash Allrun"
+    assert run == "cd /workspace && bash run.sh"
 
 
-def test_build_task_no_prepend_when_container_workdir_unset():
-    """Callers that don't set container_workdir (image-only calls, or
-    services without workdir: in the registry) get the M0 behavior:
-    Sky's default CWD."""
+def test_non_workspace_mount_path_drives_cd():
+    """A future mount at /data must cd into /data, not /workspace.
+    This is the drift the registry-hint approach couldn't handle."""
     job = Job(
         id="abc",
+        service="custom-service",
+        command="python analyze.py",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/data")],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run == "cd /data && python analyze.py"
+
+
+# ---- no mount: M0 default CWD preserved -------------------------------
+
+
+def test_service_call_without_mount_does_not_cd():
+    """compute_run(service="scipy-base", command="python -c '...'") with
+    no workspace_source must not get a phantom cd. Sky's default CWD
+    works for inline commands; rcwa-style images whose WORKDIR isn't
+    /workspace don't regress to a failing ``cd /workspace``."""
+    job = Job(
+        id="abc",
+        service="scipy-base",
+        command="python -c 'print(1+1)'",
+        requirements=ComputeRequirements(timeout_sec=0),  # no storage
+    )
+    run = _build_run_command(job)
+    assert run == "python -c 'print(1+1)'"
+
+
+def test_image_only_call_without_mount_does_not_cd():
+    job = Job(
+        id="abc",
+        image="alpine",
         command="echo hi",
         requirements=ComputeRequirements(timeout_sec=0),
     )
@@ -161,30 +149,71 @@ def test_build_task_no_prepend_when_container_workdir_unset():
     assert run == "echo hi"
 
 
-def test_build_task_cd_lives_inside_timeout_wrapper():
-    """The on-VM timeout wrapper must wrap the cd+command together, so the
-    timeout applies to the whole pipeline (not just the cd, which is
-    instant). Easy correctness check: the wrapped form contains the cd."""
+# ---- idempotency + edge cases ----------------------------------------
+
+
+def test_caller_already_cd_prefixed_is_not_double_prepended():
+    """Idempotent against the M0 workaround. Legacy callers (B8 historically,
+    user code that hand-wrote ``cd /workspace && bash Allrun``) keep working
+    without a doubled cd."""
+    job = Job(
+        id="abc",
+        command="cd /workspace && bash Allrun",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace")],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run == "cd /workspace && bash Allrun"
+
+
+def test_cd_lives_inside_timeout_wrapper():
+    """The on-VM timeout must wrap the whole pipeline (cd + command), so the
+    timeout applies to the user's command and not just the (instant) cd."""
     job = Job(
         id="abc",
         command="bash Allrun",
-        container_workdir="/workspace",
-        requirements=ComputeRequirements(timeout_sec=300),
+        requirements=ComputeRequirements(
+            timeout_sec=300,
+            storage=[_mount("/workspace")],
+        ),
     )
     run = _build_run_command(job)
     assert run.startswith("timeout 300 bash -c ")
-    # The quoted inner string should contain the cd.
     assert "cd /workspace && bash Allrun" in run
 
 
-def test_build_task_quotes_workdir_with_special_chars():
-    """A pathological workdir with spaces must be shell-quoted so the cd
-    survives. Defensive: hand-edited registries shouldn't crash sky."""
+def test_mount_path_with_special_chars_is_shell_quoted():
+    """Defensive: a hand-edited mount path with spaces must be shlex-quoted
+    so the cd survives without crashing the shell."""
     job = Job(
         id="abc",
         command="ls",
-        container_workdir="/path with spaces",
-        requirements=ComputeRequirements(timeout_sec=0),
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/path with spaces")],
+        ),
     )
     run = _build_run_command(job)
     assert run == "cd '/path with spaces' && ls"
+
+
+def test_first_mount_wins_when_multiple_attached():
+    """If a future caller attaches multiple mounts, the first one in the
+    list determines the cd target. Today only workspace mounts are attached
+    so this is forward-compat insurance, not a contract callers should
+    rely on — pin in case M2A adds secondary mounts."""
+    job = Job(
+        id="abc",
+        command="bash Allrun",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[
+                _mount("/workspace"),
+                _mount("/aux"),
+            ],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run == "cd /workspace && bash Allrun"
