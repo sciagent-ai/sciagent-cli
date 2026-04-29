@@ -449,12 +449,23 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         # Build job. The backend cd's into the workspace mount (when one is
         # attached) before running the command — see SkyPilotBackend._build_task
         # for the rationale (M0 follow-up #1).
+        #
+        # M1B: session_id / intent / expected_artifacts are forwarded to Job
+        # so the SkyPilot backend can emit a compute_job_launched event that
+        # carries the v4.2 §C6 opaque payloads. They are recorded by the
+        # backend verbatim. session_id falls back to ComputeTool's shared
+        # session (set by the agent at startup); standalone callers without
+        # an agent see None and the backend skips emission.
+        session_for_job = actual_session_id or ComputeTool._shared_session_id
         job = Job(
             service=service or "custom",
             image=resolved_image,
             command=command,
             working_dir=self._working_dir,
             requirements=requirements,
+            session_id=session_for_job,
+            intent=intent,
+            expected_artifacts=expected_artifacts,
         )
 
         try:

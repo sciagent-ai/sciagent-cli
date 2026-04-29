@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 
 from ..job import Job, JobResult, JobStatus, ComputeRequirements, LaunchError
+from ..task_index import read_task as _read_task_manifest
+from ...provenance_log import get_provenance_log
 
 
 # Default wall-clock budget for the fail-fast launch poll (B4). Picked to
@@ -271,6 +273,16 @@ class SkyPilotBackend:
                     except (TypeError, ValueError):
                         managed_job_id = None
 
+        # M1B: emit a compute_job_launched event so a verifier can see what
+        # actually went to the cluster. Records both command_original (what
+        # the LLM passed) and command_resolved (what the backend rewrote it
+        # to via cd-prepend + timeout-wrap) per m1a-followup #5. mount_path
+        # comes from the first storage mount (also m1a-followup #5) so a
+        # future service mounting at /data isn't quietly mis-attributed to
+        # /workspace. Best-effort: log write failures must not break a
+        # successful launch.
+        self._emit_launched_event(job, name, managed_job_id)
+
         if not background:
             # Foreground: drain the request to completion. The controller
             # tail-logs to stdout via stream_and_get; swallow exceptions
@@ -282,6 +294,54 @@ class SkyPilotBackend:
                 pass
 
         return name, managed_job_id
+
+    def _emit_launched_event(
+        self,
+        job: Job,
+        name: str,
+        managed_job_id: Optional[int],
+    ) -> None:
+        """Emit a compute_job_launched event, best-effort.
+
+        Skipped silently when no session_id is set on the Job (standalone
+        callers without an agent context) or when log write fails — the
+        cluster job is already running and the verification record is
+        secondary to the launch's success.
+        """
+        session_id = getattr(job, "session_id", None)
+        if not session_id:
+            return
+        try:
+            log = get_provenance_log(session_id)
+            storage_mounts = getattr(job.requirements, "storage", None) or []
+            mount_path: Optional[str] = None
+            mount_bucket: Optional[str] = None
+            if storage_mounts:
+                first = storage_mounts[0]
+                mount_path = getattr(first, "path", None)
+                mount_bucket = getattr(first, "bucket", None)
+            log.emit_compute_job_launched(
+                job_id=name,
+                managed_job_id=managed_job_id,
+                backend=self.name,
+                service=job.service or None,
+                image=job.image or None,
+                command_original=job.command,
+                command_resolved=self.resolve_command(job),
+                mount_path=mount_path,
+                mount_bucket=mount_bucket,
+                requirements={
+                    "cpus": job.requirements.cpus,
+                    "memory_gb": job.requirements.memory_gb,
+                    "gpus": job.requirements.gpus,
+                    "gpu_type": job.requirements.gpu_type,
+                    "timeout_sec": job.requirements.timeout_sec,
+                },
+                intent=getattr(job, "intent", None),
+                expected_artifacts=getattr(job, "expected_artifacts", None),
+            )
+        except Exception:
+            pass  # Best-effort.
 
     @staticmethod
     def _extract_launch_error_msg(payload, status_name: str, cluster_name: str) -> str:
@@ -367,6 +427,32 @@ class SkyPilotBackend:
         # Budget exceeded; treat as a still-launching cluster.
         return False
 
+    @staticmethod
+    def resolve_command(job: Job) -> str:
+        """Apply the deterministic command rewrites the backend performs
+        before launch: cd-prepend off the first storage mount path, then
+        timeout-wrap with GNU ``timeout`` when ``timeout_sec > 0``.
+
+        Extracted so M1B's compute_job_launched event can record exactly
+        what the cluster will run (``command_resolved``) alongside the
+        original LLM-issued string (``command_original``). Callers that
+        need to know the on-cluster command without building the full
+        sky.Task object also use this.
+        """
+        run_command = job.command
+        storage_mounts = getattr(job.requirements, "storage", None) or []
+        if storage_mounts and not run_command.lstrip().startswith("cd "):
+            mount_path = storage_mounts[0].path
+            if mount_path:
+                run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
+
+        timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
+        if timeout_sec > 0:
+            run_command = (
+                f"timeout {int(timeout_sec)} bash -c {shlex.quote(run_command)}"
+            )
+        return run_command
+
     def _build_task(self, job: Job):
         """Build SkyPilot Task object."""
         sky = self._get_sky()
@@ -408,23 +494,9 @@ class SkyPilotBackend:
         #
         # Idempotent against M0 cd-prefixed callers: if the command already
         # starts with ``cd ``, we trust the caller and don't double-prepend.
-        run_command = job.command
-        storage_mounts = getattr(job.requirements, "storage", None) or []
-        if storage_mounts and not run_command.lstrip().startswith("cd "):
-            mount_path = storage_mounts[0].path
-            if mount_path:
-                run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
-
         # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
-        # user command with the GNU `timeout` utility. shlex.quote handles
-        # arbitrary command shapes (multi-line scripts, embedded quotes).
-        # A timeout_sec <= 0 disables the wrapper for callers who have a
-        # legitimate need to run unbounded.
-        timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
-        if timeout_sec > 0:
-            run_command = (
-                f"timeout {int(timeout_sec)} bash -c {shlex.quote(run_command)}"
-            )
+        # user command with the GNU ``timeout`` utility.
+        run_command = self.resolve_command(job)
 
         # Create task
         task = sky.Task(
@@ -557,6 +629,13 @@ class SkyPilotBackend:
         is preserved verbatim in ``JobResult.summary`` so callers debugging
         a FAILED_NO_RESOURCE vs FAILED_SETUP haven't lost the variant when
         we collapse to JobStatus.FAILED.
+
+        M1B: emits a compute_job_status_changed event when the mapped
+        status differs from the last value emitted in this process for
+        ``job_id``. Dedup is process-local; the writer suppresses no-op
+        repeats. Looking up session_id via the per-job manifest keeps
+        the backend's signature (and the cross-backend router contract)
+        unchanged.
         """
         try:
             record = self._get_managed_job_record(job_id)
@@ -581,6 +660,14 @@ class SkyPilotBackend:
         mapped = _map_status(sky_status)
         summary = f"Job {sky_status_name} on {job_id}"
 
+        managed_job_id = None
+        try:
+            mid = getattr(record, "job_id", None)
+            if mid is not None:
+                managed_job_id = int(mid)
+        except (TypeError, ValueError):
+            managed_job_id = None
+
         if mapped == JobStatus.FAILED:
             # Pull a log tail so the agent gets actionable stderr without a
             # second round-trip. Same shape as M0's failure path.
@@ -590,6 +677,14 @@ class SkyPilotBackend:
             failure_reason = getattr(record, "failure_reason", None) or ""
             if failure_reason and not error_preview:
                 error_preview = failure_reason[:500]
+            self._emit_status_changed_event(
+                job_id=job_id,
+                managed_job_id=managed_job_id,
+                status=mapped,
+                sky_status_raw=sky_status_name,
+                error_preview=error_preview or None,
+                log_file=log_file or None,
+            )
             return JobResult(
                 status=mapped,
                 summary=summary,
@@ -597,7 +692,49 @@ class SkyPilotBackend:
                 output_file=log_file,
             )
 
+        self._emit_status_changed_event(
+            job_id=job_id,
+            managed_job_id=managed_job_id,
+            status=mapped,
+            sky_status_raw=sky_status_name,
+        )
         return JobResult(status=mapped, summary=summary)
+
+    def _emit_status_changed_event(
+        self,
+        *,
+        job_id: str,
+        managed_job_id: Optional[int],
+        status: JobStatus,
+        sky_status_raw: Optional[str],
+        error_preview: Optional[str] = None,
+        log_file: Optional[str] = None,
+    ) -> None:
+        """Best-effort emission of compute_job_status_changed.
+
+        session_id comes from the per-job manifest (~/.sciagent/tasks/<job_id>.json)
+        which compute.py wrote at launch time. When the manifest is absent
+        (orphan jobs, foreign launches) we skip emission silently — there's
+        no log to write to without a session.
+        """
+        try:
+            manifest = _read_task_manifest(job_id)
+            if not manifest:
+                return
+            session_id = manifest.get("session_id")
+            if not session_id:
+                return
+            log = get_provenance_log(session_id)
+            log.emit_compute_job_status_changed(
+                job_id=job_id,
+                managed_job_id=managed_job_id,
+                status=status.value,
+                sky_status_raw=sky_status_raw,
+                error_preview=error_preview,
+                log_file=log_file,
+            )
+        except Exception:
+            pass  # Best-effort; never break a status query on a log write.
 
     def get_job_status(self, job_id: str) -> JobResult:
         """Backwards-compatible alias.

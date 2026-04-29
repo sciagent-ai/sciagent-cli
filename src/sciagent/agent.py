@@ -11,6 +11,7 @@ import json
 import signal
 import subprocess
 import threading
+import time
 import traceback
 from typing import Dict, Any, List, Optional, Callable
 
@@ -28,6 +29,7 @@ from .state import (
 from .display import Display, create_display, Spinner
 from .defaults import DEFAULT_MODEL
 from .prompts import build_system_prompt
+from .provenance_log import get_provenance_log, set_active_session
 
 
 @dataclass
@@ -113,6 +115,11 @@ class AgentLoop:
         # (sciagent-workspace-{session_id}) are scoped to this agent session.
         from .tools.atomic.compute import ComputeTool
         ComputeTool.set_shared_session(self.state.session_id)
+
+        # M1B: register the active session so ProvenanceChecker / orchestrator
+        # gates can find the right log without taking session_id as a
+        # constructor arg. Cleared on session change via load_session().
+        set_active_session(self.state.session_id)
         
         # Callbacks
         self._on_tool_start: Optional[Callable] = None
@@ -1138,12 +1145,42 @@ Provide a concise summary (max 500 words):"""
 
         IMPORTANT: Tool results must be added IMMEDIATELY after the assistant message
         with tool_use. No other messages (like spiral warnings) can be inserted in between.
+
+        M1B: emits tool_call / tool_result events to the per-session provenance
+        log as a side effect. Best-effort — a log write failure must not break
+        the tool dispatch loop, since the log is a verification record, not
+        part of the API protocol.
         """
         results = []
         deferred_spiral_checks = []  # Defer spiral warnings until after all tool_results
         pending_images = []  # Collect images to inject as multimodal message
 
+        # M1B: per-session provenance log. Resolved once per loop entry —
+        # the singleton accessor is cheap, but skipping the lookup per-call
+        # keeps the dispatch path tight under heavy tool batches.
+        plog = None
+        try:
+            plog = get_provenance_log(self.state.session_id)
+        except Exception:
+            plog = None
+
         for tc in tool_calls:
+            # M1B: emit tool_call event before dispatch so gate failures are
+            # also captured in the log. arguments come from the LLM verbatim;
+            # the writer's truncation handles oversized payloads.
+            if plog is not None:
+                try:
+                    plog.emit_tool_call(
+                        tool_call_id=tc.id,
+                        tool_name=tc.name,
+                        arguments=tc.arguments if isinstance(tc.arguments, dict) else {"_raw": tc.arguments},
+                        actor=self.config.model,
+                    )
+                except Exception:
+                    pass  # Best-effort; never break dispatch on a log write.
+
+            call_started_monotonic = time.monotonic()
+
             # Integrity Action 1: Gate check runs for ALL tools
             gate_error = self._check_gates(tc)
             if gate_error:
@@ -1193,6 +1230,32 @@ Provide a concise summary (max 500 words):"""
                 tool_name=tc.name,
                 result=tool_result_text
             )
+
+            # M1B: emit tool_result event. Image results record a metadata
+            # stub only — never the base64 — per the schema.
+            if plog is not None:
+                try:
+                    if is_image_result:
+                        output_summary: Any = {
+                            "type": "image",
+                            "media_type": result.output.get("media_type"),
+                            "file_path": result.output.get("file_path"),
+                            "size_bytes": len(result.output.get("data", "")) if result.output.get("data") else None,
+                        }
+                    else:
+                        output_summary = result.output
+                    duration_ms = int((time.monotonic() - call_started_monotonic) * 1000)
+                    plog.emit_tool_result(
+                        tool_call_id=tc.id,
+                        tool_name=tc.name,
+                        success=bool(result.success),
+                        output_summary=output_summary,
+                        error=result.error,
+                        duration_ms=duration_ms,
+                        actor=self.config.model,
+                    )
+                except Exception:
+                    pass  # Best-effort.
 
             # Collect errors for deferred spiral checking
             if result.error:
@@ -1543,6 +1606,9 @@ Provide a concise summary (max 500 words):"""
         state = self.state_manager.load(session_id)
         if state:
             self.state = state
+            # Refresh the M1B active-session register so subsequent provenance
+            # emissions land in the loaded session's log, not the prior one.
+            set_active_session(self.state.session_id)
             return True
         return False
     
