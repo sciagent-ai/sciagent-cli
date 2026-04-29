@@ -5,23 +5,21 @@ M1B that we deliberately did not patch in M1B to keep the milestone
 tight. Each is either a deferred deliverable from the handoff or a
 design observation that wants a real owner before it ships.
 
-## 1. Cross-LLM e2e test still ungated when this lands
+## 1. Cross-LLM e2e test  *(CLOSED — ran 2026-04-29, passed)*
 
-**Status:** ready, gated behind `RUN_CROSS_LLM_TESTS=1` + `OPENAI_API_KEY`.
+**Status:** ran on `m1b-provenance-log` with `gpt-4o-mini` per user
+authorization. Test passed: the verifier recovered the compute job +
+final_status, the artifact path, the data-gate verdict, and the
+compute_run tool call from the JSONL alone. Cost ~$0.01.
 
-**What:** `tests/provenance/test_e2e_cross_llm.py` exercises the
-load-bearing M1B acceptance claim: a non-Claude LLM (gpt-4o-mini by
-default) reads the JSONL log produced by sciagent and recovers the same
-facts that `verify_session()` does. Cost ~$0.01/run.
+**Where:** `tests/provenance/test_e2e_cross_llm.py`, gated behind
+`RUN_CROSS_LLM_TESTS=1` + `OPENAI_API_KEY`. Default verifier is
+`gpt-4o-mini`; override via `CROSS_LLM_VERIFIER_MODEL`.
 
-**Why deferred:** the user gates cross-LLM testing as a deliberate batch
-(M1A made the same call, see `m1a-followups.md` #1). Run it before
-declaring M1B closed; the schema is the contract and the contract is
-unverified for non-Claude consumers until this passes.
-
-**Trigger to land:** explicit user go-ahead. Re-use the same pattern for
-the M1A cross-provider smoke test (also still pending) — they share the
-LiteLLM surface and could batch into one session.
+**Note for future batches:** the M1A cross-provider smoke test
+(`m1a-followups.md` #1) is still pending. Same LiteLLM surface; could
+batch into one session next time the user opens the cross-LLM
+authorization window.
 
 ## 2. Cloud-bucket artifact discovery is M2A
 
@@ -100,26 +98,26 @@ Capturing here so that decision is rediscoverable.
 restarts often producing many status-stays-same events). Quiet today
 because sciagent sessions are long-running.
 
-## 6. Compute.py touch is "frozen-but-extended for emission plumbing"
+## 6. Compute.py touch is "frozen-but-extended for emission plumbing"  *(SETTLED 2026-04-29)*
 
-**Status:** documented; flag for M2A.
+**Status:** flagged at code-review time, user explicitly approved
+("add the 3 lines and associated scope. not creeping."). Documented
+here for M2A context, not as an open question.
 
 **What:** `tools/atomic/compute.py` is on the M1A frozen-surface list,
 but M1B added three lines to the `Job(...)` constructor call to
 populate `session_id` / `intent` / `expected_artifacts` so the SkyPilot
-backend can emit `compute_job_launched`. This is the same shape as the
-existing `_write_session_manifest` side effect — internal plumbing,
-no change to the LLM-facing schema.
+backend can emit `compute_job_launched`. Same shape as the existing
+`_write_session_manifest` side effect — internal plumbing, no change to
+the LLM-facing schema.
 
-**Why this is here:** to make the scope-bend explicit. If the user
-wanted strict letter-of-the-law no-touch on `compute.py`, the
-alternative was a thread-local "launch context" that compute.py would
-have to write to (same scope-bend, more indirection). Capturing the
-choice here so M2A doesn't inherit a phantom freeze on this site.
+**Why kept:** the alternative (a thread-local "launch context" compute.py
+would have to write to) was the same scope-bend with more indirection.
+Three explicit kwargs in the existing constructor call is honest.
 
-**Trigger to land:** M2A. The frozen-surface boundary shifts when M2A's
-runtime substrate lands; revisit then whether `compute.py` belongs on
-the new "frozen" list or on the runtime side.
+**Note for M2A:** the frozen-surface boundary shifts when M2A's runtime
+substrate lands; revisit then whether `compute.py` sits on the new
+"frozen" list or on the runtime side.
 
 ## 7. `actor` field is optional and inconsistently populated
 
