@@ -26,20 +26,25 @@ invocation work without per-caller cd-prefixing.
 **Why deferred:** registry inheritance through `extends:` is also currently
 broken (see #2); fixing both at once is M2A-shaped (unified task model).
 
-## 2. Service registry `extends:` chain not honored by `_get_service_resources`
+## 2. Service registry `extends:` chain not honored by `_get_service_resources`  *(CLOSED — M1A b00c565c)*
 
 **Surfaced by:** B8 OpenFOAM smoke. `openfoam-swak4foam-2012` extends
 `openfoam-swak4foam` extends `openfoam`, but only `openfoam` declares
 `resources: {min_memory_gb: 8, recommended_memory_gb: 32, min_cpus: 4}`.
-The leaf service inherits *defaults*, not the parent's hints, so a bare
-`compute_run(service="openfoam-swak4foam-2012", ...)` runs on c6i.large
+The leaf service inherited *defaults*, not the parent's hints, so a bare
+`compute_run(service="openfoam-swak4foam-2012", ...)` ran on c6i.large
 (2 vCPUs / 8 GB) — an instance NP=8 MPI ranks would thrash on.
 
-**Workaround in M0:** the B8 test overrides `cpus=8, memory_gb=16` explicitly.
+**Resolution:** `tools/atomic/compute.py::_get_service_resources` now walks
+the chain leaf-to-root. Merge order is `defaults → root parent → … → leaf`,
+so explicit leaf-level keys still win and missing leaf keys fall through
+to the nearest ancestor that defines them. Cycles and missing parents
+terminate cleanly.
 
-**Proper fix (M2A or standalone):** walk the `extends:` chain in
-`tools.atomic.compute._get_service_resources` and merge parent hints
-under defaults but over leaf overrides. ~20-line change.
+**Regression test:** `tests/compute/test_extends_chain.py` — covers the
+3-level openfoam chain (leaf inherits root's hints), leaf-wins override,
+defaults fallback, unknown service, cycle, missing parent, and one
+integration assertion against the on-disk registry.
 
 ## 3. `bg_status` log-file path uses subprocess ProcessManager paths for compute jobs
 

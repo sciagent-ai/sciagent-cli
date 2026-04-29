@@ -53,15 +53,18 @@ def _load_service_registry() -> Dict[str, Any]:
 def _get_service_resources(service: str) -> Dict[str, Any]:
     """Get resource hints for a service from the registry.
 
-    Returns dict with:
-        min_memory_gb, recommended_memory_gb, min_cpus,
-        gpu_beneficial, gpu_required
+    Walks the ``extends:`` chain so a leaf that doesn't declare its own
+    ``resources:`` inherits the nearest ancestor's hints. Without this, a
+    bare ``compute_run(service="openfoam-swak4foam-2012")`` lands on a
+    c6i.large because only the root ``openfoam`` declares the OpenFOAM-class
+    memory/CPU floor (M0 follow-up #2).
 
-    Falls back to defaults if service not found.
+    Merge order (later wins): defaults → root parent → … → immediate parent
+    → leaf service. Leaf-level keys override inherited values; missing keys
+    fall through to the nearest ancestor that defines them.
     """
     registry = _load_service_registry()
 
-    # Get defaults
     defaults = registry.get("defaults", {})
     default_resources = defaults.get("resources", {
         "min_memory_gb": 4,
@@ -71,13 +74,22 @@ def _get_service_resources(service: str) -> Dict[str, Any]:
         "gpu_required": False,
     })
 
-    # Get service-specific resources
     services = registry.get("services", {})
-    service_config = services.get(service, {})
-    service_resources = service_config.get("resources", {})
 
-    # Merge: service overrides defaults
-    return {**default_resources, **service_resources}
+    # Walk extends:-chain from the leaf upward. Stop on missing parent or
+    # cycle (registry is hand-edited; trust nothing). chain[0] is the leaf.
+    chain: list = []
+    seen: set = set()
+    cursor = service
+    while cursor and cursor not in seen and cursor in services:
+        seen.add(cursor)
+        chain.append(services[cursor])
+        cursor = services[cursor].get("extends")
+
+    merged = dict(default_resources)
+    for entry in reversed(chain):
+        merged.update(entry.get("resources") or {})
+    return merged
 
 
 class ComputeTool:
@@ -124,23 +136,36 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             },
             "cpus": {
                 "type": "integer",
-                "description": "Number of CPUs",
-                "default": 2
+                "description": (
+                    "Number of CPUs. Omit to defer to the service's registry "
+                    "hint (or 2 for image-only calls). Pass an explicit value "
+                    "to override the hint — including the literal 2 if that's "
+                    "what you want."
+                )
             },
             "memory_gb": {
                 "type": "number",
-                "description": "Memory in GB (>16 routes to cloud)",
-                "default": 4
+                "description": (
+                    "Memory in GB. Omit to defer to the service's registry "
+                    "hint (or 4 for image-only calls). Pass an explicit value "
+                    "to override. >16 routes to cloud."
+                )
             },
             "gpus": {
                 "type": "integer",
-                "description": "Number of GPUs (0 for CPU only)",
-                "default": 0
+                "description": (
+                    "Number of GPUs. Omit to defer to the service's registry "
+                    "hint (auto-enables 1 GPU for gpu_required services; 0 "
+                    "otherwise). Pass 0 to explicitly request CPU-only and "
+                    "skip the auto-enable."
+                )
             },
             "gpu_type": {
                 "type": "string",
-                "description": "GPU type (e.g., 'T4', 'A10G', 'V100', 'A100')",
-                "default": "T4"
+                "description": (
+                    "GPU type (e.g., 'T4', 'A10G', 'V100', 'A100'). Defaults "
+                    "to T4 when GPUs are requested."
+                )
             },
             "background": {
                 "type": "boolean",
@@ -239,8 +264,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         image: Optional[str],
         service: Optional[str],
         timeout_sec: int,
+        managed_job_id: Optional[int] = None,
     ) -> None:
         """B7: write the per-job manifest to ~/.sciagent/tasks/<job_id>.json.
+
+        ``managed_job_id`` is the integer Sky assigns to a managed job, when
+        we captured it at launch (M1A). When absent (still in-flight after
+        the fail-fast budget elapsed), the manifest writes ``null``; later
+        status queries can resolve the integer by name and re-write.
 
         Best-effort: a write failure is logged but not raised. The job is
         already running on Sky; losing the local manifest only means the
@@ -254,6 +285,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
 
             record: Dict[str, Any] = {
                 "job_id": job_id,
+                "managed_job_id": managed_job_id,
                 "session_id": session_id,
                 # intent / expected_artifacts are opaque-by-design (v4.2 §C6).
                 "intent": intent,
@@ -275,10 +307,10 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         command: str,
         service: str = None,
         image: str = None,
-        cpus: int = 2,
-        memory_gb: float = 4,
-        gpus: int = 0,
-        gpu_type: str = "T4",
+        cpus: Optional[int] = None,
+        memory_gb: Optional[float] = None,
+        gpus: Optional[int] = None,
+        gpu_type: Optional[str] = None,
         background: bool = True,
         estimate_only: bool = False,
         backend: str = "auto",
@@ -291,14 +323,26 @@ For long jobs, use bg_wait(job_id) to block until complete."""
     ) -> ToolResult:
         """Execute compute job.
 
+        Resource args (cpus / memory_gb / gpus / gpu_type) default to None,
+        meaning "no caller preference — use the service's registry hint or
+        the ultimate fallback." Pass an explicit value (including the
+        literal default-shaped value, e.g. ``cpus=2``) to override the
+        registry hint. The earlier value-equality detection conflated
+        "didn't specify" with "specified the default value" and silently
+        clobbered legitimate explicit calls — fixed in M1A.
+
         Args:
             command: Command to run in container
             service: Service name from registry (e.g., 'scipy-base', 'openfoam')
             image: Direct Docker image (e.g., 'python:3.11')
-            cpus: Number of CPUs (default: 2, >8 routes to cloud)
-            memory_gb: Memory in GB (default: 4, >16 routes to cloud)
-            gpus: Number of GPUs (default: 0, >0 routes to cloud)
-            gpu_type: GPU type for cloud (default: T4)
+            cpus: Number of CPUs. None -> registry hint (or 2). Explicit value
+                wins over the hint.
+            memory_gb: Memory in GB. None -> registry hint (or 4). Explicit
+                value wins; >16 still routes to cloud.
+            gpus: Number of GPUs. None -> hint (auto-enables 1 for
+                gpu_required services). Explicit 0 means "CPU-only, skip
+                the auto-enable."
+            gpu_type: GPU type for cloud. None -> 'T4' when gpus > 0.
             background: Run in background (default: True)
             estimate_only: Only show cost estimate (default: False)
             backend: 'auto' (default), 'local', or 'skypilot'
@@ -332,29 +376,43 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 error="Specify 'service' OR 'image', not both"
             )
 
-        # Resolve image from service and get resource hints
+        # Resolve image from service and apply resource hints. Hint
+        # application uses ``is None`` (caller didn't specify) instead of
+        # value-equality against a sentinel default — the M0 code clobbered
+        # an explicit ``cpus=2`` / ``memory_gb=4`` / ``gpus=0`` because
+        # those happened to match the python-default values the LLM passes
+        # by default. Optional defaults make the contract honest.
         gpu_hint = None
         if service:
             resolved_image = f"ghcr.io/sciagent-ai/{service}:latest"
-
-            # Get resource hints from registry
             hints = _get_service_resources(service)
 
-            # Use registry hints as defaults if user didn't override
-            # (check if user passed explicit values vs defaults)
-            if memory_gb == 4:  # Default value
-                memory_gb = hints.get("recommended_memory_gb", 8)
-            if cpus == 2:  # Default value
-                cpus = max(cpus, hints.get("min_cpus", 2))
-
-            # Handle GPU hints
-            if hints.get("gpu_required") and gpus == 0:
-                gpus = 1  # Auto-enable GPU for services that require it
-                gpu_hint = "gpu_required"
-            elif hints.get("gpu_beneficial") and gpus == 0:
-                gpu_hint = "gpu_beneficial"  # Inform user but don't auto-enable
+            if memory_gb is None:
+                memory_gb = hints.get("recommended_memory_gb", 4)
+            if cpus is None:
+                cpus = hints.get("min_cpus", 2)
+            if gpus is None:
+                if hints.get("gpu_required"):
+                    gpus = 1
+                    gpu_hint = "gpu_required"
+                elif hints.get("gpu_beneficial"):
+                    gpus = 0  # advisory only, don't auto-enable
+                    gpu_hint = "gpu_beneficial"
+                else:
+                    gpus = 0
         else:
             resolved_image = image
+            # No service hints — fall back to the ultimate defaults.
+            if memory_gb is None:
+                memory_gb = 4
+            if cpus is None:
+                cpus = 2
+            if gpus is None:
+                gpus = 0
+
+        # gpu_type only matters when GPUs are actually requested.
+        if gpus > 0 and gpu_type is None:
+            gpu_type = "T4"
 
         # Build compute requirements. timeout_sec keeps its existing default
         # (3600s) when caller doesn't override; passing 0 disables the on-VM
@@ -388,7 +446,9 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             except Exception:
                 pass  # Fall back to no workspace if unavailable
 
-        # Build job
+        # Build job. The backend cd's into the workspace mount (when one is
+        # attached) before running the command — see SkyPilotBackend._build_task
+        # for the rationale (M0 follow-up #1).
         job = Job(
             service=service or "custom",
             image=resolved_image,
@@ -428,9 +488,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             # Run the job. A LaunchError surfaced from the backend's fail-fast
             # poll (B4) means Sky rejected the launch outright — return a
             # structured failure now instead of letting the agent burn a
-            # 10-min status-poll loop.
+            # 10-min status-poll loop. We call the selected backend directly
+            # (not router.run) so SkyPilotBackend's tuple return — which
+            # carries the integer managed_job_id when the controller
+            # acknowledged the launch inside the fail-fast budget — flows
+            # into the manifest write.
+            managed_job_id: Optional[int] = None
             try:
-                job_id = router.run(job, backend=preferred, background=background)
+                run_result = selected_backend.run(job, background=background)
             except LaunchError as launch_exc:
                 # cluster_name is set when the failure came from the SkyPilot
                 # backend; propagate it so callers (and our paid AWS tests)
@@ -451,6 +516,16 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     error=f"sky.launch rejected: {launch_exc}",
                 )
 
+            # SkyPilotBackend.run returns (name, managed_job_id); local
+            # backends return a bare str. Unify here so the rest of execute
+            # is backend-agnostic.
+            if isinstance(run_result, tuple):
+                job_id = run_result[0]
+                if len(run_result) >= 2:
+                    managed_job_id = run_result[1]
+            else:
+                job_id = run_result
+
             # B7: after a successful skypilot launch, write a session manifest
             # so bg_status (PR #3 join) and the orphan sweep / reaper can find
             # the job after a process restart. Local jobs are tracked by
@@ -465,6 +540,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     image=resolved_image,
                     service=service,
                     timeout_sec=requirements.timeout_sec,
+                    managed_job_id=managed_job_id,
                 )
 
             if background:

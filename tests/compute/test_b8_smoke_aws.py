@@ -25,7 +25,9 @@ The workspace source must contain a runnable OpenFOAM ``typical_c`` case
 from __future__ import annotations
 
 import os
+import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -36,11 +38,56 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# Bytes the bucket must hold for B8 to be a smoke run (~$0.10-0.15, ~10 min)
+# rather than the production 9-hour, ~$3 case. M0 follow-up #4: the canonical
+# typical_c controlDict (endTime 180.1, writeInterval 30) lives outside the
+# repo; an unrelated re-upload of the case used to silently flip B8 into the
+# expensive shape. The fixture is the smoke variant (endTime 0.05,
+# writeInterval 0.05), uploaded unconditionally below so no out-of-band sync
+# can drift it back.
+_FIXTURE_CONTROLDICT = (
+    Path(__file__).parent.parent / "fixtures" / "b8_typical_c_smoke" / "system" / "controlDict"
+)
+
+
 def _required_env(name: str) -> str:
     val = os.environ.get(name)
     if not val:
         pytest.skip(f"set {name} to run this paid AWS test")
     return val
+
+
+def _ensure_smoke_controldict(workspace_source: str) -> None:
+    """Overwrite ``<workspace_source>/system/controlDict`` with the smoke fixture.
+
+    Only runs when ``workspace_source`` is an ``s3://`` URI (the only shape B8
+    is documented to take). Skips the test cleanly if the AWS CLI is missing
+    or the upload fails — without the smoke variant, B8 would silently turn
+    into the 9-hour case it was designed to gate against.
+    """
+    if not workspace_source.startswith("s3://"):
+        pytest.skip(
+            "B8 fixture upload only handles s3:// workspace sources; "
+            f"got {workspace_source!r}"
+        )
+    if not _FIXTURE_CONTROLDICT.is_file():
+        pytest.fail(f"missing B8 fixture: {_FIXTURE_CONTROLDICT}")
+
+    target = workspace_source.rstrip("/") + "/system/controlDict"
+    try:
+        subprocess.run(
+            ["aws", "s3", "cp", str(_FIXTURE_CONTROLDICT), target],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        pytest.skip("aws CLI not on PATH; required to upload B8 smoke controlDict")
+    except subprocess.CalledProcessError as exc:
+        pytest.fail(
+            f"failed to upload smoke controlDict to {target}: "
+            f"rc={exc.returncode} stderr={exc.stderr}"
+        )
 
 
 def test_b8_openfoam_typical_c_smoke():
@@ -59,25 +106,28 @@ def test_b8_openfoam_typical_c_smoke():
     timeout_sec = int(os.environ.get("B8_TIMEOUT_SEC", "1800"))
     cleanup_after = os.environ.get("B8_CLEANUP", "1") != "0"
 
+    # Force the bucket to hold the smoke controlDict before launching. The
+    # rest of the typical_c case can be whatever the bucket already has —
+    # endTime / writeInterval are what determine whether this is a $0.10
+    # smoke or a $3 production run.
+    _ensure_smoke_controldict(workspace_source)
+
     ComputeTool._shared_session_id = None
     tool = ComputeTool()
     job_id = None
     try:
-        # typical_c's Allrun runs NP=8 MPI ranks. The registry's `extends:`
-        # chain isn't honored by _get_service_resources today (a known
-        # M0-out-of-scope shortcoming), so we override cpus/memory_gb here
-        # to give MPI an instance it isn't fighting against. c6i.2xlarge
-        # (8 vCPUs / 16 GB) at ~$0.34/hr fits the ~$0.10-0.15 B8 budget.
-        # `cd /workspace && bash Allrun` instead of bare `bash Allrun`:
-        # SkyPilotBackend._build_task does not yet honor the registry's
-        # `workdir:` field, so the task starts in sky's default CWD (the
-        # user home on the cluster), not at the mount path. Captured as
-        # an M0 follow-up below; the cd-prefix is the in-flight workaround
-        # so this milestone closes.
+        # typical_c's Allrun runs NP=8 MPI ranks. cpus=8/memory_gb=16 keep
+        # the test on c6i.2xlarge (~$0.34/hr) which fits the ~$0.10-0.15 B8
+        # budget; the registry's ``openfoam`` chain declares min_cpus=4
+        # which is below the rank count this case needs.
+        # M1A: bare ``bash Allrun`` works now — _build_task honors the
+        # registry's ``workdir: /workspace`` and prepends the cd, so we
+        # don't need the explicit ``cd /workspace && `` workaround any
+        # more. This is the path that exercises follow-up #1's fix.
         result = tool.execute(
             service="openfoam-swak4foam-2012",
             workspace_source=workspace_source,
-            command="cd /workspace && bash Allrun",
+            command="bash Allrun",
             backend="skypilot",
             background=True,
             cpus=8,

@@ -38,7 +38,9 @@ def _payload(status_name: str, status_msg: str = "") -> SimpleNamespace:
 def _backend_with_mock_sky() -> SkyPilotBackend:
     backend = SkyPilotBackend()
     mock_sky = MagicMock()
-    mock_sky.launch.return_value = "fake-request-id"
+    # M1A swaps the launch path to sky.jobs.launch — the mock must mirror
+    # that. The cluster-mode sky.launch is no longer called from run().
+    mock_sky.jobs.launch.return_value = "fake-request-id"
     mock_sky.Resources = MagicMock()
     mock_sky.Task = MagicMock()
     backend._sky = mock_sky
@@ -117,36 +119,64 @@ def test_fail_fast_raises_on_cancelled_status():
 
 
 def test_fail_fast_returns_on_succeeded():
-    """A SUCCEEDED launch ends the poll early and returns the cluster_name."""
+    """A SUCCEEDED launch ends the poll early and returns (name, managed_job_id).
+
+    M1A: run() now returns a tuple. The integer is None when the test's
+    mocked sky.get returns a non-tuple payload — what we care about here is
+    that the name flows through unchanged.
+    """
     backend = _backend_with_mock_sky()
     backend._sky.api_status.return_value = [_payload("SUCCEEDED")]
 
     with patch("sciagent.compute.backends.skypilot.time.sleep"):
-        cluster_name = backend.run(_job(), background=True)
+        name, managed_job_id = backend.run(_job(), background=True)
 
-    assert cluster_name == "sciagent-abc123"
+    assert name == "sciagent-abc123"
+    # MagicMock-returned sky.get payload isn't a real tuple → None is correct.
+    assert managed_job_id is None
+
+
+def test_fail_fast_returns_managed_job_id_on_succeeded():
+    """When sky.get returns the (job_ids, controller_handle) tuple, run() must
+    capture the integer managed_job_id so the manifest carries it."""
+    backend = _backend_with_mock_sky()
+    backend._sky.api_status.return_value = [_payload("SUCCEEDED")]
+    # Sky's launch payload after SUCCEEDED: ([job_ids...], controller_handle).
+    backend._sky.get.return_value = ([42], None)
+
+    with patch("sciagent.compute.backends.skypilot.time.sleep"):
+        name, managed_job_id = backend.run(_job(), background=True)
+
+    assert name == "sciagent-abc123"
+    assert managed_job_id == 42
 
 
 def test_fail_fast_budget_exceeded_returns_cluster_name():
     """A launch that's still PENDING when the budget elapses must NOT raise —
     that's the legitimate long-provisioning case; the caller proceeds with
     normal status polling. This is the regression guard that protects against
-    converting "slow but valid" launches into spurious LaunchErrors."""
+    converting "slow but valid" launches into spurious LaunchErrors.
+
+    Also: when budget-exceeded, run() must NOT call sky.get (which would
+    block until the controller finishes) — managed_job_id stays None and
+    later status queries can resolve it by name.
+    """
     import itertools
 
     backend = _backend_with_mock_sky()
     backend._sky.api_status.return_value = [_payload("PENDING")]
 
-    # Each monotonic() call advances 10s; after ~7 calls we're past the 60s
-    # default budget and the loop exits cleanly.
     fake_clock = itertools.count(start=0.0, step=10.0)
     with patch(
         "sciagent.compute.backends.skypilot.time.monotonic",
         side_effect=lambda: next(fake_clock),
     ), patch("sciagent.compute.backends.skypilot.time.sleep"):
-        cluster_name = backend.run(_job(), background=True)
+        name, managed_job_id = backend.run(_job(), background=True)
 
-    assert cluster_name == "sciagent-abc123"
+    assert name == "sciagent-abc123"
+    assert managed_job_id is None
+    # Critically: sky.get must not be invoked when the launch is still in-flight.
+    backend._sky.get.assert_not_called()
 
 
 def test_fail_fast_tolerates_transient_api_status_errors():
@@ -160,16 +190,18 @@ def test_fail_fast_tolerates_transient_api_status_errors():
     ]
 
     with patch("sciagent.compute.backends.skypilot.time.sleep"):
-        cluster_name = backend.run(_job(), background=True)
+        name, _ = backend.run(_job(), background=True)
 
-    assert cluster_name == "sciagent-abc123"
+    assert name == "sciagent-abc123"
 
 
 def test_compute_tool_surfaces_launch_error_as_structured_failure():
     """B4 acceptance via ComputeTool: a LaunchError surfaces as a structured
     ToolResult(success=False, output['failure_type']='launch_rejected'),
-    not the generic 'Compute job failed: ...' wrapping. This is the bar that
-    makes B9's mocked test cheap and meaningful."""
+    not the generic 'Compute job failed: ...' wrapping. M1A: ComputeTool
+    calls selected_backend.run directly (so SkyPilot's tuple return flows
+    into the manifest), so the mock raises on the backend, not the router.
+    """
     from sciagent.tools.atomic.compute import ComputeTool
 
     ComputeTool._shared_session_id = None
@@ -177,6 +209,10 @@ def test_compute_tool_surfaces_launch_error_as_structured_failure():
 
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
+    fake_skypilot.run.side_effect = LaunchError(
+        "invalid image_id: docker:bogus:tag",
+        cluster_name="sciagent-cluster42",
+    )
 
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
@@ -186,10 +222,6 @@ def test_compute_tool_surfaces_launch_error_as_structured_failure():
         "Using requested backend: skypilot",
     )
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.0}
-    fake_router.run.side_effect = LaunchError(
-        "invalid image_id: docker:bogus:tag",
-        cluster_name="sciagent-cluster42",
-    )
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(

@@ -30,9 +30,17 @@ class StorageMount:
 
 
 class JobStatus(Enum):
-    """Status of a compute job."""
+    """Status of a compute job.
+
+    M1A extension (per v4.1 §1): RECOVERING and CANCELLED were added so the
+    agent can react differently when Sky's managed-job controller is mid-spot-
+    recovery (output paused, not failed) vs. when a user/agent cancelled the
+    job (terminal, but not a failure to retry).
+    """
     PENDING = "pending"
     RUNNING = "running"
+    RECOVERING = "recovering"
+    CANCELLED = "cancelled"
     COMPLETED = "completed"
     FAILED = "failed"
 

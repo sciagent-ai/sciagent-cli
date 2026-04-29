@@ -1,0 +1,183 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+| =========                 |                                                 |
+| \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |
+|  \\    /   O peration     | Version:  v1806                                 |
+|   \\  /    A nd           | Web:      www.OpenFOAM.com                      |
+|    \\/     M anipulation  |                                                 |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+libs
+(
+    "libdistributed.so" // for correct wall distance methods
+    "libgroovyBC.so" 
+    "libswakFunctionObjects.so" 
+);
+
+application     buoyantBoussinesqPimpleFoam;
+
+startFrom       startTime;
+
+startTime       0;
+
+stopAt          endTime;    //writeNow; endTime;
+
+endTime         0.05;
+
+deltaT          0.005;
+
+writeControl    adjustableRunTime;    //adjustableRunTime; runTime;
+
+writeInterval   0.05;
+
+purgeWrite      0;
+
+writeFormat     ascii; //binary; ascii;
+
+writePrecision  7; // increased from 6 to reconstruct mesh
+
+writeCompression off; // ineffective to compress binary?
+
+timeFormat      general;
+
+timePrecision   6;
+
+runTimeModifiable true;
+
+adjustTimeStep  false;
+
+maxCo           10;
+
+maxDeltaT       0.005;
+
+
+// ************************************************************************* //
+
+functions
+{   
+    #include "probes"
+    
+    turbulenceFields1
+    {
+        type            turbulenceFields;
+        libs            (fieldFunctionObjects);
+        writeControl    writeTime;
+
+        // Either field or fields entries
+        fields          (nuEff R devReff L I);
+    }
+
+    fieldMinMax1
+    {
+        type        fieldMinMax;
+        libs        ("libfieldFunctionObjects.so");
+        writeToFile no;
+        log         yes;
+        location    yes;
+        mode        component;
+        fields      (U T p_rgh);
+    }
+
+    yPlus
+    {
+        type            yPlus;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    writeTime;
+    }
+
+    staticPressure
+    {
+        type            pressure;
+        libs            ("libfieldFunctionObjects.so");
+        mode            static;
+        writeControl    writeTime;
+
+        rho         rhoInf;
+        rhoInf      1.205;
+    }
+
+    totalPressure
+    {
+        type            pressure;
+        libs            ("libfieldFunctionObjects.so");
+        mode            total;
+        writeControl    writeTime;
+
+        rho         rhoInf;
+        rhoInf      1.205;
+    }
+    
+    fieldAverage1
+    {
+        type            fieldAverage;
+        libs            ("libfieldFunctionObjects.so");
+        writeControl    writeTime;
+        timeStart       60;
+
+        fields
+        (
+            U
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+
+            T
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+
+            p_rgh
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+
+            k
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+
+            epsilon
+            {
+                mean        on;
+                prime2Mean  on;
+                base        time;
+            }
+        );
+    }
+
+}
+
+DebugSwitches 
+{ 
+    // Print GAMG residuals of coarse-level solver 
+//    GAMG  1; 
+    // Print some statistics on the agglomeration 
+    GAMGAgglomeration 1; 
+
+//    lduMatrix 2;
+} 
+OptimisationSwitches
+{
+    //- Parallel IO file handler
+    //  uncollated (default), collated or masterUncollated
+    fileHandler collated;
+
+    maxThreadFileBufferSize 1e9; // v1712 default is 0;
+    maxMasterFileBufferSize 1e9;
+}

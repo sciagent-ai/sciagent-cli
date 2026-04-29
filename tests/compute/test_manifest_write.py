@@ -106,13 +106,15 @@ def test_compute_tool_writes_manifest_after_skypilot_launch(tmp_manifest_dir: Pa
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.get_workspace_mount.return_value = None  # not exercised here
+    # M1A: SkyPilotBackend.run returns (name, managed_job_id). The integer
+    # is what flows into the manifest's new managed_job_id field.
+    fake_skypilot.run.return_value = ("sciagent-manifest1", 7777)
 
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router._backends = {"skypilot": fake_skypilot}
     fake_router.select.return_value = (fake_skypilot, "Using requested backend: skypilot")
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.1}
-    fake_router.run.return_value = "sciagent-manifest1"
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(
@@ -129,6 +131,8 @@ def test_compute_tool_writes_manifest_after_skypilot_launch(tmp_manifest_dir: Pa
     manifest = task_index.read_task("sciagent-manifest1")
     assert manifest is not None
     assert manifest["job_id"] == "sciagent-manifest1"
+    # M1A: managed_job_id from the launch result lands in the manifest.
+    assert manifest["managed_job_id"] == 7777
     assert manifest["intent"] == {
         "paper": "Boussinesq2024",
         "case": "typical_c",
@@ -153,12 +157,12 @@ def test_compute_tool_does_not_write_manifest_for_local_backend(tmp_manifest_dir
 
     fake_local = MagicMock()
     fake_local.name = "local"
+    fake_local.run.return_value = "local-job-1"  # local backend keeps str return
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["local"]
     fake_router._backends = {"local": fake_local}
     fake_router.select.return_value = (fake_local, "Using local Docker")
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.0}
-    fake_router.run.return_value = "local-job-1"
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(
@@ -191,12 +195,12 @@ def test_compute_tool_manifest_write_failure_does_not_break_launch(
 
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
+    fake_skypilot.run.return_value = ("sciagent-flaky-fs", None)
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router._backends = {"skypilot": fake_skypilot}
     fake_router.select.return_value = (fake_skypilot, "Using requested backend: skypilot")
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.1}
-    fake_router.run.return_value = "sciagent-flaky-fs"
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(

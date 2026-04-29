@@ -32,6 +32,63 @@ _CLOUD_URI_PREFIXES: Dict[str, str] = {
 }
 
 
+# sky.jobs.ManagedJobStatus -> sciagent JobStatus (v4.1 §1, M1A deliverable).
+#
+# Keyed by the Sky enum's *value* (the wire string Sky uses internally), not
+# the Python member name, so this is robust to Sky renaming a member while
+# keeping the same value (e.g. SUBMITTED -> DEPRECATED_SUBMITTED in 0.12.x).
+# The original Sky string is preserved verbatim in JobResult.summary so debug
+# paths don't lose the FAILED_* variant when we collapse to FAILED.
+#
+# Decisions:
+#   - PENDING / SUBMITTED / STARTING all collapse to PENDING — the agent has
+#     no actionable difference between them.
+#   - CANCELLING is reported as RUNNING until terminal: the cancel may not
+#     succeed, and reporting CANCELLED prematurely would mis-cue the agent.
+#   - All FAILED_* variants collapse to FAILED. The variant lives in summary.
+_SKY_STATUS_TO_JOB_STATUS: Dict[str, JobStatus] = {
+    "PENDING":             JobStatus.PENDING,
+    "SUBMITTED":           JobStatus.PENDING,
+    "STARTING":            JobStatus.PENDING,
+    "RUNNING":             JobStatus.RUNNING,
+    "RECOVERING":          JobStatus.RECOVERING,
+    "CANCELLING":          JobStatus.RUNNING,
+    "SUCCEEDED":           JobStatus.COMPLETED,
+    "CANCELLED":           JobStatus.CANCELLED,
+    "FAILED":              JobStatus.FAILED,
+    "FAILED_SETUP":        JobStatus.FAILED,
+    "FAILED_PRECHECKS":    JobStatus.FAILED,
+    "FAILED_NO_RESOURCE":  JobStatus.FAILED,
+    "FAILED_CONTROLLER":   JobStatus.FAILED,
+}
+
+
+def _map_status(sky_status) -> JobStatus:
+    """Map a sky.jobs.ManagedJobStatus to a sciagent JobStatus.
+
+    Accepts either the enum member or its string value/name. Unknown states
+    return JobStatus.FAILED — a future Sky upgrade that adds a state without
+    a mapping is a *loud* failure, not a silent fall-through to RUNNING.
+    Tests iterate the entire enum to catch additions before they ship.
+    """
+    if sky_status is None:
+        return JobStatus.FAILED
+    # Accept enum, str-by-value, or str-by-name (debug shapes).
+    candidates = []
+    value = getattr(sky_status, "value", None)
+    if value is not None:
+        candidates.append(str(value))
+    name = getattr(sky_status, "name", None)
+    if name is not None:
+        candidates.append(str(name))
+    if not candidates:
+        candidates.append(str(sky_status))
+    for key in candidates:
+        if key in _SKY_STATUS_TO_JOB_STATUS:
+            return _SKY_STATUS_TO_JOB_STATUS[key]
+    return JobStatus.FAILED
+
+
 def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """Return (store, bucket) for a recognized cloud URI, else (None, None).
 
@@ -155,59 +212,76 @@ class SkyPilotBackend:
             persistent=True,
         )
 
-    def run(self, job: Job, background: bool = True) -> str:
-        """Launch job on cloud via SkyPilot.
+    def run(self, job: Job, background: bool = True) -> Tuple[str, Optional[int]]:
+        """Launch ``job`` as a SkyPilot managed job.
 
-        Args:
-            job: The job to run
-            background: If True, returns immediately after launch starts
-                       If False, waits for job completion
+        Returns ``(name, managed_job_id)``:
 
-        Returns:
-            cluster_name as job_id for tracking
+          - ``name``: the human-readable identifier sciagent uses everywhere
+            else (manifest filename, ``bg_status``, ``sky logs``). Same shape
+            as M0's cluster_name, so callers that only care about the LLM-
+            facing handle can ``name, _ = backend.run(job)``.
+          - ``managed_job_id``: the integer Sky assigns to the managed job.
+            Captured opportunistically when the controller acknowledges the
+            launch inside the fail-fast budget. ``None`` when the launch is
+            still in-flight after the budget elapses — callers can recover
+            the integer later by name via ``_get_managed_job_record``.
 
         Raises:
-            LaunchError: when sky reports the launch FAILED/CANCELLED inside
-                the fail-fast budget. Surfaced verbatim so callers can show
-                a structured error rather than letting the agent burn a 10
-                minute poll loop on a launch Sky already gave up on (B4).
+            LaunchError: when Sky reports FAILED/CANCELLED inside the fail-
+                fast budget (B4). Surfaced verbatim so callers can show a
+                structured error rather than burning a long poll on a
+                launch Sky already rejected.
         """
         sky = self._get_sky()
 
-        # Build SkyPilot Task programmatically
         task = self._build_task(job)
+        name = f"sciagent-{job.id}"
 
-        # Cluster name used as job_id
-        cluster_name = f"sciagent-{job.id}"
+        # sky.jobs.launch is async-first; the controller takes ownership
+        # of cluster lifecycle, autostop, and recovery. None of cluster-
+        # mode's down=/idle_minutes_to_autostop= apply here.
+        request_id = sky.jobs.launch(task, name=name)
 
-        # Launch returns RequestId - async by default
-        # Use down=True to auto-terminate after job completes (saves cost)
-        request_id = sky.launch(
-            task,
-            cluster_name=cluster_name,
-            down=not background,  # Auto-terminate if running foreground
-            idle_minutes_to_autostop=10 if background else None,
-        )
-
-        # B4 fail-fast: poll the launch's request status briefly so a
-        # controller-side rejection (bad image_id, missing creds, no
-        # capacity) surfaces as a LaunchError within the budget rather
-        # than disappearing into the next status-poll cycle.
-        self._await_launch_or_fail(
+        # B4 fail-fast: bail out fast on a controller rejection (bad
+        # image_id, missing creds, no capacity). The mechanism is the same
+        # as M0 — sky.api_status polled within a 60s budget.
+        succeeded = self._await_launch_or_fail(
             request_id=request_id,
-            cluster_name=cluster_name,
+            cluster_name=name,
             budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
         )
 
+        # If the request finished inside the budget we can sky.get the
+        # payload without blocking — it returns ``(job_ids, controller_handle)``
+        # for managed jobs. Outside the budget we'd have to wait for the
+        # controller, which can take minutes for cold provisioning; skip it
+        # and let the manifest fill in managed_job_id on a later status query.
+        managed_job_id: Optional[int] = None
+        if succeeded:
+            try:
+                payload = sky.get(request_id)
+            except Exception:
+                payload = None
+            if isinstance(payload, tuple) and payload:
+                job_ids = payload[0]
+                if job_ids:
+                    try:
+                        managed_job_id = int(job_ids[0])
+                    except (TypeError, ValueError):
+                        managed_job_id = None
+
         if not background:
-            # Wait for completion using sky.stream_and_get
-            # This blocks and streams logs
+            # Foreground: drain the request to completion. The controller
+            # tail-logs to stdout via stream_and_get; swallow exceptions
+            # because a job-level failure is reported through get_status,
+            # not by raising here.
             try:
                 sky.stream_and_get(request_id)
             except Exception:
-                pass  # Job may have completed or failed
+                pass
 
-        return cluster_name
+        return name, managed_job_id
 
     @staticmethod
     def _extract_launch_error_msg(payload, status_name: str, cluster_name: str) -> str:
@@ -241,7 +315,7 @@ class SkyPilotBackend:
         cluster_name: str,
         budget_sec: float,
         poll_interval_sec: float = _LAUNCH_FAIL_FAST_POLL_SEC,
-    ) -> None:
+    ) -> bool:
         """Poll sky.api_status briefly; raise LaunchError on FAILED/CANCELLED.
 
         B4 fail-fast (v4.2 §C5): sky.stream_and_get has no timeout kwarg, so
@@ -249,12 +323,15 @@ class SkyPilotBackend:
         polling instead — non-blocking, returns the request's pre-execution
         state, and lets us bail out fast on rejection.
 
-        Returns silently when the launch:
-          - has SUCCEEDED inside the budget (cluster is up), or
-          - is still PENDING/RUNNING when the budget elapses (legitimate
-            long provisioning; caller proceeds with normal status polling).
+        Returns:
+            True  if the request reached SUCCEEDED inside the budget (caller
+                  can safely sky.get the payload without blocking).
+            False if the budget elapsed with the request still in-flight
+                  (legitimate long provisioning; caller proceeds with normal
+                  status polling and recovers metadata later).
 
-        Raises LaunchError when sky reports FAILED or CANCELLED.
+        Raises:
+            LaunchError on FAILED/CANCELLED.
         """
         sky = self._get_sky()
         try:
@@ -284,11 +361,11 @@ class SkyPilotBackend:
                     raise LaunchError(msg, cluster_name=cluster_name)
 
                 if status_name == "SUCCEEDED":
-                    return
+                    return True
 
             time.sleep(poll_interval_sec)
         # Budget exceeded; treat as a still-launching cluster.
-        return
+        return False
 
     def _build_task(self, job: Job):
         """Build SkyPilot Task object."""
@@ -311,16 +388,42 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
+        # M0 follow-up #1: cd into the workspace mount before running the
+        # command. Sky's managed jobs run from the cluster user's home by
+        # default, ignoring the image's WORKDIR directive — so without this,
+        # ``bash Allrun`` against an /workspace mount fails with "No such
+        # file or directory" (B8 #2 incident).
+        #
+        # We drive off the actual storage-mount path, NOT the registry's
+        # ``workdir:`` hint, because the registry's hint and the mount path
+        # can drift (registry says /workspace; a future caller mounts at
+        # /data). The mount path is the only field guaranteed to point at
+        # data the user just attached. Side benefits:
+        #   - image-only callers with workspace_source= also get the cd
+        #     (they'd be broken by a registry-driven approach since the
+        #     registry isn't consulted without a service).
+        #   - service-only callers without a mount keep the M0 default
+        #     (Sky's home CWD), so images whose Dockerfile WORKDIR isn't
+        #     /workspace (e.g. rcwa: /opt) don't regress.
+        #
+        # Idempotent against M0 cd-prefixed callers: if the command already
+        # starts with ``cd ``, we trust the caller and don't double-prepend.
+        run_command = job.command
+        storage_mounts = getattr(job.requirements, "storage", None) or []
+        if storage_mounts and not run_command.lstrip().startswith("cd "):
+            mount_path = storage_mounts[0].path
+            if mount_path:
+                run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
+
         # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
         # user command with the GNU `timeout` utility. shlex.quote handles
         # arbitrary command shapes (multi-line scripts, embedded quotes).
         # A timeout_sec <= 0 disables the wrapper for callers who have a
         # legitimate need to run unbounded.
-        run_command = job.command
         timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
         if timeout_sec > 0:
             run_command = (
-                f"timeout {int(timeout_sec)} bash -c {shlex.quote(job.command)}"
+                f"timeout {int(timeout_sec)} bash -c {shlex.quote(run_command)}"
             )
 
         # Create task
@@ -395,143 +498,115 @@ class SkyPilotBackend:
 
         return task
 
-    def _get_clusters(self, job_id: str) -> list:
-        """Get cluster status, handling async API."""
-        sky = self._get_sky()
-        from sky.utils.common import StatusRefreshMode
-        # sky.status takes cluster_names: List[str] and refresh: StatusRefreshMode (enum, not str).
-        # AUTO lets Sky refresh stale records (preemption / autostop) without forcing a full refresh.
-        request_id = sky.status(
-            cluster_names=[job_id],
-            refresh=StatusRefreshMode.AUTO,
-        )
-        return sky.stream_and_get(request_id)
+    def _get_managed_job_queue(self) -> list:
+        """Snapshot of all managed jobs visible to the current user.
 
-    def _get_queue(self, job_id: str) -> list:
-        """Get job queue, handling async API."""
-        sky = self._get_sky()
-        # sky.queue in 0.12 has no `refresh` kwarg; signature is (cluster_name, skip_finished, all_users).
-        request_id = sky.queue(cluster_name=job_id)
-        return sky.stream_and_get(request_id)
-
-    def get_status(self, job_id: str) -> JobResult:
-        """Get job status from SkyPilot cluster.
-
-        Checks both cluster status and job queue for detailed status.
+        sky.jobs.queue_v2 is the supported entry point; sky.jobs.queue is
+        deprecated. The async API returns
+        ``(records, total, status_counts, total_no_filter)`` — we drop the
+        aggregates and hand callers the records list.
         """
         sky = self._get_sky()
+        request_id = sky.jobs.queue_v2(refresh=False, skip_finished=False)
+        payload = sky.stream_and_get(request_id)
+        if isinstance(payload, tuple) and payload:
+            return list(payload[0] or [])
+        # Defensive: API drift or single-list return.
+        if isinstance(payload, list):
+            return payload
+        return []
 
+    def _get_managed_job_record(self, name: str):
+        """Look up a managed job record by the human-readable name.
+
+        Returns the ``ManagedJobRecord`` (attribute-access pydantic model)
+        whose ``job_name`` matches, or ``None``. Sky permits multiple jobs
+        with the same name historically; sciagent generates a UUID-derived
+        name per launch, so the first match is the right one.
+        """
+        for record in self._get_managed_job_queue():
+            rec_name = getattr(record, "job_name", None)
+            if rec_name == name:
+                return record
+        return None
+
+    def get_managed_job_id(self, name: str) -> Optional[int]:
+        """Resolve the integer managed_job_id for a launched job, by name.
+
+        Useful when ``run()`` returned ``managed_job_id=None`` because the
+        launch was still in-flight when the fail-fast budget elapsed —
+        ``compute_run`` then writes the manifest without an integer and
+        the next status query learns it.
+        """
+        record = self._get_managed_job_record(name)
+        if record is None:
+            return None
+        mid = getattr(record, "job_id", None)
+        if mid is None:
+            return None
         try:
-            # Get cluster status using async API
-            clusters = self._get_clusters(job_id)
+            return int(mid)
+        except (TypeError, ValueError):
+            return None
 
-            if not clusters:
-                return JobResult(
-                    status=JobStatus.FAILED,
-                    summary=f"Cluster {job_id} not found"
-                )
+    def get_status(self, job_id: str) -> JobResult:
+        """Get managed-job status, mapped to sciagent's JobStatus.
 
-            cluster_info = clusters[0]
-            cluster_status = cluster_info.get("status")
-
-            # SkyPilot ClusterStatus enum values
-            if cluster_status is not None:
-                status_name = cluster_status.name if hasattr(cluster_status, 'name') else str(cluster_status)
-
-                if status_name == "UP":
-                    # Cluster is UP - check actual job status for more detail
-                    return self.get_job_status(job_id)
-                elif status_name == "STOPPED":
-                    # Cluster stopped - check if job completed or failed
-                    job_result = self.get_job_status(job_id)
-                    if job_result.status == JobStatus.FAILED:
-                        return job_result  # Return with error details
-                    return JobResult(
-                        status=JobStatus.COMPLETED,
-                        summary=f"Cluster {job_id} stopped (job completed)"
-                    )
-                elif status_name == "INIT":
-                    return JobResult(
-                        status=JobStatus.PENDING,
-                        summary=f"Cluster {job_id} initializing"
-                    )
-                else:
-                    return JobResult(
-                        status=JobStatus.RUNNING,
-                        summary=f"Cluster status: {status_name}"
-                    )
-
-            return JobResult(
-                status=JobStatus.FAILED,
-                summary=f"Unknown cluster status for {job_id}"
-            )
-
-        except Exception as e:
-            return JobResult(
-                status=JobStatus.FAILED,
-                summary=f"Error getting status: {str(e)}"
-            )
-
-    def get_job_status(self, job_id: str) -> JobResult:
-        """Get detailed job status including queue info."""
-        sky = self._get_sky()
-
+        Single layer (no separate cluster-vs-job dance) because the managed-
+        jobs controller owns cluster lifecycle. The original Sky enum name
+        is preserved verbatim in ``JobResult.summary`` so callers debugging
+        a FAILED_NO_RESOURCE vs FAILED_SETUP haven't lost the variant when
+        we collapse to JobStatus.FAILED.
+        """
         try:
-            # Get job queue using async API
-            jobs = self._get_queue(job_id)
-
-            if not jobs:
-                # No jobs in queue - cluster is up but no job submitted yet
-                return JobResult(
-                    status=JobStatus.PENDING,
-                    summary=f"Cluster {job_id} is up, waiting for job"
-                )
-
-            # Get most recent job
-            latest_job = jobs[0]
-            job_status = latest_job.get("status")
-
-            if job_status is not None:
-                status_name = job_status.name if hasattr(job_status, 'name') else str(job_status)
-
-                if status_name in ("RUNNING", "SETTING_UP"):
-                    return JobResult(
-                        status=JobStatus.RUNNING,
-                        summary=f"Job {status_name.lower()} on {job_id}"
-                    )
-                elif status_name == "SUCCEEDED":
-                    return JobResult(
-                        status=JobStatus.COMPLETED,
-                        summary=f"Job completed successfully on {job_id}"
-                    )
-                elif status_name in ("FAILED", "FAILED_SETUP"):
-                    # Fetch logs and write to file for agent to read
-                    error_logs = self.get_logs(job_id, tail=200)
-                    log_file = self._write_logs_to_file(job_id, error_logs)
-                    # Extract key error line for preview (token efficient)
-                    error_preview = self._extract_error_line(error_logs)
-                    return JobResult(
-                        status=JobStatus.FAILED,
-                        summary=f"Job failed on {job_id}",
-                        error_preview=error_preview,
-                        output_file=log_file,
-                    )
-                elif status_name == "PENDING":
-                    return JobResult(
-                        status=JobStatus.PENDING,
-                        summary=f"Job pending on {job_id}"
-                    )
-
-            return self.get_status(job_id)
-
-        except Exception:
-            # get_status() calls back into get_job_status() — falling back to it here
-            # produces unbounded recursion when both queries fail. Surface a transient
-            # PENDING result and let the next poll retry.
+            record = self._get_managed_job_record(job_id)
+        except Exception as exc:
+            # Transient query failure: surface as PENDING so the next poll
+            # retries cleanly. Same recovery shape PR #1's B1 fix established.
             return JobResult(
                 status=JobStatus.PENDING,
-                summary=f"querying job {job_id}",
+                summary=f"querying job {job_id} ({type(exc).__name__})",
             )
+
+        if record is None:
+            return JobResult(
+                status=JobStatus.FAILED,
+                summary=f"Managed job {job_id} not found in queue",
+            )
+
+        sky_status = getattr(record, "status", None)
+        sky_status_name = (
+            getattr(sky_status, "name", None) or str(sky_status) if sky_status else "UNKNOWN"
+        )
+        mapped = _map_status(sky_status)
+        summary = f"Job {sky_status_name} on {job_id}"
+
+        if mapped == JobStatus.FAILED:
+            # Pull a log tail so the agent gets actionable stderr without a
+            # second round-trip. Same shape as M0's failure path.
+            error_logs = self.get_logs(job_id, tail=200)
+            log_file = self._write_logs_to_file(job_id, error_logs)
+            error_preview = self._extract_error_line(error_logs)
+            failure_reason = getattr(record, "failure_reason", None) or ""
+            if failure_reason and not error_preview:
+                error_preview = failure_reason[:500]
+            return JobResult(
+                status=mapped,
+                summary=summary,
+                error_preview=error_preview,
+                output_file=log_file,
+            )
+
+        return JobResult(status=mapped, summary=summary)
+
+    def get_job_status(self, job_id: str) -> JobResult:
+        """Backwards-compatible alias.
+
+        M0 split the cluster-vs-job query in two; managed jobs collapse it
+        into a single ``get_status`` call. Existing callers that ask for
+        ``get_job_status`` still get the expected JobResult shape.
+        """
+        return self.get_status(job_id)
 
     def estimate_cost(self, job: Job, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Estimate cost for running job.
@@ -602,67 +677,55 @@ class SkyPilotBackend:
         }
 
     def cleanup(self, job_id: str, purge: bool = False) -> bool:
-        """Terminate cluster to stop billing.
+        """Cancel a managed job by name.
 
-        Args:
-            job_id: Cluster name to terminate
-            purge: If True, also delete cluster record
-
-        Returns:
-            True if cleanup succeeded
+        For managed jobs the controller owns cluster teardown — cancelling
+        the job is what stops billing. ``purge`` is preserved on the
+        signature so existing callers don't break, but it's a no-op (no
+        per-cluster record to purge in managed-jobs mode).
         """
         sky = self._get_sky()
         try:
-            sky.down(job_id, purge=purge)
+            request_id = sky.jobs.cancel(name=job_id)
+            sky.stream_and_get(request_id)
             return True
         except Exception:
             return False
 
     def stop(self, job_id: str) -> bool:
-        """Stop cluster (can be restarted later, still incurs storage cost).
+        """Stop is not meaningful for managed jobs — cancellation is.
 
-        Args:
-            job_id: Cluster name to stop
-
-        Returns:
-            True if stop succeeded
+        Kept for interface compatibility; routes to ``cleanup`` so a caller
+        that calls ``stop`` followed by ``cleanup`` doesn't double-fail.
         """
-        sky = self._get_sky()
-        try:
-            sky.stop(job_id)
-            return True
-        except Exception:
-            return False
+        return self.cleanup(job_id)
 
     def get_logs(self, job_id: str, tail: int = 100) -> str:
-        """Get tail of the latest job log for the given cluster.
+        """Get tail of a managed job's logs.
 
-        Uses the Sky Python API (``sky.tail_logs``) rather than shelling out
-        to ``sky logs``. The subprocess path is unreliable from inside venvs
-        where the ``sky`` script entry-point isn't on PATH, and silently
-        returns an empty stdout when it fails — exactly the failure mode that
-        makes a FAILED job's ``error_preview`` come back blank. The Python
-        path raises real exceptions we can surface verbatim.
+        Uses ``sky.jobs.tail_logs`` — the managed-jobs equivalent of M0's
+        ``sky.tail_logs``. ``follow=False`` is mandatory: a follow=True call
+        blocks until the job ends, which would freeze the agent loop on a
+        long-running case. ``output_stream=`` captures into an in-memory
+        buffer so the function returns once the tail is buffered, not at
+        end-of-time.
 
         Args:
-            job_id: Cluster name (M0 uses cluster_name as job_id).
+            job_id: Managed-job name (the value passed to ``sky.jobs.launch(name=...)``).
             tail: Number of trailing log lines to return.
 
         Returns:
-            Log content as a string, or a structured error string when the
-            cluster is gone / sky raises. Never None — callers (notably
-            ``get_job_status``) write the return value straight to the saved
-            log file used by ``bg_status``.
+            Log content as a string; never None — callers (notably
+            ``get_status`` on FAILED) write the return value straight to
+            the saved log file used by ``bg_status``.
         """
         sky = self._get_sky()
         import io
 
         buf = io.StringIO()
         try:
-            # job_id=None: "latest job on this cluster". Our M0 cluster
-            # carries exactly one job, so this is the right semantics.
-            sky.tail_logs(
-                cluster_name=job_id,
+            sky.jobs.tail_logs(
+                name=job_id,
                 job_id=None,
                 follow=False,
                 tail=tail,
@@ -670,9 +733,6 @@ class SkyPilotBackend:
             )
             return buf.getvalue()
         except Exception as e:
-            # Anything we got into the buffer before the exception is still
-            # useful; preserve it ahead of the error tag so partial logs
-            # don't disappear into the ether.
             partial = buf.getvalue()
             err_line = f"[get_logs error: {type(e).__name__}: {e}]"
             return f"{partial}\n{err_line}" if partial else err_line

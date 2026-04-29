@@ -218,6 +218,8 @@ class BgStatusTool:
         ]
 
         # Local manifest fields (passthrough — opaque shape per v4.2 §C6).
+        if status.get("managed_job_id") is not None:
+            lines.append(f"Managed job id: {status['managed_job_id']}")
         if status.get("session_id"):
             lines.append(f"Session: {status['session_id']}")
         if status.get("owner_pid"):
@@ -245,8 +247,12 @@ class BgStatusTool:
             lines.append(f"Full logs: {output_file}")
 
         lines.append("")
-        lines.append(f"Use 'sky logs {status['job_id']}' to view full logs.")
-        lines.append(f"Use 'sky down {status['job_id']}' to terminate and stop billing.")
+        # Managed-jobs CLI hints (M1A): sky logs/down are cluster-mode; the
+        # managed-jobs equivalents are sky jobs logs / sky jobs cancel.
+        lines.append(f"Use 'sky jobs logs {status['job_id']}' to view full logs.")
+        lines.append(
+            f"Use 'sky jobs cancel {status['job_id']}' to stop billing."
+        )
         return '\n'.join(lines)
 
     def to_schema(self) -> Dict:
@@ -386,7 +392,12 @@ class BgWaitTool:
     """Wait for a background job to complete."""
 
     name = "bg_wait"
-    description = "Wait for a background job to complete. Returns final status and exit code. Works for both local (bash) and compute (SkyPilot) jobs."
+    description = (
+        "Wait for a background job. For LOCAL (bash) jobs, blocks until the "
+        "job completes or the timeout elapses. For CLOUD (SkyPilot) jobs, "
+        "this returns a one-shot snapshot — the agent loop never blocks on "
+        "cloud jobs. To re-check a non-terminal cloud job, call bg_status."
+    )
 
     parameters = {
         "type": "object",
@@ -397,8 +408,11 @@ class BgWaitTool:
             },
             "timeout": {
                 "type": "integer",
-                "description": "Maximum seconds to wait. If omitted, waits indefinitely.",
-                "default": None
+                "description": (
+                    "Maximum seconds to wait for LOCAL jobs. If omitted, "
+                    "waits indefinitely. Ignored for cloud jobs (the call "
+                    "always returns a snapshot)."
+                )
             }
         },
         "required": ["job_id"]
@@ -412,71 +426,87 @@ class BgWaitTool:
         return job_id and job_id.startswith("sciagent-")
 
     def _wait_compute_job(self, job_id: str, timeout: int = None) -> ToolResult:
-        """Wait for a compute/SkyPilot job to complete.
+        """Snapshot the cloud job's status; never block.
 
-        Unlike local jobs, cloud jobs should NOT block indefinitely.
-        Default timeout is 30s - check status and return, let agent decide next step.
+        M1A: ``bg_wait`` is non-blocking for cloud jobs (hard rule #1 —
+        atomic tools for cloud jobs are non-blocking and one-shot). The
+        ``timeout`` kwarg is preserved for schema compatibility and still
+        works for local jobs, but for cloud jobs we make exactly one
+        ``get_status`` call:
+
+          - terminal (COMPLETED / FAILED / CANCELLED) -> structured result.
+          - non-terminal (PENDING / RUNNING / RECOVERING) -> a snapshot
+            describing the current state and pointing the agent at
+            ``bg_status`` for re-polling.
+
+        The earlier 5s-interval, 30s-default polling loop violated the
+        spirit of the rule and would have forced M2A's wait/resume
+        substrate to fight a tool that sleeps inside itself.
         """
-        import time
         try:
-            from sciagent.compute.router import ComputeRouter
             from sciagent.compute.job import JobStatus
+            from sciagent.compute.router import ComputeRouter
+
             router = ComputeRouter()
+            result = router.get_status(job_id)
 
-            # Default 30s timeout for cloud jobs (don't block forever like Claude Code)
-            if timeout is None:
-                timeout = 30
+            if result.status == JobStatus.COMPLETED:
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"Compute job {job_id} completed.\n\n"
+                        f"Status: {result.status.value}\n"
+                        f"Summary: {result.summary}\n\n"
+                        f"Use 'sky logs {job_id}' to view full logs.\n"
+                        f"Use 'sky jobs cancel {job_id}' if you need to stop a follow-up."
+                    ),
+                    error=None,
+                )
 
-            start_time = time.time()
-            poll_interval = 5  # Check every 5 seconds
+            if result.status == JobStatus.FAILED:
+                output_lines = [
+                    f"Compute job {job_id} failed.",
+                    "",
+                    f"Summary: {result.summary}",
+                ]
+                if result.error_preview:
+                    output_lines.extend(["", "Error preview:", result.error_preview])
+                if result.output_file:
+                    output_lines.extend(["", f"Full logs: {result.output_file}"])
+                output_lines.extend(
+                    ["", f"Use 'sky jobs logs {job_id}' to view error logs."]
+                )
+                return ToolResult(
+                    success=False,
+                    output="\n".join(output_lines),
+                    error=result.error_preview or result.summary,
+                )
 
-            while True:
-                result = router.get_status(job_id)
+            if result.status == JobStatus.CANCELLED:
+                return ToolResult(
+                    success=False,
+                    output=(
+                        f"Compute job {job_id} was cancelled.\n\n"
+                        f"Status: {result.status.value}\n"
+                        f"Summary: {result.summary}"
+                    ),
+                    error=f"job {job_id} cancelled",
+                )
 
-                if result.status == JobStatus.COMPLETED:
-                    return ToolResult(
-                        success=True,
-                        output=f"Compute job {job_id} completed.\n\n"
-                               f"Status: {result.status.value}\n"
-                               f"Summary: {result.summary}\n\n"
-                               f"Use 'sky logs {job_id}' to view full logs.\n"
-                               f"Use 'sky down {job_id}' to terminate cluster.",
-                        error=None
-                    )
-
-                if result.status == JobStatus.FAILED:
-                    output_lines = [
-                        f"Compute job {job_id} failed.",
-                        "",
-                        f"Summary: {result.summary}",
-                    ]
-                    if result.error_preview:
-                        output_lines.extend(["", "Error preview:", result.error_preview])
-                    if result.output_file:
-                        output_lines.extend(["", f"Full logs: {result.output_file}"])
-                    output_lines.extend(["", f"Use 'sky logs {job_id}' to view error logs."])
-                    return ToolResult(
-                        success=False,
-                        output="\n".join(output_lines),
-                        error=result.error_preview or result.summary
-                    )
-
-                # Check timeout - return current status instead of blocking forever
-                if timeout and (time.time() - start_time) >= timeout:
-                    elapsed = int(time.time() - start_time)
-                    return ToolResult(
-                        success=True,
-                        output=f"Cloud job {job_id} still {result.status.value} after {elapsed}s.\n\n"
-                               f"Status: {result.summary}\n\n"
-                               f"Options:\n"
-                               f"  - bg_status('{job_id}') to check current status\n"
-                               f"  - bg_wait('{job_id}', timeout=60) to wait longer\n"
-                               f"  - sky logs {job_id} to view live logs\n"
-                               f"  - Continue with other tasks while job runs",
-                        error=None
-                    )
-
-                time.sleep(poll_interval)
+            # Non-terminal — return a snapshot. ``timeout`` is intentionally
+            # ignored for cloud jobs (hard rule #1); the message names the
+            # follow-up tools the agent should use to re-check.
+            return ToolResult(
+                success=True,
+                output=(
+                    f"Cloud job {job_id} is {result.status.value} (snapshot only — "
+                    f"bg_wait does not block for cloud jobs).\n\n"
+                    f"Summary: {result.summary}\n\n"
+                    f"Re-check with bg_status('{job_id}') or bg_output('{job_id}'); "
+                    f"the agent loop continues without waiting."
+                ),
+                error=None,
+            )
 
         except Exception as e:
             return ToolResult(success=False, output=None, error=str(e))

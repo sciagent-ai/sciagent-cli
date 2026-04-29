@@ -135,12 +135,15 @@ def delete_task(job_id: str) -> bool:
 
 
 # Manifest fields that join_status passes through verbatim when present.
+# ``managed_job_id`` (M1A) is the integer Sky assigns to a managed job —
+# pure passthrough; the join helper never synthesizes one if absent.
 _LOCAL_PASSTHROUGH_FIELDS = (
     "intent",
     "expected_artifacts",
     "owner_pid",
     "started_at",
     "session_id",
+    "managed_job_id",
     "metadata",
 )
 

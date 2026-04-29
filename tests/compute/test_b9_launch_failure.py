@@ -44,7 +44,8 @@ def test_b9_invalid_image_surfaces_structured_error_under_budget():
     # poll runs end-to-end (no shortcut via patching the backend method).
     backend = SkyPilotBackend()
     mock_sky = MagicMock()
-    mock_sky.launch.return_value = "fake-request-id"
+    # M1A: the launch path is sky.jobs.launch, not sky.launch.
+    mock_sky.jobs.launch.return_value = "fake-request-id"
     mock_sky.api_status.return_value = [
         _failed_payload("image pull failed: no matching manifest for linux/amd64")
     ]
@@ -52,18 +53,15 @@ def test_b9_invalid_image_surfaces_structured_error_under_budget():
     mock_sky.Task = MagicMock()
     backend._sky = mock_sky
 
-    # Forward router.run to the real backend.run so the fail-fast poll runs
-    # end-to-end against the mocked sky module.
-    def _route(job, backend=None, background=True):
-        return backend_under_test.run(job, background=background)
-
-    backend_under_test = backend
+    # ComputeTool calls selected_backend.run directly post-M1A (the
+    # router-level run drops the managed_job_id integer). Wire the router
+    # to hand back our real backend; the fail-fast poll runs against the
+    # mocked sky module.
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
-    fake_router._backends = {"skypilot": backend_under_test}
-    fake_router.select.return_value = (backend_under_test, "Using requested backend: skypilot")
+    fake_router._backends = {"skypilot": backend}
+    fake_router.select.return_value = (backend, "Using requested backend: skypilot")
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.1}
-    fake_router.run.side_effect = _route
 
     ComputeTool._shared_session_id = None
     tool = ComputeTool()
@@ -102,7 +100,7 @@ def test_b9_returns_structured_failure_not_raw_exception():
     fake_router._backends = {"skypilot": fake_skypilot}
     fake_router.select.return_value = (fake_skypilot, "ok")
     fake_router.estimate_cost.return_value = {"estimated_hourly": 0.0}
-    fake_router.run.side_effect = LaunchError("controller-side reject: no resources")
+    fake_skypilot.run.side_effect = LaunchError("controller-side reject: no resources")
 
     ComputeTool._shared_session_id = None
     tool = ComputeTool()

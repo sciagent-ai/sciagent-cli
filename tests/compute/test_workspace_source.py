@@ -175,7 +175,8 @@ def test_compute_tool_workspace_source_auto_enables_mount_on_skypilot():
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.get_workspace_mount.return_value = fake_mount
-    fake_skypilot.run.return_value = "sciagent-job-xyz"
+    # M1A: SkyPilotBackend.run returns (name, managed_job_id).
+    fake_skypilot.run.return_value = ("sciagent-job-xyz", None)
 
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
