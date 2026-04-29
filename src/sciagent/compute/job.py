@@ -7,7 +7,7 @@ not full output. Full logs are written to files.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 import uuid
 
 
@@ -65,6 +65,15 @@ class Job:
     command: str = ""
     working_dir: str = "."
     requirements: ComputeRequirements = field(default_factory=ComputeRequirements)
+
+    # M1B provenance fields. Optional and non-load-bearing for execution —
+    # SkyPilotBackend uses them to emit a compute_job_launched event that
+    # carries the session id and the v4.2 §C6 opaque payloads. They mirror
+    # what the manifest already records so a verifier reading either
+    # surface sees consistent state.
+    session_id: Optional[str] = None
+    intent: Optional[Dict[str, Any]] = None
+    expected_artifacts: Optional[List[str]] = None
 
 
 class LaunchError(RuntimeError):
