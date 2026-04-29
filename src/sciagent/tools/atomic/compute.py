@@ -251,8 +251,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         image: Optional[str],
         service: Optional[str],
         timeout_sec: int,
+        managed_job_id: Optional[int] = None,
     ) -> None:
         """B7: write the per-job manifest to ~/.sciagent/tasks/<job_id>.json.
+
+        ``managed_job_id`` is the integer Sky assigns to a managed job, when
+        we captured it at launch (M1A). When absent (still in-flight after
+        the fail-fast budget elapsed), the manifest writes ``null``; later
+        status queries can resolve the integer by name and re-write.
 
         Best-effort: a write failure is logged but not raised. The job is
         already running on Sky; losing the local manifest only means the
@@ -266,6 +272,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
 
             record: Dict[str, Any] = {
                 "job_id": job_id,
+                "managed_job_id": managed_job_id,
                 "session_id": session_id,
                 # intent / expected_artifacts are opaque-by-design (v4.2 §C6).
                 "intent": intent,
@@ -440,9 +447,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             # Run the job. A LaunchError surfaced from the backend's fail-fast
             # poll (B4) means Sky rejected the launch outright — return a
             # structured failure now instead of letting the agent burn a
-            # 10-min status-poll loop.
+            # 10-min status-poll loop. We call the selected backend directly
+            # (not router.run) so SkyPilotBackend's tuple return — which
+            # carries the integer managed_job_id when the controller
+            # acknowledged the launch inside the fail-fast budget — flows
+            # into the manifest write.
+            managed_job_id: Optional[int] = None
             try:
-                job_id = router.run(job, backend=preferred, background=background)
+                run_result = selected_backend.run(job, background=background)
             except LaunchError as launch_exc:
                 # cluster_name is set when the failure came from the SkyPilot
                 # backend; propagate it so callers (and our paid AWS tests)
@@ -463,6 +475,16 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     error=f"sky.launch rejected: {launch_exc}",
                 )
 
+            # SkyPilotBackend.run returns (name, managed_job_id); local
+            # backends return a bare str. Unify here so the rest of execute
+            # is backend-agnostic.
+            if isinstance(run_result, tuple):
+                job_id = run_result[0]
+                if len(run_result) >= 2:
+                    managed_job_id = run_result[1]
+            else:
+                job_id = run_result
+
             # B7: after a successful skypilot launch, write a session manifest
             # so bg_status (PR #3 join) and the orphan sweep / reaper can find
             # the job after a process restart. Local jobs are tracked by
@@ -477,6 +499,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                     image=resolved_image,
                     service=service,
                     timeout_sec=requirements.timeout_sec,
+                    managed_job_id=managed_job_id,
                 )
 
             if background:

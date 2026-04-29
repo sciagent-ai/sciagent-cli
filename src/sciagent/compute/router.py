@@ -9,7 +9,7 @@ Supports:
 
 from __future__ import annotations
 
-from typing import Dict, Any, Tuple, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from .job import Job, JobResult, JobStatus, ComputeRequirements
 from .backends.local import LocalBackend
@@ -123,18 +123,19 @@ class ComputeRouter:
         backend: Optional[str] = None,
         background: bool = True
     ) -> str:
-        """Route and run job, return job_id.
+        """Route and run job, return job_id (the human-readable identifier).
 
-        Args:
-            job: The job to run
-            backend: Preferred backend name (optional)
-            background: Run in background (default: True)
-
-        Returns:
-            job_id for tracking
+        SkyPilot's backend now returns ``(name, managed_job_id)``; this
+        method drops the integer because the router-level contract is "give
+        me the LLM-facing job_id." Callers that need the integer
+        (the manifest writer in ``compute_run``) use
+        ``selected_backend.run(...)`` directly after ``select(...)``.
         """
-        b, reason = self.select(job.requirements, backend)
-        return b.run(job, background=background)
+        b, _reason = self.select(job.requirements, backend)
+        result = b.run(job, background=background)
+        if isinstance(result, tuple):
+            return result[0]
+        return result
 
     def get_status(self, job_id: str) -> JobResult:
         """Get job status from appropriate backend.
