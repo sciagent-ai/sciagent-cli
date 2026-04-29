@@ -53,15 +53,18 @@ def _load_service_registry() -> Dict[str, Any]:
 def _get_service_resources(service: str) -> Dict[str, Any]:
     """Get resource hints for a service from the registry.
 
-    Returns dict with:
-        min_memory_gb, recommended_memory_gb, min_cpus,
-        gpu_beneficial, gpu_required
+    Walks the ``extends:`` chain so a leaf that doesn't declare its own
+    ``resources:`` inherits the nearest ancestor's hints. Without this, a
+    bare ``compute_run(service="openfoam-swak4foam-2012")`` lands on a
+    c6i.large because only the root ``openfoam`` declares the OpenFOAM-class
+    memory/CPU floor (M0 follow-up #2).
 
-    Falls back to defaults if service not found.
+    Merge order (later wins): defaults → root parent → … → immediate parent
+    → leaf service. Leaf-level keys override inherited values; missing keys
+    fall through to the nearest ancestor that defines them.
     """
     registry = _load_service_registry()
 
-    # Get defaults
     defaults = registry.get("defaults", {})
     default_resources = defaults.get("resources", {
         "min_memory_gb": 4,
@@ -71,13 +74,22 @@ def _get_service_resources(service: str) -> Dict[str, Any]:
         "gpu_required": False,
     })
 
-    # Get service-specific resources
     services = registry.get("services", {})
-    service_config = services.get(service, {})
-    service_resources = service_config.get("resources", {})
 
-    # Merge: service overrides defaults
-    return {**default_resources, **service_resources}
+    # Walk extends:-chain from the leaf upward. Stop on missing parent or
+    # cycle (registry is hand-edited; trust nothing). chain[0] is the leaf.
+    chain: list = []
+    seen: set = set()
+    cursor = service
+    while cursor and cursor not in seen and cursor in services:
+        seen.add(cursor)
+        chain.append(services[cursor])
+        cursor = services[cursor].get("extends")
+
+    merged = dict(default_resources)
+    for entry in reversed(chain):
+        merged.update(entry.get("resources") or {})
+    return merged
 
 
 class ComputeTool:
