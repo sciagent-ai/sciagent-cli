@@ -5,8 +5,8 @@ Acceptance bar (v4.1 §2 / v4.2 §C1): launch a job, simulate a sciagent crash
 process), then prove a fresh process can re-discover the job using:
 
   - the manifest at ``~/.sciagent/tasks/<job_id>.json`` (B7)
-  - ``sky.queue(cluster_name=job_id)`` directly (M0 mechanism — NOT
-    ``sky.jobs.queue``, which is M1A's job)
+  - ``sky.jobs.queue_v2`` filtered by job_name (M1A — replaces M0's
+    ``sky.queue(cluster_name=job_id)`` cluster-mode lookup)
 
 This test is **PAID**. Cost ~$0.05 (small Debian-based container running
 sleep) and ~3–5 min wall-clock. CI gates it behind ``RUN_AWS_TESTS=1``.
@@ -104,8 +104,9 @@ def test_b10_crash_resume_via_manifest_and_sky_queue():
         assert manifest.get("owner_pid"), "manifest missing owner_pid"
         assert manifest.get("started_at"), "manifest missing started_at"
 
-        # Re-discover via sky.queue (M0 path). NOT sky.jobs.queue — that's
-        # M1A. Per v4.2 §C1.
+        # Re-discover via sky.jobs.queue_v2 (M1A). The fresh router has no
+        # in-process state from the launching process — only the manifest
+        # on disk and the controller-side record drives this query.
         fresh_router = ComputeRouter()
         result_status = fresh_router.get_status(job_id)
         assert result_status is not None, "router returned no status for resumed job"
