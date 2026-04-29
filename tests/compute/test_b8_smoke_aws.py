@@ -116,21 +116,18 @@ def test_b8_openfoam_typical_c_smoke():
     tool = ComputeTool()
     job_id = None
     try:
-        # typical_c's Allrun runs NP=8 MPI ranks. The registry's `extends:`
-        # chain isn't honored by _get_service_resources today (a known
-        # M0-out-of-scope shortcoming), so we override cpus/memory_gb here
-        # to give MPI an instance it isn't fighting against. c6i.2xlarge
-        # (8 vCPUs / 16 GB) at ~$0.34/hr fits the ~$0.10-0.15 B8 budget.
-        # `cd /workspace && bash Allrun` instead of bare `bash Allrun`:
-        # SkyPilotBackend._build_task does not yet honor the registry's
-        # `workdir:` field, so the task starts in sky's default CWD (the
-        # user home on the cluster), not at the mount path. Captured as
-        # an M0 follow-up below; the cd-prefix is the in-flight workaround
-        # so this milestone closes.
+        # typical_c's Allrun runs NP=8 MPI ranks. cpus=8/memory_gb=16 keep
+        # the test on c6i.2xlarge (~$0.34/hr) which fits the ~$0.10-0.15 B8
+        # budget; the registry's ``openfoam`` chain declares min_cpus=4
+        # which is below the rank count this case needs.
+        # M1A: bare ``bash Allrun`` works now — _build_task honors the
+        # registry's ``workdir: /workspace`` and prepends the cd, so we
+        # don't need the explicit ``cd /workspace && `` workaround any
+        # more. This is the path that exercises follow-up #1's fix.
         result = tool.execute(
             service="openfoam-swak4foam-2012",
             workspace_source=workspace_source,
-            command="cd /workspace && bash Allrun",
+            command="bash Allrun",
             backend="skypilot",
             background=True,
             cpus=8,

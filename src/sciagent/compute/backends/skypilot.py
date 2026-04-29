@@ -388,16 +388,27 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
+        # M0 follow-up #1: honor the registry's ``workdir:`` by prepending
+        # ``cd <workdir> && `` to the run command. Sky's managed jobs run
+        # from the cluster user's home by default, so a bare ``bash Allrun``
+        # against an /workspace mount fails with "No such file or directory"
+        # without this. Skip the prepend when the caller already starts the
+        # command with ``cd `` (idempotent — B8's old workaround keeps
+        # working without a doubled cd).
+        run_command = job.command
+        container_workdir = getattr(job, "container_workdir", None)
+        if container_workdir and not run_command.lstrip().startswith("cd "):
+            run_command = f"cd {shlex.quote(container_workdir)} && {run_command}"
+
         # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
         # user command with the GNU `timeout` utility. shlex.quote handles
         # arbitrary command shapes (multi-line scripts, embedded quotes).
         # A timeout_sec <= 0 disables the wrapper for callers who have a
         # legitimate need to run unbounded.
-        run_command = job.command
         timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
         if timeout_sec > 0:
             run_command = (
-                f"timeout {int(timeout_sec)} bash -c {shlex.quote(job.command)}"
+                f"timeout {int(timeout_sec)} bash -c {shlex.quote(run_command)}"
             )
 
         # Create task
