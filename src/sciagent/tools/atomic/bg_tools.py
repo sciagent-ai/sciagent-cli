@@ -218,6 +218,8 @@ class BgStatusTool:
         ]
 
         # Local manifest fields (passthrough — opaque shape per v4.2 §C6).
+        if status.get("managed_job_id") is not None:
+            lines.append(f"Managed job id: {status['managed_job_id']}")
         if status.get("session_id"):
             lines.append(f"Session: {status['session_id']}")
         if status.get("owner_pid"):
@@ -245,8 +247,12 @@ class BgStatusTool:
             lines.append(f"Full logs: {output_file}")
 
         lines.append("")
-        lines.append(f"Use 'sky logs {status['job_id']}' to view full logs.")
-        lines.append(f"Use 'sky down {status['job_id']}' to terminate and stop billing.")
+        # Managed-jobs CLI hints (M1A): sky logs/down are cluster-mode; the
+        # managed-jobs equivalents are sky jobs logs / sky jobs cancel.
+        lines.append(f"Use 'sky jobs logs {status['job_id']}' to view full logs.")
+        lines.append(
+            f"Use 'sky jobs cancel {status['job_id']}' to stop billing."
+        )
         return '\n'.join(lines)
 
     def to_schema(self) -> Dict:

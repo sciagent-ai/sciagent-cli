@@ -147,6 +147,33 @@ def test_join_local_present_sky_query_raises_yields_pending():
     assert out["owner_pid"] == 1234
 
 
+def test_join_passes_through_managed_job_id():
+    """M1A: managed_job_id (the integer Sky assigns) must flow from the
+    manifest verbatim into the joined dict. None values are passed through
+    so callers can distinguish "not yet captured" from "absent field."""
+    local = {
+        "job_id": "sciagent-mid1",
+        "managed_job_id": 4242,
+        "intent": None,
+    }
+    sky = JobResult(status=JobStatus.RUNNING, summary="running")
+
+    out = join_status(job_id="sciagent-mid1", local=local, sky_result=sky)
+
+    assert out["managed_job_id"] == 4242
+
+
+def test_join_omits_managed_job_id_when_manifest_lacks_it():
+    """M0-era manifests don't carry managed_job_id; the joined dict must
+    not synthesize one (passthrough contract)."""
+    local = {"job_id": "sciagent-old", "intent": None}
+    sky = JobResult(status=JobStatus.RUNNING, summary="running")
+
+    out = join_status(job_id="sciagent-old", local=local, sky_result=sky)
+
+    assert "managed_job_id" not in out
+
+
 def test_join_sky_error_preview_propagates():
     """A failed sky_result with an error_preview must propagate that into
     the joined dict — debug paths rely on it."""
