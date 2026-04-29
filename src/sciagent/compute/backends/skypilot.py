@@ -32,6 +32,63 @@ _CLOUD_URI_PREFIXES: Dict[str, str] = {
 }
 
 
+# sky.jobs.ManagedJobStatus -> sciagent JobStatus (v4.1 §1, M1A deliverable).
+#
+# Keyed by the Sky enum's *value* (the wire string Sky uses internally), not
+# the Python member name, so this is robust to Sky renaming a member while
+# keeping the same value (e.g. SUBMITTED -> DEPRECATED_SUBMITTED in 0.12.x).
+# The original Sky string is preserved verbatim in JobResult.summary so debug
+# paths don't lose the FAILED_* variant when we collapse to FAILED.
+#
+# Decisions:
+#   - PENDING / SUBMITTED / STARTING all collapse to PENDING — the agent has
+#     no actionable difference between them.
+#   - CANCELLING is reported as RUNNING until terminal: the cancel may not
+#     succeed, and reporting CANCELLED prematurely would mis-cue the agent.
+#   - All FAILED_* variants collapse to FAILED. The variant lives in summary.
+_SKY_STATUS_TO_JOB_STATUS: Dict[str, JobStatus] = {
+    "PENDING":             JobStatus.PENDING,
+    "SUBMITTED":           JobStatus.PENDING,
+    "STARTING":            JobStatus.PENDING,
+    "RUNNING":             JobStatus.RUNNING,
+    "RECOVERING":          JobStatus.RECOVERING,
+    "CANCELLING":          JobStatus.RUNNING,
+    "SUCCEEDED":           JobStatus.COMPLETED,
+    "CANCELLED":           JobStatus.CANCELLED,
+    "FAILED":              JobStatus.FAILED,
+    "FAILED_SETUP":        JobStatus.FAILED,
+    "FAILED_PRECHECKS":    JobStatus.FAILED,
+    "FAILED_NO_RESOURCE":  JobStatus.FAILED,
+    "FAILED_CONTROLLER":   JobStatus.FAILED,
+}
+
+
+def _map_status(sky_status) -> JobStatus:
+    """Map a sky.jobs.ManagedJobStatus to a sciagent JobStatus.
+
+    Accepts either the enum member or its string value/name. Unknown states
+    return JobStatus.FAILED — a future Sky upgrade that adds a state without
+    a mapping is a *loud* failure, not a silent fall-through to RUNNING.
+    Tests iterate the entire enum to catch additions before they ship.
+    """
+    if sky_status is None:
+        return JobStatus.FAILED
+    # Accept enum, str-by-value, or str-by-name (debug shapes).
+    candidates = []
+    value = getattr(sky_status, "value", None)
+    if value is not None:
+        candidates.append(str(value))
+    name = getattr(sky_status, "name", None)
+    if name is not None:
+        candidates.append(str(name))
+    if not candidates:
+        candidates.append(str(sky_status))
+    for key in candidates:
+        if key in _SKY_STATUS_TO_JOB_STATUS:
+            return _SKY_STATUS_TO_JOB_STATUS[key]
+    return JobStatus.FAILED
+
+
 def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     """Return (store, bucket) for a recognized cloud URI, else (None, None).
 
