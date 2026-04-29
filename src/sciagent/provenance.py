@@ -34,6 +34,7 @@ from typing import Dict, Any, List, Optional, Tuple
 from .tools.atomic.web import get_fetch_logger, FetchLogger
 from .tools.atomic.shell import get_exec_logger, ExecLogger
 from .tools.atomic.todo import ContentValidator
+from .provenance_log import get_active_session_log
 
 
 @dataclass
@@ -116,6 +117,83 @@ class ProvenanceChecker:
         # Keep backwards compatibility
         self.logger = self.fetch_logger
 
+    # ------------------------------------------------------------------
+    # M1B emission helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _verdict_for_result(result: ProvenanceResult) -> str:
+        """Map a ProvenanceResult to the schema's verdict enum."""
+        if result.errors:
+            return "refuted"
+        if result.warnings:
+            return "warning"
+        return "verified"
+
+    def _emit_verification_result(
+        self,
+        gate: str,
+        claim: Dict[str, Any],
+        result: ProvenanceResult,
+        task_id: Optional[str] = None,
+    ) -> None:
+        """Best-effort write of a verification_result event to the active
+        session log. Called from each verify_* path so a verifier reading
+        the log later sees the same verdict the gate produced live.
+        """
+        log = get_active_session_log()
+        if log is None:
+            return
+        try:
+            log.emit_verification_result(
+                gate=gate,
+                task_id=task_id,
+                claim=claim,
+                verdict=self._verdict_for_result(result),
+                confidence=None,
+                evidence=dict(result.metadata) if result.metadata else {},
+                issues=[
+                    {"severity": i.severity, "category": i.category, "message": i.message}
+                    for i in result.issues
+                ],
+                verifier="provenance_checker",
+            )
+        except Exception:
+            pass  # Best-effort.
+
+    def _emit_artifact_if_verified(
+        self,
+        file_path: str,
+        result: ProvenanceResult,
+    ) -> None:
+        """Emit an artifact_produced event when _verify_file marked the
+        file as verified. Cluster-side artifacts on bucket mounts are
+        deferred to M2A; this path covers local file checks only.
+        """
+        if not result.metadata.get("file_verified"):
+            return
+        log = get_active_session_log()
+        if log is None:
+            return
+        try:
+            metadata = dict(result.metadata.get("file_metadata") or {})
+            size_bytes = None
+            try:
+                size_bytes = os.path.getsize(file_path)
+            except OSError:
+                pass
+            log.emit_artifact_produced(
+                path=os.path.abspath(file_path),
+                mount_path=None,
+                job_id=None,
+                size_bytes=size_bytes,
+                sha256=None,
+                content_type=metadata.get("file_type"),
+                metadata=metadata or None,
+            )
+        except Exception:
+            pass
+
     def verify_data_acquisition(
         self,
         claimed_url: str = None,
@@ -124,6 +202,7 @@ class ProvenanceChecker:
         expected_rows: int = None,
         min_rows: int = None,
         required_columns: List[str] = None,
+        task_id: Optional[str] = None,
     ) -> ProvenanceResult:
         """
         Verify a data acquisition claim.
@@ -166,6 +245,21 @@ class ProvenanceChecker:
         # Step 3: Cross-reference URL and file
         if claimed_url and local_file and os.path.exists(local_file):
             self._cross_reference(claimed_url, local_file, result)
+
+        # M1B: write verification_result + artifact_produced events to the
+        # session log so a cross-LLM verifier can audit the same checks.
+        claim = {
+            "kind": "data_acquisition",
+            "url": claimed_url,
+            "file_path": local_file,
+            "expected_type": expected_type,
+            "expected_rows": expected_rows,
+            "min_rows": min_rows,
+            "required_columns": required_columns,
+        }
+        self._emit_verification_result(gate="data", claim=claim, result=result, task_id=task_id)
+        if local_file:
+            self._emit_artifact_if_verified(local_file, result)
 
         return result
 
@@ -323,6 +417,7 @@ class ProvenanceChecker:
         claimed_command: str = None,
         must_have_run: bool = True,
         must_have_succeeded: bool = True,
+        task_id: Optional[str] = None,
     ) -> ProvenanceResult:
         """
         Verify that a command was actually executed.
@@ -339,59 +434,72 @@ class ProvenanceChecker:
         result.metadata["timestamp"] = datetime.now().isoformat()
         result.metadata["claimed_command"] = claimed_command
 
-        if not claimed_command:
-            result.add_issue(
-                severity="error",
-                category="no_command",
-                message="No command specified to verify",
-            )
-            return result
-
-        # Find matching executions
-        executions = self.exec_logger.find_execution(claimed_command)
-
-        if not executions:
-            if must_have_run:
+        # M1B: emission runs in `finally` so all early-return paths are
+        # captured. The existing logic and return values are untouched.
+        try:
+            if not claimed_command:
                 result.add_issue(
                     severity="error",
-                    category="no_execution_record",
-                    message=f"No execution record found for: {claimed_command}. "
-                            f"Claims to have run command but no execution was logged.",
-                    evidence={"claimed_command": claimed_command}
+                    category="no_command",
+                    message="No command specified to verify",
                 )
+                return result
+
+            # Find matching executions
+            executions = self.exec_logger.find_execution(claimed_command)
+
+            if not executions:
+                if must_have_run:
+                    result.add_issue(
+                        severity="error",
+                        category="no_execution_record",
+                        message=f"No execution record found for: {claimed_command}. "
+                                f"Claims to have run command but no execution was logged.",
+                        evidence={"claimed_command": claimed_command}
+                    )
+                return result
+
+            # Check most recent matching execution
+            latest = executions[-1]
+            result.metadata["execution_entry"] = latest
+
+            if must_have_succeeded and not latest.get("success", False):
+                exit_code = latest.get("exit_code", "unknown")
+                error_indicators = latest.get("error_indicators", [])
+
+                result.add_issue(
+                    severity="error",
+                    category="execution_failed",
+                    message=f"Command execution failed (exit code: {exit_code}). "
+                            f"Errors: {error_indicators[:3]}",
+                    evidence=latest
+                )
+                return result
+
+            if latest.get("timeout", False):
+                result.add_issue(
+                    severity="error",
+                    category="execution_timeout",
+                    message=f"Command timed out: {claimed_command}",
+                    evidence=latest
+                )
+                return result
+
+            # Success
+            result.metadata["execution_verified"] = True
             return result
-
-        # Check most recent matching execution
-        latest = executions[-1]
-        result.metadata["execution_entry"] = latest
-
-        if must_have_succeeded and not latest.get("success", False):
-            exit_code = latest.get("exit_code", "unknown")
-            error_indicators = latest.get("error_indicators", [])
-
-            result.add_issue(
-                severity="error",
-                category="execution_failed",
-                message=f"Command execution failed (exit code: {exit_code}). "
-                        f"Errors: {error_indicators[:3]}",
-                evidence=latest
+        finally:
+            claim = {
+                "kind": "execution",
+                "claimed_command": claimed_command,
+                "must_have_run": must_have_run,
+                "must_have_succeeded": must_have_succeeded,
+            }
+            self._emit_verification_result(
+                gate="exec", claim=claim, result=result, task_id=task_id,
             )
-            return result
 
-        if latest.get("timeout", False):
-            result.add_issue(
-                severity="error",
-                category="execution_timeout",
-                message=f"Command timed out: {claimed_command}",
-                evidence=latest
-            )
-            return result
-
-        # Success
-        result.metadata["execution_verified"] = True
-        return result
-
-    def verify_tests_ran(self) -> ProvenanceResult:
+    def verify_tests_ran(self, task_id: Optional[str] = None) -> ProvenanceResult:
         """
         Verify that tests were actually executed.
 
@@ -401,42 +509,50 @@ class ProvenanceChecker:
         result = ProvenanceResult(valid=True)
         result.metadata["timestamp"] = datetime.now().isoformat()
 
-        verification_runs = self.exec_logger.get_verification_runs()
+        try:
+            verification_runs = self.exec_logger.get_verification_runs()
 
-        if not verification_runs:
-            result.add_issue(
-                severity="error",
-                category="no_tests_run",
-                message="No test/verification commands found in execution log. "
-                        "Claims to have run tests but no test execution was logged.",
-            )
+            if not verification_runs:
+                result.add_issue(
+                    severity="error",
+                    category="no_tests_run",
+                    message="No test/verification commands found in execution log. "
+                            "Claims to have run tests but no test execution was logged.",
+                )
+                return result
+
+            # Check if any tests passed
+            passed = [r for r in verification_runs if r.get("success", False)]
+            failed = [r for r in verification_runs if not r.get("success", True)]
+
+            result.metadata["total_test_runs"] = len(verification_runs)
+            result.metadata["passed"] = len(passed)
+            result.metadata["failed"] = len(failed)
+
+            if not passed and failed:
+                result.add_issue(
+                    severity="error",
+                    category="all_tests_failed",
+                    message=f"All {len(failed)} test runs failed. "
+                            f"Latest failure: {failed[-1].get('error_indicators', [])}",
+                    evidence={"failed_runs": failed[-3:]}  # Last 3 failures
+                )
+            elif failed:
+                result.add_issue(
+                    severity="warning",
+                    category="some_tests_failed",
+                    message=f"{len(failed)} of {len(verification_runs)} test runs failed.",
+                    evidence={"failed_count": len(failed), "passed_count": len(passed)}
+                )
+
             return result
-
-        # Check if any tests passed
-        passed = [r for r in verification_runs if r.get("success", False)]
-        failed = [r for r in verification_runs if not r.get("success", True)]
-
-        result.metadata["total_test_runs"] = len(verification_runs)
-        result.metadata["passed"] = len(passed)
-        result.metadata["failed"] = len(failed)
-
-        if not passed and failed:
-            result.add_issue(
-                severity="error",
-                category="all_tests_failed",
-                message=f"All {len(failed)} test runs failed. "
-                        f"Latest failure: {failed[-1].get('error_indicators', [])}",
-                evidence={"failed_runs": failed[-3:]}  # Last 3 failures
+        finally:
+            self._emit_verification_result(
+                gate="exec",
+                claim={"kind": "tests_ran"},
+                result=result,
+                task_id=task_id,
             )
-        elif failed:
-            result.add_issue(
-                severity="warning",
-                category="some_tests_failed",
-                message=f"{len(failed)} of {len(verification_runs)} test runs failed.",
-                evidence={"failed_count": len(failed), "passed_count": len(passed)}
-            )
-
-        return result
 
     def get_execution_summary(self) -> Dict[str, Any]:
         """Get summary of all command executions."""

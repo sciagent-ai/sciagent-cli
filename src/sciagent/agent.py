@@ -29,7 +29,7 @@ from .state import (
 from .display import Display, create_display, Spinner
 from .defaults import DEFAULT_MODEL
 from .prompts import build_system_prompt
-from .provenance_log import get_provenance_log
+from .provenance_log import get_provenance_log, set_active_session
 
 
 @dataclass
@@ -115,6 +115,11 @@ class AgentLoop:
         # (sciagent-workspace-{session_id}) are scoped to this agent session.
         from .tools.atomic.compute import ComputeTool
         ComputeTool.set_shared_session(self.state.session_id)
+
+        # M1B: register the active session so ProvenanceChecker / orchestrator
+        # gates can find the right log without taking session_id as a
+        # constructor arg. Cleared on session change via load_session().
+        set_active_session(self.state.session_id)
         
         # Callbacks
         self._on_tool_start: Optional[Callable] = None
@@ -1601,6 +1606,9 @@ Provide a concise summary (max 500 words):"""
         state = self.state_manager.load(session_id)
         if state:
             self.state = state
+            # Refresh the M1B active-session register so subsequent provenance
+            # emissions land in the loaded session's log, not the prior one.
+            set_active_session(self.state.session_id)
             return True
         return False
     

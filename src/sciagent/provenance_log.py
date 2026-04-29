@@ -439,6 +439,7 @@ class ProvenanceLog:
 
 _logs_by_session: Dict[str, ProvenanceLog] = {}
 _logs_lock = threading.Lock()
+_active_session_id: Optional[str] = None
 
 
 def get_provenance_log(session_id: str, base_dir: Optional[Path] = None) -> ProvenanceLog:
@@ -456,7 +457,37 @@ def get_provenance_log(session_id: str, base_dir: Optional[Path] = None) -> Prov
         return log
 
 
+def set_active_session(session_id: Optional[str]) -> None:
+    """Set the process-wide "active session" so layers that don't carry a
+    session id explicitly (ProvenanceChecker, TaskOrchestrator gates, etc.)
+    can resolve the right log via ``get_active_session_log()``.
+
+    Called once by AgentLoop at startup. Pass ``None`` to clear.
+    """
+    global _active_session_id
+    _active_session_id = session_id
+
+
+def get_active_session_log() -> Optional[ProvenanceLog]:
+    """Return the ProvenanceLog for the active session, or None.
+
+    Layers that emit best-effort verification / artifact events use this
+    to find the right log without threading session_id through their
+    constructors. Returns None when no active session is set, in which
+    case callers must skip emission silently.
+    """
+    sid = _active_session_id
+    if not sid:
+        return None
+    try:
+        return get_provenance_log(sid)
+    except Exception:
+        return None
+
+
 def reset_provenance_logs() -> None:
     """Drop all cached ProvenanceLog instances (test helper)."""
+    global _active_session_id
     with _logs_lock:
         _logs_by_session.clear()
+    _active_session_id = None

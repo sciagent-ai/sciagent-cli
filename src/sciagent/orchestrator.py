@@ -28,6 +28,7 @@ from datetime import datetime
 from .tools.atomic.todo import TodoTool, TodoGraph, TodoItem
 from .subagent import SubAgentOrchestrator, SubAgentResult, SubAgentConfig
 from .provenance import ProvenanceChecker, ProvenanceResult
+from .provenance_log import get_active_session_log
 
 
 @dataclass
@@ -1076,6 +1077,8 @@ Respond with a JSON object containing your verdict, confidence, issues found, et
                         for issue in verification.get("missing_evidence", [])[:3]:
                             print(f"      - Missing: {issue}")
 
+                self._emit_llm_verification_event(task, context, verification)
+
             except Exception as e:
                 results[task.id] = {
                     "verdict": "insufficient",
@@ -1085,6 +1088,7 @@ Respond with a JSON object containing your verdict, confidence, issues found, et
                 failed_count += 1
                 if self.config.verbose:
                     print(f"    ✗ Error: {str(e)}")
+                self._emit_llm_verification_event(task, context, results[task.id])
 
         passed = failed_count == 0
 
@@ -1094,6 +1098,60 @@ Respond with a JSON object containing your verdict, confidence, issues found, et
             "tasks_failed": failed_count,
             "results": results,
         }
+
+    def _emit_llm_verification_event(
+        self,
+        task: TodoItem,
+        context: Dict[str, Any],
+        verification: Dict[str, Any],
+    ) -> None:
+        """Best-effort write of an llm-gate verification_result event to
+        the active session log. Verifier identity comes from the underlying
+        LLM client when available; falls back to a generic label so the log
+        is honest about what the model name is."""
+        log = get_active_session_log()
+        if log is None:
+            return
+        verifier = "subagent_verifier"
+        try:
+            if self.subagent and getattr(self.subagent, "llm", None):
+                verifier = getattr(self.subagent.llm, "model", verifier) or verifier
+        except Exception:
+            pass
+        try:
+            verdict = verification.get("verdict", "insufficient")
+            confidence = verification.get("confidence")
+            issues_in = verification.get("issues", []) or []
+            issues = []
+            for it in issues_in:
+                if isinstance(it, dict):
+                    issues.append({
+                        "severity": it.get("severity", "warning"),
+                        "category": it.get("category", "llm"),
+                        "message": it.get("message", str(it)),
+                    })
+                else:
+                    issues.append({"severity": "warning", "category": "llm", "message": str(it)})
+            log.emit_verification_result(
+                gate="llm",
+                task_id=task.id,
+                claim={
+                    "kind": "task_outcome",
+                    "task_content": context.get("claim"),
+                },
+                verdict=verdict if verdict in ("verified", "refuted", "insufficient", "warning") else "insufficient",
+                confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
+                evidence={
+                    "evidence_summary": context.get("evidence"),
+                    "reasoning": verification.get("reasoning"),
+                    "supporting_facts": verification.get("supporting_facts"),
+                    "fabrication_indicators": verification.get("fabrication_indicators"),
+                },
+                issues=issues,
+                verifier=verifier,
+            )
+        except Exception:
+            pass
 
     def get_llm_verification_report(self) -> str:
         """Generate a human-readable LLM verification report."""
