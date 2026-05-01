@@ -10,10 +10,11 @@ Key principles:
 import os
 import json
 import threading
+import uuid
 from typing import Dict, Any, List, Optional, Callable
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 
 from .llm import LLMClient, Message
 from .tools import ToolRegistry, BaseTool, ToolResult, create_default_registry
@@ -57,7 +58,10 @@ class SubAgentResult:
     tokens_used: int = 0
     duration_seconds: float = 0.0
     session_id: Optional[str] = None  # For resumption
-    
+    # Set when spawn(background=True) returns immediately with a registry id
+    # the caller uses with task_wait / task_get. None for synchronous spawns.
+    task_id: Optional[str] = None
+
     def to_dict(self) -> Dict:
         return {
             "agent_name": self.agent_name,
@@ -68,7 +72,8 @@ class SubAgentResult:
             "iterations": self.iterations,
             "tokens_used": self.tokens_used,
             "duration_seconds": self.duration_seconds,
-            "session_id": self.session_id
+            "session_id": self.session_id,
+            "task_id": self.task_id,
         }
 
 
@@ -532,12 +537,36 @@ class SubAgentOrchestrator:
         # Track active sub-agents
         self._active: Dict[str, SubAgent] = {}
         self._results: List[SubAgentResult] = []
-    
+
+        # Lazy thread pool for background spawns. Distinct from
+        # spawn_parallel's per-call executor: that's a fan-out join; this is
+        # fire-and-forget. Created on first background spawn and reused.
+        self._bg_executor: Optional[ThreadPoolExecutor] = None
+        self._bg_lock = threading.Lock()
+
+    def _build_subagent(self, config: SubAgentConfig) -> SubAgent:
+        """Construct a SubAgent for this orchestrator's environment.
+
+        Factored out so background and synchronous paths share one
+        construction site, and so tests can monkey-patch this single point
+        to inject a fake SubAgent without touching the global SubAgent
+        class.
+        """
+        return SubAgent(
+            config=config,
+            tools=self.tools,
+            working_dir=self.working_dir,
+            is_nested=True,
+            parent_interrupt_event=self.parent_interrupt_event,
+        )
+
     def spawn(
         self,
         agent_name: str,
         task: str,
-        custom_config: Optional[SubAgentConfig] = None
+        custom_config: Optional[SubAgentConfig] = None,
+        background: bool = False,
+        on_complete: Optional[Callable[[SubAgentResult], None]] = None,
     ) -> SubAgentResult:
         """
         Spawn and run a sub-agent
@@ -546,9 +575,18 @@ class SubAgentOrchestrator:
             agent_name: Name of registered agent type
             task: Task to execute
             custom_config: Optional custom configuration
+            background: If True, spawn on a worker thread, register the run
+                in the in-flight task index, and return a placeholder
+                SubAgentResult with task_id immediately. The caller blocks
+                via task_wait(task_id) or polls via task_get(task_id).
+            on_complete: Optional callback invoked from the worker thread
+                after the manifest's terminal state has been written. Used
+                by TaskTool to emit subagent_completed once the background
+                run finishes.
 
         Returns:
-            SubAgentResult with output
+            SubAgentResult with output (synchronous) or with task_id set
+            (background — output is a human-readable instruction string).
         """
         config = custom_config or self.registry.get(agent_name)
 
@@ -560,21 +598,235 @@ class SubAgentOrchestrator:
                 output="",
                 error=f"Unknown agent type: {agent_name}. Available: {[a['name'] for a in self.registry.list_agents()]}"
             )
-        
+
+        if background:
+            return self._spawn_background(agent_name, task, config, on_complete)
+
         # Create and run the sub-agent
-        sub_agent = SubAgent(
-            config=config,
-            tools=self.tools,
-            working_dir=self.working_dir,
-            is_nested=True,
-            parent_interrupt_event=self.parent_interrupt_event
-        )
-        
+        sub_agent = self._build_subagent(config)
+
         result = sub_agent.run(task)
         self._results.append(result)
         self._active[result.session_id] = sub_agent
-        
+
         return result
+
+    # ---- Background spawn machinery (PR4) ----------------------------------
+
+    def _ensure_bg_executor(self) -> ThreadPoolExecutor:
+        with self._bg_lock:
+            if self._bg_executor is None:
+                self._bg_executor = ThreadPoolExecutor(
+                    max_workers=self.max_workers,
+                    thread_name_prefix="subagent-bg",
+                )
+            return self._bg_executor
+
+    @staticmethod
+    def _new_subagent_task_id() -> str:
+        # Short uuid (8 chars) — enough entropy for the registry, short
+        # enough for humans / log scanning. Prefix matches the convention
+        # the registry uses: "sciagent-" for sciagent-managed entries,
+        # "sub-" so a glance distinguishes a subagent from a compute job.
+        return f"sciagent-sub-{uuid.uuid4().hex[:8]}"
+
+    @staticmethod
+    def _output_log_path(task_id: str):
+        from .compute import task_index
+        return task_index.manifest_dir() / f"{task_id}.subagent_output.log"
+
+    def _spawn_background(
+        self,
+        agent_name: str,
+        task: str,
+        config: SubAgentConfig,
+        on_complete: Optional[Callable[[SubAgentResult], None]],
+    ) -> SubAgentResult:
+        """Write the manifest, hand off to a worker thread, return immediately."""
+        from .compute import task_index
+        from .provenance_log import _active_session_id
+        from .tools.atomic.compute import ComputeTool
+
+        task_id = self._new_subagent_task_id()
+        output_log_path = self._output_log_path(task_id)
+
+        # Build the SubAgent in the parent thread BEFORE submitting — its
+        # __init__ captures and restores the parent's session ids, and that
+        # capture must happen while we're still on the parent thread (the
+        # globals are not thread-local). The worker thread only calls
+        # sub_agent.run().
+        sub_agent = self._build_subagent(config)
+
+        parent_session_id = (
+            ComputeTool._shared_session_id or _active_session_id
+        )
+
+        manifest = {
+            "job_id": task_id,
+            "kind": "subagent",
+            "state": "running",
+            "session_id": parent_session_id,
+            "owner_pid": os.getpid(),
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "completed_at": None,
+            "result_summary": None,
+            "body": {
+                "name": agent_name,
+                "task_preview": task[:500],
+                "parent_session_id": parent_session_id,
+                "child_session_id": sub_agent.session_id,
+                "output_log_path": str(output_log_path),
+                "result": None,
+            },
+        }
+        try:
+            task_index.write_task(manifest)
+        except Exception as e:
+            # Best-effort: if the registry is unwritable, fall back to a
+            # synchronous run so the caller still gets a result instead of a
+            # ghost task_id pointing to nothing.
+            return SubAgentResult(
+                agent_name=agent_name,
+                task=task,
+                success=False,
+                output="",
+                error=f"Failed to write subagent manifest: {e}",
+            )
+
+        executor = self._ensure_bg_executor()
+        executor.submit(
+            self._run_background,
+            sub_agent,
+            task,
+            task_id,
+            output_log_path,
+            on_complete,
+        )
+
+        return SubAgentResult(
+            agent_name=agent_name,
+            task=task,
+            success=True,
+            output=(
+                f"Backgrounded as task {task_id}. Use task_wait('{task_id}') "
+                f"to block on completion, or task_get('{task_id}') for a "
+                f"snapshot. Full transcript will be at {output_log_path}."
+            ),
+            iterations=0,
+            tokens_used=0,
+            duration_seconds=0.0,
+            session_id=sub_agent.session_id,
+            task_id=task_id,
+        )
+
+    _MAX_RESULT_SUMMARY_CHARS = 4000
+
+    def _run_background(
+        self,
+        sub_agent: SubAgent,
+        task: str,
+        task_id: str,
+        output_log_path,
+        on_complete: Optional[Callable[[SubAgentResult], None]],
+    ) -> None:
+        """Worker-thread entry point for backgrounded subagent runs.
+
+        Always writes a terminal manifest state so a crashed thread doesn't
+        leave the registry in 'running' forever. Errors raised by SubAgent.run
+        are already caught inside SubAgent.run itself; this thread's
+        try/except is only the safety net for failures in our own bookkeeping.
+        """
+        from .compute import task_index
+
+        try:
+            result = sub_agent.run(task)
+        except Exception as e:
+            # SubAgent.run catches its own exceptions; reaching here means
+            # something inside SubAgent.run leaked. Synthesize a failed
+            # result so the lifecycle still closes cleanly.
+            result = SubAgentResult(
+                agent_name=sub_agent.config.name,
+                task=task,
+                success=False,
+                output="",
+                error=f"unhandled subagent exception: {e}",
+                session_id=getattr(sub_agent, "session_id", None),
+            )
+
+        # Best-effort full-output log file. If this fails, the manifest
+        # snapshot still has the truncated result_summary.
+        try:
+            output_log_path.parent.mkdir(parents=True, exist_ok=True)
+            output_log_path.write_text(result.output or "", encoding="utf-8")
+        except Exception:
+            pass
+
+        try:
+            self._finalize_background(task_id, result)
+        except Exception:
+            pass
+
+        # Bookkeeping for in-process callers — match the synchronous spawn
+        # path's contract so resume()/get_history() work the same way.
+        with self._bg_lock:
+            self._results.append(result)
+            if result.session_id:
+                self._active[result.session_id] = sub_agent
+
+        if on_complete is not None:
+            try:
+                on_complete(result)
+            except Exception:
+                pass
+
+    def _finalize_background(self, task_id: str, result: SubAgentResult) -> None:
+        """Read the manifest, merge body.result + lifecycle, atomic write."""
+        from .compute import task_index
+
+        record = task_index.read_task(task_id)
+        if record is None:
+            return  # manifest gone — nothing to update
+
+        record = dict(record)
+        body = dict(record.get("body") or {})
+
+        full_output = result.output or ""
+        if len(full_output) > self._MAX_RESULT_SUMMARY_CHARS:
+            summary = (
+                full_output[: self._MAX_RESULT_SUMMARY_CHARS]
+                + f"\n\n[truncated {len(full_output) - self._MAX_RESULT_SUMMARY_CHARS:,} chars; full transcript at {body.get('output_log_path')}]"
+            )
+        else:
+            summary = full_output
+
+        body["result"] = {
+            "success": bool(result.success),
+            "error": result.error,
+            "iterations": getattr(result, "iterations", 0),
+            "tokens_used": getattr(result, "tokens_used", 0),
+            "duration_seconds": getattr(result, "duration_seconds", 0.0),
+            "child_session_id": getattr(result, "session_id", None),
+            "summary": summary,
+        }
+        record["body"] = body
+
+        terminal_state = "completed" if result.success else "failed"
+        record["state"] = terminal_state
+        record["completed_at"] = datetime.now(timezone.utc).isoformat()
+        # Top-level result_summary is what task_list shows per-row — keep it
+        # terse. For failures, prefer the error string; for successes, the
+        # truncated output.
+        if not result.success and result.error:
+            record["result_summary"] = result.error[
+                : self._MAX_RESULT_SUMMARY_CHARS
+            ]
+        else:
+            record["result_summary"] = summary
+
+        try:
+            task_index.write_task(record)
+        except Exception:
+            pass
     
     def spawn_parallel(
         self,
