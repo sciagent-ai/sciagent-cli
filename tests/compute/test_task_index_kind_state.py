@@ -408,6 +408,133 @@ def test_normalize_handles_non_dict(tmp_manifest_dir: Path):
     assert task_index._normalize(42) == {}
 
 
+# ---- subagent kind (PR4) ---------------------------------------------------
+
+
+def test_subagent_in_known_kinds():
+    """subagent is the first non-compute kind; get_task(strict=True) accepts it."""
+    assert "subagent" in task_index.KNOWN_KINDS
+
+
+def test_subagent_kind_round_trips(tmp_manifest_dir: Path):
+    """A subagent manifest with authored body[...] round-trips through
+    write_task → read_task without flattening or losing the nested fields."""
+    record = {
+        "job_id": "sciagent-sub-rt",
+        "kind": "subagent",
+        "state": "running",
+        "session_id": "ses-sub",
+        "owner_pid": 4242,
+        "started_at": "2026-04-30T10:00:00+00:00",
+        "completed_at": None,
+        "result_summary": None,
+        "body": {
+            "name": "compute",
+            "task_preview": "run hello world on sky",
+            "parent_session_id": "ses-parent",
+            "output_log_path": "/tmp/sciagent-sub-rt.subagent_output.log",
+            "result": None,
+        },
+    }
+    task_index.write_task(record)
+    got = task_index.read_task("sciagent-sub-rt")
+    assert got is not None
+    assert got["kind"] == "subagent"
+    assert got["body"]["name"] == "compute"
+    assert got["body"]["task_preview"] == "run hello world on sky"
+    assert got["body"]["parent_session_id"] == "ses-parent"
+    assert got["body"]["output_log_path"].endswith(".subagent_output.log")
+    assert got["body"]["result"] is None
+
+
+def test_normalize_passes_authored_body_through(tmp_manifest_dir: Path):
+    """For non-compute_job kinds the manifest writes body[] authoritatively;
+    _normalize must not derive over the top of it."""
+    record = {
+        "job_id": "sciagent-sub-norm",
+        "kind": "subagent",
+        "state": "running",
+        "body": {
+            "name": "explore",
+            "task_preview": "find the auth code",
+            "result": None,
+        },
+    }
+    out = task_index._normalize(record)
+    assert out["kind"] == "subagent"
+    assert out["body"]["name"] == "explore"
+    assert out["body"]["task_preview"] == "find the auth code"
+
+
+def test_normalize_no_body_for_subagent_yields_empty_body(tmp_manifest_dir: Path):
+    """A subagent manifest without an authored body falls through to the
+    setdefault — empty body, not the compute_job derivation."""
+    record = {
+        "job_id": "sciagent-sub-empty",
+        "kind": "subagent",
+        "state": "running",
+        # No "body" key, no compute_job flat fields.
+    }
+    out = task_index._normalize(record)
+    assert out["body"] == {}
+
+
+def test_kind_of_returns_subagent_when_manifest_kind_is_subagent(
+    tmp_manifest_dir: Path,
+):
+    """kind_of must surface 'subagent' for subagent manifests so bg_*'s
+    routing skips the compute path. (Already exercised in test_kind_of_
+    returns_kind_for_non_compute_manifest at the read level — this confirms
+    the same with a manifest written via write_task instead of by hand.)"""
+    task_index.write_task(
+        {
+            "job_id": "sciagent-sub-ko",
+            "kind": "subagent",
+            "state": "running",
+            "body": {"name": "compute"},
+        }
+    )
+    assert task_index.kind_of("sciagent-sub-ko") == "subagent"
+
+
+def test_get_task_strict_accepts_subagent(tmp_manifest_dir: Path):
+    task_index.write_task(
+        {
+            "job_id": "sciagent-sub-strict",
+            "kind": "subagent",
+            "state": "running",
+            "body": {"name": "compute"},
+        }
+    )
+    got = task_index.get_task("sciagent-sub-strict", strict=True)
+    assert got is not None
+    assert got["kind"] == "subagent"
+
+
+def test_update_task_state_works_on_subagent_kind(tmp_manifest_dir: Path):
+    """Lifecycle transitions are kind-agnostic — completed_at and result
+    summary land on a subagent manifest the same way they land on
+    compute_job."""
+    task_index.write_task(
+        {
+            "job_id": "sciagent-sub-life",
+            "kind": "subagent",
+            "state": "running",
+            "body": {"name": "explore", "result": None},
+        }
+    )
+    ok = task_index.update_task_state(
+        "sciagent-sub-life", "completed", result_summary="found the function"
+    )
+    assert ok is True
+    got = task_index.read_task("sciagent-sub-life")
+    assert got["state"] == "completed"
+    assert got["completed_at"]
+    assert got["result_summary"] == "found the function"
+    # body must NOT be wiped by the state transition.
+    assert got["body"]["name"] == "explore"
+
+
 # ---- kind_of ----------------------------------------------------------------
 
 

@@ -40,13 +40,14 @@ from .job import JobResult, JobStatus
 # ---- Kind / state taxonomy (consolidation refactor PR1) ---------------------
 #
 # The manifest is being broadened from "compute job record" to "in-flight
-# registry entry typed by kind." PR1 only ships the compute_job kind; future
-# kinds (subagent, watch, scheduled) will land additively. Both fields are
-# read-side defaulted: a kind-less manifest is interpreted as compute_job, a
-# state-less manifest is interpreted as running (the only state pre-PR1
-# manifests could have been in when written).
+# registry entry typed by kind." PR1 shipped compute_job; PR4 adds subagent
+# (the first non-compute kind, with backgrounded SubAgent runs as the
+# consumer). Future kinds (watch, scheduled) will land additively. Both
+# fields are read-side defaulted: a kind-less manifest is interpreted as
+# compute_job, a state-less manifest is interpreted as running (the only
+# state pre-PR1 manifests could have been in when written).
 
-KNOWN_KINDS = ("compute_job",)
+KNOWN_KINDS = ("compute_job", "subagent")
 
 VALID_STATES = ("pending", "running", "completed", "failed", "cancelled")
 
@@ -259,11 +260,13 @@ def _normalize(record: Dict[str, Any]) -> Dict[str, Any]:
     absent (back-compat for pre-PR1 manifests written without those fields).
     Does NOT mutate the input.
 
-    Forward-compat: also exposes a derived ``body`` view that re-publishes the
-    kind-specific flat fields under ``body[...]``. PR1 keeps fields flat at
-    the top level for back-compat with tests that dict-equality-assert on
-    them; PR2 will move to authoritative nested ``body`` storage. Until then
-    ``body`` is purely a read-side convenience.
+    For compute_job, the kind-specific flat fields are surfaced under a
+    derived ``body`` view (read-side convenience; the on-disk shape stays
+    flat for back-compat). For non-compute kinds (subagent and later
+    additions), the manifest writes ``body`` authoritatively at the top
+    level and ``setdefault`` below leaves the authored body untouched —
+    that's the precedent new kinds follow so kind-specific keys don't
+    multiply across the flat namespace.
     """
     if not isinstance(record, dict):
         return {}
