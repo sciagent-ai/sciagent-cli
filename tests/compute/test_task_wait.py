@@ -193,9 +193,20 @@ def test_task_wait_no_id_returns_error(tmp_manifest_dir: Path):
     assert "id is required" in (result.error or "").lower()
 
 
-def test_task_wait_manifest_deleted_during_wait(tmp_manifest_dir: Path):
+def test_task_wait_manifest_deleted_during_wait(
+    tmp_manifest_dir: Path, monkeypatch
+):
     """A concurrent reaper that deletes the manifest while we're polling
-    surfaces a clear error rather than spinning forever."""
+    surfaces a clear error rather than spinning forever.
+
+    Deterministic via patched get_task: first call (initial existence
+    check) returns the manifest; subsequent calls (the polling loop)
+    return None, simulating a delete that happened between the initial
+    check and the first poll. Avoids relying on threading scheduler
+    timing — a real concurrent reaper would race here, but the behavior
+    we care about is the same: get_task returning None inside the loop
+    triggers the disappeared-manifest error path.
+    """
     task_index.write_task(
         {
             "job_id": "sciagent-disappear",
@@ -204,19 +215,22 @@ def test_task_wait_manifest_deleted_during_wait(tmp_manifest_dir: Path):
             "body": {"name": "explore"},
         }
     )
+    call_count = {"n": 0}
+    real_get_task = task_index.get_task
 
-    def reaper() -> None:
-        time.sleep(0.1)
-        task_index.delete_task("sciagent-disappear")
+    def fake_get_task(id: str, strict: bool = False):
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            return None
+        return real_get_task(id, strict=strict)
 
-    t = threading.Thread(target=reaper)
-    t.start()
-    try:
-        result = TaskWaitTool().execute(
-            id="sciagent-disappear", timeout=5.0, poll_interval=0.05
-        )
-    finally:
-        t.join()
+    monkeypatch.setattr(
+        "sciagent.compute.task_index.get_task", fake_get_task
+    )
+
+    result = TaskWaitTool().execute(
+        id="sciagent-disappear", timeout=5.0, poll_interval=0.02
+    )
     assert result.success is False
     assert "disappeared" in (result.error or "").lower()
 

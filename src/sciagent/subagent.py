@@ -906,7 +906,9 @@ Use 'research' for documentation, APIs, scientific methods.
 Use 'compute' for ANY task that runs on the cloud — keeps install chatter, status polls, and job logs out of your context. Returns a tight summary with local file paths.
 Use 'plan' before implementing anything non-trivial.
 Use 'general' for complex tasks that need to make changes.
-Use 'verifier' to independently verify claims before final output."""
+Use 'verifier' to independently verify claims before final output.
+
+Default mode is synchronous (background=false): you block on the sub-agent and get its result inline. Pass background=true to run the sub-agent on a worker thread and get back a task_id immediately — then use task_wait(task_id) to block on terminal state, or task_get(task_id) for a snapshot. Background mode is right when the parent has other work to do (e.g. spawn two sub-agents in parallel and wait on both) or when the sub-agent will run for many minutes and the parent shouldn't block the whole time."""
 
     parameters = {
         "type": "object",
@@ -919,14 +921,18 @@ Use 'verifier' to independently verify claims before final output."""
             "task": {
                 "type": "string",
                 "description": "The task for the sub-agent to complete"
+            },
+            "background": {
+                "type": "boolean",
+                "description": "If true, run on a worker thread and return a task_id; default false."
             }
         },
         "required": ["agent_name", "task"]
     }
-    
+
     def __init__(self, orchestrator: SubAgentOrchestrator):
         self.orchestrator = orchestrator
-    
+
     # Hard cap on what a subagent can return to its parent. Subagents already
     # have isolated context (their own AgentLoop, their own conversation), but
     # whatever they put in their final reply lands in the parent's tool result
@@ -938,7 +944,55 @@ Use 'verifier' to independently verify claims before final output."""
     # _outputs/ and references by path.
     _MAX_RETURN_CHARS = 4000
 
-    def execute(self, agent_name: str, task: str) -> ToolResult:
+    @staticmethod
+    def _emit_spawned(plog, agent_name: str, task: str) -> Optional[str]:
+        if plog is None:
+            return None
+        try:
+            return plog._write_event(
+                "subagent_spawned",
+                {
+                    "subagent_name": agent_name,
+                    "task_preview": task[:500],
+                },
+                actor=f"subagent:{agent_name}",
+            )
+        except Exception:
+            return None  # provenance is best-effort
+
+    @staticmethod
+    def _emit_completed(
+        plog,
+        agent_name: str,
+        spawn_event_id: Optional[str],
+        result: SubAgentResult,
+    ) -> None:
+        if plog is None:
+            return
+        try:
+            plog._write_event(
+                "subagent_completed",
+                {
+                    "subagent_name": agent_name,
+                    "spawn_event_id": spawn_event_id,
+                    "success": bool(result.success),
+                    "iterations": getattr(result, "iterations", None),
+                    "tokens_used": getattr(result, "tokens_used", None),
+                    "duration_seconds": getattr(result, "duration_seconds", None),
+                    "child_session_id": getattr(result, "session_id", None),
+                    "error": result.error if not result.success else None,
+                },
+                actor=f"subagent:{agent_name}",
+            )
+        except Exception:
+            pass
+
+    def execute(
+        self,
+        agent_name: str,
+        task: str,
+        background: bool = False,
+    ) -> ToolResult:
         # M1B provenance: emit subagent_spawned / subagent_completed events
         # to the active (parent's) provenance log so the audit trail shows
         # the orchestration. compute_run events emitted from inside the
@@ -948,42 +1002,39 @@ Use 'verifier' to independently verify claims before final output."""
         from .provenance_log import get_active_session_log
 
         plog = get_active_session_log()
-        spawn_event_id = None
-        if plog is not None:
-            try:
-                spawn_event_id = plog._write_event(
-                    "subagent_spawned",
-                    {
-                        "subagent_name": agent_name,
-                        "task_preview": task[:500],
-                    },
-                    actor=f"subagent:{agent_name}",
+        spawn_event_id = self._emit_spawned(plog, agent_name, task)
+
+        if background:
+            # Defer subagent_completed to the worker thread's on_complete
+            # callback. The closure captures plog + spawn_event_id from
+            # this thread so the event lands in the right log even after
+            # the parent's session changes.
+            def _on_complete(result: SubAgentResult) -> None:
+                self._emit_completed(plog, agent_name, spawn_event_id, result)
+
+            placeholder = self.orchestrator.spawn(
+                agent_name, task, background=True, on_complete=_on_complete
+            )
+            if not placeholder.success or placeholder.task_id is None:
+                # spawn rejected the request before launching the thread —
+                # close the audit pair right now so the log doesn't have a
+                # dangling subagent_spawned with no completion.
+                self._emit_completed(plog, agent_name, spawn_event_id, placeholder)
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=f"Sub-agent failed to launch: {placeholder.error}",
                 )
-            except Exception:
-                pass  # provenance is best-effort; never fail the spawn on log error
+            return ToolResult(
+                success=True,
+                output=(
+                    f"[Sub-agent '{agent_name}' backgrounded as task "
+                    f"{placeholder.task_id}]\n\n{placeholder.output}"
+                ),
+            )
 
         result = self.orchestrator.spawn(agent_name, task)
-
-        # subagent_completed always emitted (success or failure) so the
-        # audit pairs every spawn with its terminal state.
-        if plog is not None:
-            try:
-                plog._write_event(
-                    "subagent_completed",
-                    {
-                        "subagent_name": agent_name,
-                        "spawn_event_id": spawn_event_id,
-                        "success": bool(result.success),
-                        "iterations": getattr(result, "iterations", None),
-                        "tokens_used": getattr(result, "tokens_used", None),
-                        "duration_seconds": getattr(result, "duration_seconds", None),
-                        "child_session_id": getattr(result, "session_id", None),
-                        "error": result.error if not result.success else None,
-                    },
-                    actor=f"subagent:{agent_name}",
-                )
-            except Exception:
-                pass
+        self._emit_completed(plog, agent_name, spawn_event_id, result)
 
         if result.success:
             output = result.output or ""
