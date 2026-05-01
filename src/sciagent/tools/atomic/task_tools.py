@@ -1,25 +1,24 @@
 """Kind-agnostic registry tools.
 
-Two LLM-facing tools that view the in-flight registry across kinds:
+Three LLM-facing tools that view the in-flight registry across kinds:
 
   - task_list(kind=, state=, session_id=)   — enumerate registry entries
   - task_get(id)                            — inspect a single entry
+  - task_wait(id, timeout=, poll_interval=) — block until terminal state
 
 These complement the kind-specific bg_status / bg_output / bg_wait / bg_kill
 tools rather than replacing them. bg_* still owns the cloud-job runtime
-surface (status from sky, log streaming, terminal-state polling); the
-task_* tools own the cross-kind registry surface (what's tracked, by whom,
-in what lifecycle state).
-
-When non-compute kinds (subagent, watch, scheduled) eventually land, they
-appear in task_list / task_get without any tool-shape change — that's the
-whole point of the kind discriminator. bg_* will continue to be the
-compute-specific runtime surface; task_* will be how the agent (or a human
-reading the session) sees "everything in flight."
+surface (status from sky, log streaming, compute-side terminal-state
+polling). task_* owns the cross-kind registry surface: what's tracked, by
+whom, in what lifecycle state, and waiting on lifecycle transitions for
+any kind. PR4 added kind="subagent" as the first non-compute consumer of
+task_wait; future kinds (watch, scheduled) inherit the same surface
+without per-kind branching.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
@@ -147,6 +146,42 @@ class TaskListTool:
         }
 
 
+def _format_full_record(record: Dict[str, Any], header: str) -> str:
+    """Render a normalized manifest the way task_get / task_wait both do.
+
+    Factored out of TaskGetTool.execute so task_wait's terminal-snapshot
+    output looks identical to task_get's — same formatting reduces the
+    noise an LLM has to cope with when alternating between the two.
+    """
+    from sciagent.compute.task_index import _normalize
+
+    normalized = _normalize(record)
+    lines = [
+        header,
+        f"  kind: {normalized['kind']}",
+        f"  state: {normalized['state']}",
+    ]
+    for key, label in (
+        ("session_id", "session"),
+        ("started_at", "started"),
+        ("completed_at", "completed"),
+        ("owner_pid", "owner_pid"),
+        ("result_summary", "result"),
+    ):
+        value = normalized.get(key)
+        if value:
+            lines.append(f"  {label}: {value}")
+
+    body = normalized.get("body") or {}
+    if body:
+        lines.append("  body:")
+        for key, value in body.items():
+            if value is None or value == [] or value == {}:
+                continue
+            lines.append(f"    {key}: {value}")
+    return "\n".join(lines)
+
+
 class TaskGetTool:
     """Inspect a single registry entry."""
 
@@ -177,7 +212,7 @@ class TaskGetTool:
                 success=False, output=None, error="id is required."
             )
         try:
-            from sciagent.compute.task_index import _normalize, get_task
+            from sciagent.compute.task_index import get_task
 
             record = get_task(id)
         except Exception as e:
@@ -190,32 +225,156 @@ class TaskGetTool:
                 error=f"No task with id {id!r} in the registry.",
             )
 
-        normalized = _normalize(record)
-        lines = [
-            f"Task: {normalized.get('job_id', id)}",
-            f"  kind: {normalized['kind']}",
-            f"  state: {normalized['state']}",
-        ]
-        for key, label in (
-            ("session_id", "session"),
-            ("started_at", "started"),
-            ("completed_at", "completed"),
-            ("owner_pid", "owner_pid"),
-            ("result_summary", "result"),
-        ):
-            value = normalized.get(key)
-            if value:
-                lines.append(f"  {label}: {value}")
+        header = f"Task: {record.get('job_id', id)}"
+        return ToolResult(
+            success=True,
+            output=_format_full_record(record, header),
+            error=None,
+        )
 
-        body = normalized.get("body") or {}
-        if body:
-            lines.append("  body:")
-            for key, value in body.items():
-                if value is None or value == [] or value == {}:
-                    continue
-                lines.append(f"    {key}: {value}")
+    def to_schema(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "parameters": self.parameters,
+        }
 
-        return ToolResult(success=True, output="\n".join(lines), error=None)
+
+class TaskWaitTool:
+    """Block until a registry task reaches a terminal state.
+
+    Kind-agnostic: works on any task_index entry (compute_job, subagent,
+    and any future kind) by polling the manifest's ``state`` field. For
+    cloud-compute-specific waits with output streaming and cluster
+    teardown, ``bg_wait`` remains the right tool — it joins the manifest
+    with sky's controller view in one call. ``task_wait`` is the
+    registry-only surface: it observes the file the manifest holds, and
+    nothing else.
+    """
+
+    name = "task_wait"
+    description = (
+        "Block until a registry task (id) reaches a terminal state "
+        "(completed / failed / cancelled). Works across all kinds — "
+        "compute_job, subagent, etc. Returns the final manifest snapshot. "
+        "On timeout, returns the still-running snapshot so the caller can "
+        "decide whether to wait again or move on. For cloud-compute-"
+        "specific waits with log fetching, prefer bg_wait."
+    )
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Task id to wait on.",
+            },
+            "timeout": {
+                "type": "number",
+                "description": (
+                    "Max seconds to wait before returning the still-running "
+                    "snapshot. Default 600."
+                ),
+            },
+            "poll_interval": {
+                "type": "number",
+                "description": (
+                    "Seconds between manifest polls. Default 1.0."
+                ),
+            },
+        },
+        "required": ["id"],
+    }
+
+    # Kept terse — bg_wait's poll cadence is comparable; faster polling
+    # would hammer the disk for no signal benefit (manifest writes are
+    # event-driven, not periodic).
+    DEFAULT_TIMEOUT = 600.0
+    DEFAULT_POLL_INTERVAL = 1.0
+
+    def execute(
+        self,
+        id: Optional[str] = None,
+        timeout: Optional[float] = None,
+        poll_interval: Optional[float] = None,
+    ) -> ToolResult:
+        if not id:
+            return ToolResult(
+                success=False, output=None, error="id is required."
+            )
+        timeout = float(timeout) if timeout is not None else self.DEFAULT_TIMEOUT
+        poll_interval = (
+            float(poll_interval)
+            if poll_interval is not None
+            else self.DEFAULT_POLL_INTERVAL
+        )
+        if poll_interval <= 0:
+            poll_interval = self.DEFAULT_POLL_INTERVAL
+
+        try:
+            from sciagent.compute.task_index import (
+                TERMINAL_STATES,
+                get_task,
+            )
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=str(e))
+
+        # Resolve the manifest once before sleeping — surfaces a clean
+        # "no such task" error instead of waiting through the whole
+        # timeout on a typo.
+        record = get_task(id)
+        if record is None:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"No task with id {id!r} in the registry.",
+            )
+
+        deadline = time.time() + timeout
+        timed_out = False
+        while record.get("state", "running") not in TERMINAL_STATES:
+            if time.time() >= deadline:
+                timed_out = True
+                break
+            time.sleep(poll_interval)
+            record = get_task(id)
+            if record is None:
+                # Manifest deleted while we were waiting — surface the
+                # disappearance instead of looping forever.
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=(
+                        f"Manifest for {id!r} disappeared while waiting "
+                        f"(deleted by a concurrent reaper?)."
+                    ),
+                )
+
+        if timed_out:
+            header = (
+                f"Task: {record.get('job_id', id)} (still running after "
+                f"{timeout:.0f}s — call task_wait again or task_get to "
+                f"inspect)"
+            )
+            # Treat timeout as success=True with the snapshot — same shape
+            # as bg_wait's snapshot return when block=False.
+            return ToolResult(
+                success=True,
+                output=_format_full_record(record, header),
+                error=None,
+            )
+
+        header = f"Task: {record.get('job_id', id)} (terminal)"
+        # success of the wait reflects whether the task itself succeeded —
+        # callers chain on this.
+        ok = record.get("state") == "completed"
+        return ToolResult(
+            success=ok,
+            output=_format_full_record(record, header),
+            error=None
+            if ok
+            else f"Task ended in state {record.get('state')!r}.",
+        )
 
     def to_schema(self) -> Dict[str, Any]:
         return {

@@ -226,7 +226,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.todo import TodoTool
     from .atomic.ask_user import AskUserTool
     from .atomic.bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
-    from .atomic.task_tools import TaskListTool, TaskGetTool
+    from .atomic.task_tools import TaskListTool, TaskGetTool, TaskWaitTool
     from .atomic.compute import ComputeTool
 
     registry = ToolRegistry()
@@ -248,8 +248,10 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     # In-flight registry tools (kind-agnostic registry surface). These
     # complement bg_*: bg_* answers "what is THIS specific job doing right
     # now"; task_* answers "what's tracked across all kinds + sessions".
+    # task_wait blocks until terminal state; works on any kind (PR4).
     registry.register(TaskListTool())
     registry.register(TaskGetTool())
+    registry.register(TaskWaitTool())
 
     # Compute tool
     registry.register(ComputeTool(working_dir))
