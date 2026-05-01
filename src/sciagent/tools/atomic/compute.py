@@ -301,6 +301,15 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
 
             record: Dict[str, Any] = {
                 "job_id": job_id,
+                # PR1 (consolidation): kind discriminator + lifecycle state.
+                # kind=compute_job marks this as a cloud compute manifest in
+                # the broader in-flight registry; state starts at "running"
+                # because the launch has just succeeded by the time we get
+                # here, and bg_wait/bg_kill drive transitions afterwards.
+                "kind": "compute_job",
+                "state": "running",
+                "completed_at": None,
+                "result_summary": None,
                 "managed_job_id": managed_job_id,
                 "session_id": session_id,
                 # intent / expected_artifacts are opaque-by-design (v4.2 §C6).

@@ -88,7 +88,11 @@ def test_reap_overdue_terminates_overdue_clusters(monkeypatch):
 
     monkeypatch.setattr(
         "sciagent.compute.reaper.list_tasks",
-        lambda: [overdue, healthy],
+        lambda **kw: [overdue, healthy],
+    )
+    monkeypatch.setattr(
+        "sciagent.compute.reaper.update_task_state",
+        lambda *a, **kw: True,
     )
     cleanup = MagicMock(return_value=True)
 
@@ -102,7 +106,11 @@ def test_reap_overdue_skips_records_without_timeout(monkeypatch):
     """timeout_sec=0 / missing means "no enforcement" — never reap."""
     no_timeout = _record("sciagent-untimed", started_offset_sec=99999, timeout_sec=0)
     monkeypatch.setattr(
-        "sciagent.compute.reaper.list_tasks", lambda: [no_timeout]
+        "sciagent.compute.reaper.list_tasks", lambda **kw: [no_timeout]
+    )
+    monkeypatch.setattr(
+        "sciagent.compute.reaper.update_task_state",
+        lambda *a, **kw: True,
     )
     cleanup = MagicMock()
 
@@ -121,7 +129,11 @@ def test_reap_overdue_tolerates_garbage_timestamps(monkeypatch):
     }
     overdue = _record("sciagent-overdue", started_offset_sec=7200, timeout_sec=3600)
     monkeypatch.setattr(
-        "sciagent.compute.reaper.list_tasks", lambda: [garbage, overdue]
+        "sciagent.compute.reaper.list_tasks", lambda **kw: [garbage, overdue]
+    )
+    monkeypatch.setattr(
+        "sciagent.compute.reaper.update_task_state",
+        lambda *a, **kw: True,
     )
     cleanup = MagicMock(return_value=True)
 
@@ -136,7 +148,11 @@ def test_reap_overdue_swallows_cleanup_failures(monkeypatch):
     overdue1 = _record("sciagent-a", started_offset_sec=9999, timeout_sec=60)
     overdue2 = _record("sciagent-b", started_offset_sec=9999, timeout_sec=60)
     monkeypatch.setattr(
-        "sciagent.compute.reaper.list_tasks", lambda: [overdue1, overdue2]
+        "sciagent.compute.reaper.list_tasks", lambda **kw: [overdue1, overdue2]
+    )
+    monkeypatch.setattr(
+        "sciagent.compute.reaper.update_task_state",
+        lambda *a, **kw: True,
     )
 
     cleanup = MagicMock(side_effect=[RuntimeError("sky offline"), True])
@@ -144,6 +160,119 @@ def test_reap_overdue_swallows_cleanup_failures(monkeypatch):
 
     assert reaped == ["sciagent-a", "sciagent-b"]
     assert cleanup.call_count == 2
+
+
+# ---- PR1 (consolidation): kind/state filter + cancelled-on-reap -------------
+
+
+def test_reaper_only_reaps_running_compute_jobs(tmp_path, monkeypatch):
+    """Reaper must filter list_tasks(kind='compute_job', state='running').
+    A completed manifest whose started_at + timeout_sec is in the past must
+    NOT be reaped — its lifecycle is over and the cluster is already gone."""
+    from sciagent.compute import task_index
+
+    fake_home = tmp_path / "home" / ".sciagent" / "tasks"
+    monkeypatch.setattr(task_index, "manifest_dir", lambda: fake_home)
+
+    started = (datetime.now(timezone.utc) - timedelta(seconds=7200)).isoformat()
+    # Three manifests: running overdue, completed overdue, kindless overdue.
+    task_index.write_task(
+        {
+            "job_id": "sciagent-running",
+            "kind": "compute_job",
+            "state": "running",
+            "started_at": started,
+            "timeout_sec": 3600,
+        }
+    )
+    task_index.write_task(
+        {
+            "job_id": "sciagent-done",
+            "kind": "compute_job",
+            "state": "completed",
+            "started_at": started,
+            "timeout_sec": 3600,
+        }
+    )
+    # Pre-PR1 manifest (no kind / state). Back-compat: defaults to
+    # compute_job/running, so it SHOULD be reaped.
+    fake_home.mkdir(parents=True, exist_ok=True)
+    import json as _json
+
+    (fake_home / "sciagent-legacy.json").write_text(
+        _json.dumps(
+            {
+                "job_id": "sciagent-legacy",
+                "started_at": started,
+                "timeout_sec": 3600,
+            }
+        )
+    )
+
+    cleanup = MagicMock(return_value=True)
+    reaped = reap_overdue(cleanup=cleanup)
+
+    assert sorted(reaped) == ["sciagent-legacy", "sciagent-running"]
+    assert "sciagent-done" not in reaped
+
+
+def test_reaper_marks_state_cancelled_after_cleanup(tmp_path, monkeypatch):
+    """After a successful cleanup, the manifest must read state='cancelled',
+    completed_at populated, and result_summary set — so cross-session readers
+    see the truth without needing to re-query sky."""
+    from sciagent.compute import task_index
+
+    fake_home = tmp_path / "home" / ".sciagent" / "tasks"
+    monkeypatch.setattr(task_index, "manifest_dir", lambda: fake_home)
+
+    started = (datetime.now(timezone.utc) - timedelta(seconds=9999)).isoformat()
+    task_index.write_task(
+        {
+            "job_id": "sciagent-victim",
+            "kind": "compute_job",
+            "state": "running",
+            "started_at": started,
+            "timeout_sec": 60,
+        }
+    )
+
+    cleanup = MagicMock(return_value=True)
+    reaped = reap_overdue(cleanup=cleanup)
+    assert reaped == ["sciagent-victim"]
+
+    after = task_index.read_task("sciagent-victim")
+    assert after["state"] == "cancelled"
+    assert after["completed_at"]
+    assert "reaped" in after["result_summary"].lower()
+    assert "timeout" in after["result_summary"].lower()
+
+
+def test_reaper_cleanup_failure_still_marks_cancelled(tmp_path, monkeypatch):
+    """If cleanup raises, the reaper still records the cancellation on disk
+    — the cluster is presumed already torn down or unreachable, and the
+    manifest's state must not lie about a job we've stopped tracking."""
+    from sciagent.compute import task_index
+
+    fake_home = tmp_path / "home" / ".sciagent" / "tasks"
+    monkeypatch.setattr(task_index, "manifest_dir", lambda: fake_home)
+
+    started = (datetime.now(timezone.utc) - timedelta(seconds=9999)).isoformat()
+    task_index.write_task(
+        {
+            "job_id": "sciagent-flaky",
+            "kind": "compute_job",
+            "state": "running",
+            "started_at": started,
+            "timeout_sec": 60,
+        }
+    )
+
+    cleanup = MagicMock(side_effect=RuntimeError("sky offline"))
+    reaped = reap_overdue(cleanup=cleanup)
+    assert reaped == ["sciagent-flaky"]
+
+    after = task_index.read_task("sciagent-flaky")
+    assert after["state"] == "cancelled"
 
 
 if __name__ == "__main__":

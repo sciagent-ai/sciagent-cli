@@ -268,6 +268,71 @@ def test_bg_status_tool_legacy_no_manifest_still_works():
     assert "Intent:" not in result.output
 
 
+def test_bg_status_surfaces_kind_and_state_in_joined_output():
+    """PR1 (consolidation): kind/state from the manifest must surface in the
+    bg_status formatted output so the LLM sees lifecycle without a new tool.
+    Pre-PR1 manifests (no kind field) fall through to compute_job/running
+    via the back-compat defaults in join_status."""
+    from sciagent.tools.atomic.bg_tools import BgStatusTool
+
+    fake_local = {
+        "job_id": "sciagent-ks1",
+        "kind": "compute_job",
+        "state": "running",
+        "session_id": "ses-ks",
+        "owner_pid": 8888,
+    }
+    fake_sky = JobResult(
+        status=JobStatus.RUNNING,
+        summary="Job running on sciagent-ks1",
+    )
+
+    tool = BgStatusTool()
+    with patch(
+        "sciagent.compute.router.ComputeRouter.get_status",
+        return_value=fake_sky,
+    ), patch(
+        "sciagent.compute.task_index.read_task",
+        return_value=fake_local,
+    ):
+        result = tool.execute(job_id="sciagent-ks1")
+
+    assert result.success is True
+    assert "Kind: compute_job" in result.output
+    assert "State: running" in result.output
+
+
+def test_bg_status_kindless_manifest_surfaces_default_kind_and_state():
+    """A pre-PR1 manifest (no kind/state) reads as compute_job/running via
+    join_status's back-compat setdefault — bg_status output reflects that."""
+    from sciagent.tools.atomic.bg_tools import BgStatusTool
+
+    fake_local = {
+        "job_id": "sciagent-old1",
+        "session_id": "ses-old",
+        "owner_pid": 1234,
+        # NOTE: no kind, no state.
+    }
+    fake_sky = JobResult(
+        status=JobStatus.RUNNING,
+        summary="still running",
+    )
+
+    tool = BgStatusTool()
+    with patch(
+        "sciagent.compute.router.ComputeRouter.get_status",
+        return_value=fake_sky,
+    ), patch(
+        "sciagent.compute.task_index.read_task",
+        return_value=fake_local,
+    ):
+        result = tool.execute(job_id="sciagent-old1")
+
+    assert result.success is True
+    assert "Kind: compute_job" in result.output
+    assert "State: running" in result.output
+
+
 def test_bg_status_tool_missing_both_returns_not_found():
     """Sky get_status raises AND no manifest exists → bg_status reports the
     job as not found rather than fabricating a status."""

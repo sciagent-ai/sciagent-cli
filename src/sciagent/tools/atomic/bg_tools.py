@@ -219,6 +219,16 @@ class BgStatusTool:
         ]
 
         # Local manifest fields (passthrough — opaque shape per v4.2 §C6).
+        # Kind/state surface the in-flight registry's view; pre-PR1 manifests
+        # default to compute_job/running via join_status's setdefault.
+        if status.get("kind"):
+            lines.append(f"Kind: {status['kind']}")
+        if status.get("state"):
+            lines.append(f"State: {status['state']}")
+        if status.get("completed_at"):
+            lines.append(f"Completed: {status['completed_at']}")
+        if status.get("result_summary"):
+            lines.append(f"Result: {status['result_summary']}")
         if status.get("managed_job_id") is not None:
             lines.append(f"Managed job id: {status['managed_job_id']}")
         if status.get("session_id"):
@@ -452,6 +462,37 @@ class BgWaitTool:
     _BLOCK_POLL_INTERVAL_SEC = 10
     _BLOCK_DEFAULT_TIMEOUT_SEC = 600
 
+    @staticmethod
+    def _record_terminal_state(job_id: str, result: Any) -> None:
+        """Drive the in-flight registry's lifecycle state from a terminal sky
+        status. Best-effort — a failure to update the manifest must not break
+        the wait result (the job has already terminated cloud-side; the worst
+        case is a stale state field that the next bg_status will refresh).
+
+        Called only from the block=True path; the snapshot path (block=False)
+        stays read-only per M1A hard rule #1.
+        """
+        try:
+            from sciagent.compute.job import JobStatus
+            from sciagent.compute.task_index import update_task_state
+
+            mapping = {
+                JobStatus.COMPLETED: "completed",
+                JobStatus.FAILED: "failed",
+                JobStatus.CANCELLED: "cancelled",
+            }
+            lifecycle_state = mapping.get(result.status)
+            if lifecycle_state is None:
+                return
+            summary = (result.error_preview or result.summary or "")[:120]
+            update_task_state(
+                job_id,
+                lifecycle_state,
+                result_summary=summary or None,
+            )
+        except Exception:
+            pass
+
     def _wait_compute_job(self, job_id: str, timeout: int = None, block: bool = False) -> ToolResult:
         """Wait on a cloud job's status.
 
@@ -494,6 +535,12 @@ class BgWaitTool:
                 while True:
                     result = router.get_status(job_id)
                     if result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+                        # PR1 (consolidation): the long-poll path observed a
+                        # terminal — write the lifecycle state to the manifest
+                        # so cross-session readers don't have to re-query sky.
+                        # Snapshot mode (block=False) deliberately skips this
+                        # to keep its read-only contract intact.
+                        self._record_terminal_state(job_id, result)
                         break
                     if time.monotonic() >= deadline:
                         # Timed out without terminal — return a snapshot
@@ -728,6 +775,21 @@ class BgKillTool:
             router = ComputeRouter()
 
             if router.cleanup(job_id):
+                # PR1 (consolidation): record the user-driven cancellation in
+                # the manifest so cross-session readers see state=cancelled
+                # without re-querying sky. Best-effort — a manifest-write
+                # failure must not turn a successful kill into an apparent
+                # tool failure.
+                try:
+                    from sciagent.compute.task_index import update_task_state
+
+                    update_task_state(
+                        job_id,
+                        "cancelled",
+                        result_summary="user-cancelled via bg_kill",
+                    )
+                except Exception:
+                    pass
                 return ToolResult(
                     success=True,
                     output=f"Compute cluster {job_id} terminated.\n\n"

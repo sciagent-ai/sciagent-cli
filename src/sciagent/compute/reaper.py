@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from .task_index import list_tasks
+from .task_index import list_tasks, update_task_state
 
 
 def _parse_started_at(value: Any) -> Optional[datetime]:
@@ -73,7 +73,13 @@ def reap_overdue(
         now = datetime.now(timezone.utc)
 
     reaped: List[str] = []
-    for record in list_tasks():
+    # PR1 (consolidation): only reap manifests whose kind is compute_job and
+    # whose lifecycle state is still running. Pre-PR1 manifests (no kind /
+    # state fields) match both filters via task_index back-compat defaults.
+    # Once bg_wait/bg_kill drive state transitions, terminal jobs whose
+    # started_at + timeout_sec is in the past will be skipped here — they're
+    # already done, the cluster is already gone.
+    for record in list_tasks(kind="compute_job", state="running"):
         if not _is_overdue(record, now):
             continue
         job_id = record.get("job_id")
@@ -84,5 +90,14 @@ def reap_overdue(
         except Exception:
             # Best-effort: a single failed cleanup must not stop the scan.
             pass
+        # Mark the manifest cancelled so future reads see the truth — the
+        # cluster has been (best-effort) torn down, the lifecycle is over.
+        # update_task_state is itself best-effort: a write failure here must
+        # not stop the sweep, hence no error propagation.
+        update_task_state(
+            job_id,
+            "cancelled",
+            result_summary="reaped: timeout exceeded",
+        )
         reaped.append(job_id)
     return reaped

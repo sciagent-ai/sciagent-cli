@@ -30,10 +30,30 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .job import JobResult, JobStatus
+
+
+# ---- Kind / state taxonomy (consolidation refactor PR1) ---------------------
+#
+# The manifest is being broadened from "compute job record" to "in-flight
+# registry entry typed by kind." PR1 only ships the compute_job kind; future
+# kinds (subagent, watch, scheduled) will land additively. Both fields are
+# read-side defaulted: a kind-less manifest is interpreted as compute_job, a
+# state-less manifest is interpreted as running (the only state pre-PR1
+# manifests could have been in when written).
+
+KNOWN_KINDS = ("compute_job",)
+
+VALID_STATES = ("pending", "running", "completed", "failed", "cancelled")
+
+TERMINAL_STATES = ("completed", "failed", "cancelled")
+
+DEFAULT_KIND = "compute_job"
+DEFAULT_STATE = "running"
 
 
 def manifest_dir() -> Path:
@@ -98,8 +118,20 @@ def write_task(record: Dict[str, Any]) -> Path:
     return target
 
 
-def list_tasks() -> List[Dict[str, Any]]:
-    """Return every well-formed manifest in the task directory.
+def list_tasks(
+    kind: Optional[str] = None,
+    state: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Return well-formed manifests, optionally filtered by kind/state/session.
+
+    With no args (the pre-PR1 signature), returns every well-formed manifest in
+    the task directory — same behavior as before. Filters compose with AND.
+
+    Filtering is back-compat: a manifest missing ``kind`` is interpreted as
+    ``compute_job``; a manifest missing ``state`` is interpreted as
+    ``running``. So a kind-less pre-PR1 manifest matches
+    ``list_tasks(kind="compute_job", state="running")`` without rewrite.
 
     Skips unreadable / non-dict files silently — the caller is reaping or
     sweeping, and noisy raises here would mask the real failures we care
@@ -117,8 +149,15 @@ def list_tasks() -> List[Dict[str, Any]]:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError):
             continue
-        if isinstance(data, dict):
-            out.append(data)
+        if not isinstance(data, dict):
+            continue
+        if kind is not None and data.get("kind", DEFAULT_KIND) != kind:
+            continue
+        if state is not None and data.get("state", DEFAULT_STATE) != state:
+            continue
+        if session_id is not None and data.get("session_id") != session_id:
+            continue
+        out.append(data)
     return out
 
 
@@ -137,6 +176,9 @@ def delete_task(job_id: str) -> bool:
 # Manifest fields that join_status passes through verbatim when present.
 # ``managed_job_id`` (M1A) is the integer Sky assigns to a managed job —
 # pure passthrough; the join helper never synthesizes one if absent.
+# ``kind``/``state``/``completed_at``/``result_summary`` (PR1) are the new
+# discriminators; bg_status surfaces them so the LLM sees lifecycle without
+# a new tool.
 _LOCAL_PASSTHROUGH_FIELDS = (
     "intent",
     "expected_artifacts",
@@ -145,6 +187,10 @@ _LOCAL_PASSTHROUGH_FIELDS = (
     "session_id",
     "managed_job_id",
     "metadata",
+    "kind",
+    "state",
+    "completed_at",
+    "result_summary",
 )
 
 
@@ -194,5 +240,112 @@ def join_status(
         # `command` is useful for formatters that today hardcode "(compute job)".
         if "command" in local:
             out["command"] = local["command"]
+        # Back-compat: pre-PR1 manifests have no kind/state field. Surface the
+        # defaults so bg_status formatters and downstream consumers see a
+        # consistent shape regardless of when the manifest was written.
+        out.setdefault("kind", DEFAULT_KIND)
+        out.setdefault("state", DEFAULT_STATE)
 
     return out
+
+
+# ---- Generic registry API (consolidation refactor PR1) ----------------------
+
+
+def _normalize(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a canonical view of a manifest record.
+
+    Defaults ``kind`` to ``compute_job`` and ``state`` to ``running`` when
+    absent (back-compat for pre-PR1 manifests written without those fields).
+    Does NOT mutate the input.
+
+    Forward-compat: also exposes a derived ``body`` view that re-publishes the
+    kind-specific flat fields under ``body[...]``. PR1 keeps fields flat at
+    the top level for back-compat with tests that dict-equality-assert on
+    them; PR2 will move to authoritative nested ``body`` storage. Until then
+    ``body`` is purely a read-side convenience.
+    """
+    if not isinstance(record, dict):
+        return {}
+    out = dict(record)
+    out.setdefault("kind", DEFAULT_KIND)
+    out.setdefault("state", DEFAULT_STATE)
+    out.setdefault("completed_at", None)
+    out.setdefault("result_summary", None)
+
+    body: Dict[str, Any] = {}
+    if out["kind"] == "compute_job":
+        for key in (
+            "managed_job_id",
+            "intent",
+            "expected_artifacts",
+            "command",
+            "image",
+            "service",
+            "timeout_sec",
+        ):
+            if key in record:
+                body[key] = record[key]
+    out.setdefault("body", body)
+    return out
+
+
+def get_task(task_id: str, strict: bool = False) -> Optional[Dict[str, Any]]:
+    """Read a manifest by id (alias for read_task with broader naming).
+
+    Returns the on-disk verbatim shape (not normalized) so existing callers
+    don't break. Set ``strict=True`` to raise ``ValueError`` on an unknown
+    ``kind`` value — useful when a caller is about to dispatch to a per-kind
+    handler and a typo in the on-disk manifest would otherwise route silently
+    to the default path.
+    """
+    record = read_task(task_id)
+    if record is None:
+        return None
+    if strict:
+        kind = record.get("kind", DEFAULT_KIND)
+        if kind not in KNOWN_KINDS:
+            raise ValueError(
+                f"unknown kind {kind!r} in manifest {task_id!r}; "
+                f"known kinds: {KNOWN_KINDS}"
+            )
+    return record
+
+
+def update_task_state(
+    task_id: str,
+    state: str,
+    completed_at: Optional[str] = None,
+    result_summary: Optional[str] = None,
+) -> bool:
+    """Read+merge+write the lifecycle state for a task.
+
+    Returns True if the manifest was updated, False otherwise (manifest
+    missing, invalid state, or write failure). Atomic via the existing
+    ``write_task`` tempfile+replace path.
+
+    When ``state`` is a terminal state and ``completed_at`` is None, fills it
+    with ``datetime.now(UTC).isoformat()`` automatically. ``result_summary``
+    is opaque; callers are expected to keep it terse (≤120 chars) so it can
+    be displayed across sessions without truncation gymnastics.
+    """
+    if state not in VALID_STATES:
+        return False
+    record = read_task(task_id)
+    if record is None:
+        return False
+    record = dict(record)
+    record["state"] = state
+    if state in TERMINAL_STATES:
+        if completed_at is None:
+            completed_at = datetime.now(timezone.utc).isoformat()
+        record["completed_at"] = completed_at
+    elif completed_at is not None:
+        record["completed_at"] = completed_at
+    if result_summary is not None:
+        record["result_summary"] = result_summary
+    try:
+        write_task(record)
+    except Exception:
+        return False
+    return True

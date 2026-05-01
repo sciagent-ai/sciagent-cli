@@ -182,6 +182,202 @@ def test_bg_wait_block_true_polls_until_terminal():
     assert fake_sleep.call_count == 2
 
 
+# ---- PR1 (consolidation): bg_wait/bg_kill drive lifecycle on terminal -------
+
+
+@pytest.fixture
+def tmp_manifest_dir(monkeypatch, tmp_path):
+    """Redirect ~/.sciagent/tasks/ to a tmp dir so the lifecycle tests don't
+    touch the user's real manifest store."""
+    from pathlib import Path
+    from sciagent.compute import task_index
+
+    fake_home = Path(tmp_path) / "home"
+    target = fake_home / ".sciagent" / "tasks"
+    monkeypatch.setattr(task_index, "manifest_dir", lambda: target)
+    return target
+
+
+def _seed_running_manifest(job_id: str):
+    """Write a starter manifest in state='running' for lifecycle tests."""
+    from sciagent.compute import task_index
+
+    task_index.write_task(
+        {
+            "job_id": job_id,
+            "kind": "compute_job",
+            "state": "running",
+            "completed_at": None,
+            "result_summary": None,
+            "session_id": "ses-lc",
+            "started_at": "2026-04-30T10:00:00+00:00",
+            "timeout_sec": 3600,
+        }
+    )
+
+
+def test_bg_wait_block_true_completed_writes_state_to_manifest(tmp_manifest_dir):
+    """block=True observing a COMPLETED status must drive the manifest to
+    state='completed' with a populated completed_at + result_summary."""
+    from sciagent.compute import task_index
+
+    _seed_running_manifest("sciagent-lc-comp")
+    states = [JobResult(status=JobStatus.COMPLETED, summary="all green")]
+    fake_router = MagicMock()
+    fake_router.get_status.side_effect = states
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch("sciagent.tools.atomic.bg_tools.time.sleep"), \
+         patch(
+             "sciagent.tools.atomic.bg_tools.time.monotonic",
+             side_effect=[0, 0, 1, 2],
+         ), \
+         patch(
+             "sciagent.tools.atomic.compute_fetch.fetch_workspace_outputs",
+             return_value={"ok": False, "reason": "not exercised in unit test"},
+         ):
+        tool = BgWaitTool()
+        out = tool.execute(job_id="sciagent-lc-comp", block=True, timeout=60)
+
+    assert out.success is True
+    after = task_index.read_task("sciagent-lc-comp")
+    assert after["state"] == "completed"
+    assert after["completed_at"]
+    assert "all green" in (after["result_summary"] or "")
+
+
+def test_bg_wait_block_true_failed_writes_state_to_manifest(tmp_manifest_dir):
+    from sciagent.compute import task_index
+
+    _seed_running_manifest("sciagent-lc-fail")
+    states = [
+        JobResult(
+            status=JobStatus.FAILED,
+            summary="job blew up",
+            error_preview="OOMKilled at step 4",
+        )
+    ]
+    fake_router = MagicMock()
+    fake_router.get_status.side_effect = states
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch("sciagent.tools.atomic.bg_tools.time.sleep"), \
+         patch(
+             "sciagent.tools.atomic.bg_tools.time.monotonic",
+             side_effect=[0, 0, 1, 2],
+         ):
+        tool = BgWaitTool()
+        out = tool.execute(job_id="sciagent-lc-fail", block=True, timeout=60)
+
+    assert out.success is False
+    after = task_index.read_task("sciagent-lc-fail")
+    assert after["state"] == "failed"
+    assert after["completed_at"]
+    # error_preview is preferred over summary for the result_summary, since
+    # it's the actionable bit when debugging.
+    assert "OOM" in (after["result_summary"] or "")
+
+
+def test_bg_wait_block_true_cancelled_writes_state_to_manifest(tmp_manifest_dir):
+    from sciagent.compute import task_index
+
+    _seed_running_manifest("sciagent-lc-canc")
+    states = [JobResult(status=JobStatus.CANCELLED, summary="user cancel")]
+    fake_router = MagicMock()
+    fake_router.get_status.side_effect = states
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch("sciagent.tools.atomic.bg_tools.time.sleep"), \
+         patch(
+             "sciagent.tools.atomic.bg_tools.time.monotonic",
+             side_effect=[0, 0, 1, 2],
+         ):
+        tool = BgWaitTool()
+        out = tool.execute(job_id="sciagent-lc-canc", block=True, timeout=60)
+
+    assert out.success is False
+    after = task_index.read_task("sciagent-lc-canc")
+    assert after["state"] == "cancelled"
+    assert after["completed_at"]
+
+
+def test_bg_wait_snapshot_only_does_not_modify_manifest_state(tmp_manifest_dir):
+    """Critical regression guard: the snapshot path (block=False) must NOT
+    write to the manifest, even when sky reports a terminal status. M1A hard
+    rule #1 makes the snapshot read-only — no side effects. The terminal
+    lifecycle is recorded only when the caller opts into block=True."""
+    from sciagent.compute import task_index
+
+    _seed_running_manifest("sciagent-snap")
+    fake_router = MagicMock()
+    fake_router.get_status.return_value = JobResult(
+        status=JobStatus.COMPLETED, summary="done"
+    )
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch(
+             "sciagent.tools.atomic.compute_fetch.fetch_workspace_outputs",
+             return_value={"ok": False, "reason": "not exercised in unit test"},
+         ):
+        tool = BgWaitTool()
+        # block=False is the default — explicit here for clarity.
+        out = tool.execute(job_id="sciagent-snap", block=False)
+
+    assert out.success is True
+    after = task_index.read_task("sciagent-snap")
+    # Manifest UNCHANGED — still running, completed_at None, no result_summary.
+    assert after["state"] == "running"
+    assert after["completed_at"] is None
+    assert after["result_summary"] is None
+
+
+def test_bg_kill_marks_state_cancelled(tmp_manifest_dir):
+    """A successful bg_kill must mark the manifest cancelled with a
+    user-cancelled result_summary so cross-session readers see the truth."""
+    from sciagent.compute import task_index
+    from sciagent.tools.atomic.bg_tools import BgKillTool
+
+    _seed_running_manifest("sciagent-kill")
+    fake_router = MagicMock()
+    fake_router.cleanup.return_value = True
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class):
+        tool = BgKillTool()
+        out = tool.execute(job_id="sciagent-kill")
+
+    assert out.success is True
+    after = task_index.read_task("sciagent-kill")
+    assert after["state"] == "cancelled"
+    assert after["completed_at"]
+    assert "bg_kill" in (after["result_summary"] or "").lower()
+
+
+def test_bg_kill_failed_cleanup_does_not_modify_manifest(tmp_manifest_dir):
+    """If router.cleanup returns False (cluster already gone, permission
+    error, etc.), bg_kill returns failure — and the manifest must NOT be
+    marked cancelled, because we don't actually know the lifecycle ended."""
+    from sciagent.compute import task_index
+    from sciagent.tools.atomic.bg_tools import BgKillTool
+
+    _seed_running_manifest("sciagent-kill-noop")
+    fake_router = MagicMock()
+    fake_router.cleanup.return_value = False
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class):
+        tool = BgKillTool()
+        out = tool.execute(job_id="sciagent-kill-noop")
+
+    assert out.success is False
+    after = task_index.read_task("sciagent-kill-noop")
+    assert after["state"] == "running"  # unchanged
+
+
 def test_bg_wait_block_true_returns_snapshot_on_timeout():
     """Long-poll deadline reached without terminal — return a snapshot
     that tells the agent the budget expired. Don't error: the job is

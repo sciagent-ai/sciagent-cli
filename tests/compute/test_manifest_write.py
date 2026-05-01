@@ -145,6 +145,13 @@ def test_compute_tool_writes_manifest_after_skypilot_launch(tmp_manifest_dir: Pa
     assert isinstance(manifest["owner_pid"], int)
     assert manifest["owner_pid"] > 0
     assert manifest["started_at"]
+    # PR1 (consolidation): kind discriminator + lifecycle state are written
+    # at launch so the in-flight registry can dispatch / filter without
+    # re-reading sky.
+    assert manifest["kind"] == "compute_job"
+    assert manifest["state"] == "running"
+    assert manifest["completed_at"] is None
+    assert manifest["result_summary"] is None
 
 
 def test_compute_tool_does_not_write_manifest_for_local_backend(tmp_manifest_dir: Path):
