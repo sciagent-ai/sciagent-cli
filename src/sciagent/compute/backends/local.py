@@ -33,8 +33,26 @@ class LocalBackend:
         return self._pm
 
     def is_available(self) -> bool:
-        """Check if Docker is available."""
-        return shutil.which("docker") is not None
+        """Check if Docker is available *and* the daemon is responsive.
+
+        The CLI being on PATH is not enough: on macOS, Docker Desktop installs
+        the CLI but the daemon is frequently off. If we register as available
+        in that state, the router happily picks `local` for small jobs and the
+        first `docker run` fails with "Cannot connect to the Docker daemon."
+        Probe with `docker info` and a short timeout so router init can't hang
+        if the socket is wedged.
+        """
+        if shutil.which("docker") is None:
+            return False
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                timeout=3,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, OSError):
+            return False
 
     def can_run(self, req: ComputeRequirements) -> bool:
         """Check if this backend can handle the requirements.

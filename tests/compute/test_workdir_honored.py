@@ -43,9 +43,10 @@ def _build_run_command(job: Job) -> str:
     captured = {}
 
     class _FakeTask:
-        def __init__(self, name=None, run=None):
+        def __init__(self, name=None, run=None, workdir=None):
             captured["name"] = name
             captured["run"] = run
+            captured["workdir"] = workdir
 
         def set_resources(self, *_a, **_k):
             return self
@@ -65,8 +66,8 @@ def _build_run_command(job: Job) -> str:
     return captured["run"]
 
 
-def _mount(path: str = "/workspace") -> StorageMount:
-    return StorageMount(path=path, bucket="test-bucket", store="s3")
+def _mount(path: str = "/workspace", implicit: bool = False) -> StorageMount:
+    return StorageMount(path=path, bucket="test-bucket", store="s3", implicit=implicit)
 
 
 # ---- mount-attached: cd is prepended ----------------------------------
@@ -217,3 +218,190 @@ def test_first_mount_wins_when_multiple_attached():
     )
     run = _build_run_command(job)
     assert run == "cd /workspace && bash Allrun"
+
+
+# ---- workdir= propagation (local CWD upload to cluster) ---------------
+
+
+def _build_task_capturing(job: Job) -> dict:
+    """Variant that returns the full captured kwargs dict so tests can
+    assert on workdir= as well as run=."""
+    backend = SkyPilotBackend()
+    captured: dict = {}
+
+    class _FakeTask:
+        def __init__(self, name=None, run=None, workdir=None):
+            captured["name"] = name
+            captured["run"] = run
+            captured["workdir"] = workdir
+
+        def set_resources(self, *_a, **_k):
+            return self
+
+        def set_storage_mounts(self, *_a, **_k):
+            return self
+
+    fake_sky = type("FS", (), {})()
+    fake_sky.Task = _FakeTask
+    fake_sky.Resources = lambda **kwargs: None
+    fake_sky.StorageMode = StorageMode
+    fake_sky.Storage = lambda **kwargs: None
+    fake_sky.StoreType = type("ST", (), {"S3": "s3"})
+    backend._sky = fake_sky
+
+    backend._build_task(job)
+    return captured
+
+
+def test_workdir_kwarg_set_to_job_working_dir():
+    """SkyPilot's workdir= rsyncs the local CWD to the cluster. Without
+    this, scripts the user just wrote locally are invisible on the
+    cluster — observed in real transcripts to force the agent into inline
+    `python -c` workarounds."""
+    job = Job(
+        id="abc",
+        image="python:3.11",
+        command="python hello.py",
+        working_dir="/tmp/my-project",
+        requirements=ComputeRequirements(timeout_sec=0),
+    )
+    captured = _build_task_capturing(job)
+    assert captured["workdir"] == "/tmp/my-project"
+
+
+def test_workdir_kwarg_coexists_with_storage_mount():
+    """workdir= and storage mounts are independent: workdir uploads the
+    local CWD ephemerally; mounts attach a persistent bucket. Both
+    coexist, and the mount-driven cd= still wins for run-CWD."""
+    job = Job(
+        id="abc",
+        service="openfoam",
+        command="bash Allrun",
+        working_dir="/tmp/my-project",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace")],
+        ),
+    )
+    captured = _build_task_capturing(job)
+    assert captured["workdir"] == "/tmp/my-project"
+    assert captured["run"] == "cd /workspace && bash Allrun"
+
+
+# ---- implicit mount: don't cd, symlink _outputs/ instead --------------
+
+
+def test_implicit_mount_does_not_cd_and_injects_symlink_prologue():
+    """The ad-hoc case: workspace=None default, sciagent auto-attached a
+    bucket so outputs persist, but the user's script lives in workdir
+    (~/sky_workdir/). cd-into-mount would defeat that — script not at
+    /workspace. Instead the prologue links _outputs/ through to a
+    per-job prefix in the bucket so (a) relative writes from the script
+    still persist and (b) parallel jobs in the same session don't
+    collide on /workspace/_outputs/."""
+    job = Job(
+        id="abc",
+        image="python:3.11",
+        command="python hello.py",
+        working_dir="/tmp/my-project",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace", implicit=True)],
+        ),
+    )
+    run = _build_run_command(job)
+    assert "cd /workspace" not in run
+    # Per-job prefix: /workspace/_outputs/<job_id>/, not flat _outputs/.
+    assert "mkdir -p /workspace/_outputs/abc" in run
+    assert "ln -sfn /workspace/_outputs/abc ./_outputs" in run
+    assert run.endswith("python hello.py")
+
+
+def test_explicit_mount_still_cd_no_symlink():
+    """Sanity check: when the caller explicitly mounts (registry service,
+    workspace_source=, or workspace=True), implicit=False — keep the old
+    cd-into-mount behavior. The B8 openfoam case must not regress."""
+    job = Job(
+        id="abc",
+        service="openfoam",
+        command="bash Allrun",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace", implicit=False)],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run == "cd /workspace && bash Allrun"
+    assert "ln -sfn" not in run
+
+
+def test_implicit_mount_with_timeout_wraps_after_symlink():
+    """Timeout wrapper must enclose the whole prologue+command, otherwise
+    it'd time out only the user's command and the symlink setup would
+    survive a timeout cancellation. Pin the order."""
+    job = Job(
+        id="abc",
+        image="python:3.11",
+        command="python hello.py",
+        requirements=ComputeRequirements(
+            timeout_sec=120,
+            storage=[_mount("/workspace", implicit=True)],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run.startswith("timeout 120 bash -c ")
+    # The single-quoted blob inside should contain the per-job-prefixed prologue.
+    assert "mkdir -p /workspace/_outputs/abc" in run
+    assert "ln -sfn /workspace/_outputs/abc ./_outputs" in run
+    assert "python hello.py" in run
+
+
+def test_implicit_mount_skipped_when_caller_pre_cd():
+    """If the user's command already starts with cd, we don't second-guess
+    them — neither the cd-prepend nor the symlink prologue applies. This
+    keeps the M0 idempotency contract."""
+    job = Job(
+        id="abc",
+        image="python:3.11",
+        command="cd /tmp && python hello.py",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace", implicit=True)],
+        ),
+    )
+    run = _build_run_command(job)
+    assert run == "cd /tmp && python hello.py"
+
+
+def test_implicit_mount_parallel_jobs_get_distinct_prefixes():
+    """The load-bearing property of per-job prefix: two parallel jobs
+    sharing the same session bucket must symlink to *distinct* targets,
+    so a parallel parameter sweep of N OpenFOAM runs doesn't collide on
+    /workspace/_outputs/. Each job's job_id is unique by construction —
+    pin that the symlink target uses it."""
+    job_a = Job(
+        id="sweep-001",
+        image="python:3.11",
+        command="python solve.py --re=100",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace", implicit=True)],
+        ),
+    )
+    job_b = Job(
+        id="sweep-002",
+        image="python:3.11",
+        command="python solve.py --re=200",
+        requirements=ComputeRequirements(
+            timeout_sec=0,
+            storage=[_mount("/workspace", implicit=True)],
+        ),
+    )
+    run_a = _build_run_command(job_a)
+    run_b = _build_run_command(job_b)
+
+    assert "ln -sfn /workspace/_outputs/sweep-001 ./_outputs" in run_a
+    assert "ln -sfn /workspace/_outputs/sweep-002 ./_outputs" in run_b
+    # Cross-check: each job's prologue references *only* its own job_id.
+    assert "sweep-002" not in run_a
+    assert "sweep-001" not in run_b

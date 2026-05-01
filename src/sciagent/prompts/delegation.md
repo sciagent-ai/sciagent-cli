@@ -18,6 +18,7 @@ Load both sci-compute and build-service together for scientific work - this lets
 | Codebase exploration | explore | Need to search many files |
 | Error investigation | debug | Stuck on an error, need root cause |
 | External documentation | research | Need info NOT in provided files |
+| Cloud compute jobs | compute | ANY "run on sky / on AWS / in the cloud" task |
 | Complex planning | plan | Before implementing non-trivial features |
 
 ### Pattern
@@ -25,6 +26,11 @@ Load both sci-compute and build-service together for scientific work - this lets
 # User asks about codebase structure
 task(agent_name="explore", task="Map the authentication flow in this codebase")
 -> Returns summary, not 20 file reads polluting your context
+
+# User asks to run something on the cloud
+task(agent_name="compute", task="Visualize sine waves on sky and download results to project folder")
+-> Returns: status, job_id, list of local files, cost. The 100-line install
+   chatter and intermediate status polls stay in the subagent's context.
 ```
 
 ### Don't Delegate

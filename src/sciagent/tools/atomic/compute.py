@@ -112,12 +112,23 @@ class ComputeTool:
 
 Use EITHER service (from registry) OR image (direct Docker image).
 
+Honor user intent on backend: if the user named a target ("on sky", "on
+skypilot", "in the cloud", "on AWS"), pass backend="skypilot" explicitly —
+do NOT leave it as "auto" and hope the router picks cloud. Same the other
+way: "run locally" / "use Docker" → backend="local". Only fall back to
+"auto" when the user didn't specify.
+
 Examples:
   compute_run(service="scipy-base", command="python3 -c 'print(1+1)'")
   compute_run(image="python:3.11", command="python -c 'import sys; print(sys.version)'")
+  compute_run(service="scipy-base", command="...", backend="skypilot")  # user said "on the sky"
 
 Returns job_id. Check status with bg_status(job_id).
-For long jobs, use bg_wait(job_id) to block until complete."""
+For long jobs, use bg_wait(job_id) to block until complete.
+
+For skypilot jobs, bg_wait auto-pulls /workspace/_outputs/ from the cloud
+to your local working dir on success — the file paths come back in
+bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
 
     parameters = {
         "type": "object",
@@ -184,9 +195,14 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                 "default": "auto"
             },
             "workspace": {
-                "type": "boolean",
-                "description": "Mount shared workspace bucket (for multi-job workflows on skypilot)",
-                "default": False
+                "type": ["boolean", "null"],
+                "description": (
+                    "Mount a persistent workspace bucket. Defaults on for "
+                    "skypilot jobs so outputs written to /workspace/_outputs/ "
+                    "survive cluster teardown and bg_wait can auto-pull them "
+                    "back locally; pass false to explicitly opt out."
+                ),
+                "default": None
             },
             "workspace_source": {
                 "type": "string",
@@ -314,7 +330,7 @@ For long jobs, use bg_wait(job_id) to block until complete."""
         background: bool = True,
         estimate_only: bool = False,
         backend: str = "auto",
-        workspace: bool = False,
+        workspace: Optional[bool] = None,
         workspace_source: str = None,
         session_id: str = None,
         intent: Dict[str, Any] = None,
@@ -346,7 +362,9 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             background: Run in background (default: True)
             estimate_only: Only show cost estimate (default: False)
             backend: 'auto' (default), 'local', or 'skypilot'
-            workspace: Mount shared workspace bucket (default: False)
+            workspace: Mount a persistent workspace bucket. None (default) =>
+                auto-on for skypilot jobs so bg_wait can auto-pull outputs
+                back to local; True forces on; False forces off.
             workspace_source: Optional source URI/path for the workspace mount
                 (e.g. 's3://bucket/prefix' or a local path). When set, the
                 workspace mount is auto-enabled on skypilot.
@@ -427,10 +445,36 @@ For long jobs, use bg_wait(job_id) to block until complete."""
             requirements_kwargs["timeout_sec"] = int(timeout_sec)
         requirements = ComputeRequirements(**requirements_kwargs)
 
-        # Add workspace storage mount if requested (skypilot only).
-        # workspace_source implies workspace=True so callers can pass a single
-        # arg (`workspace_source="s3://…"`) without also setting `workspace=True`.
-        wants_workspace = workspace or bool(workspace_source)
+        # Add workspace storage mount when needed. Tri-state on `workspace`:
+        #   - True              -> mount, regardless of backend
+        #   - False             -> never mount (explicit opt-out)
+        #   - None (default)    -> auto-on for skypilot so outputs survive
+        #                          cluster teardown and bg_wait can pull
+        #                          them back to local. Without this the
+        #                          agent cannot retrieve files generated on
+        #                          the cluster except by launching extra
+        #                          cloud jobs to cat them — wasteful
+        #                          pattern observed in real transcripts.
+        # workspace_source implies the user wants a mount, so it always wins.
+        # Track whether the mount is *explicit* (caller asked) or *implicit*
+        # (we attached it automatically just so outputs can be fetched).
+        # The skypilot backend uses this to decide whether to cd into the
+        # mount (explicit) or keep workdir's CWD and symlink _outputs/
+        # through (implicit). See StorageMount.implicit and _build_task.
+        if workspace is False:
+            wants_workspace = False
+            workspace_explicit = False
+        elif workspace is True or workspace_source:
+            wants_workspace = True
+            workspace_explicit = True
+        else:
+            # workspace is None — auto-decide. On for skypilot (or auto-routed
+            # cloud jobs); off for purely local runs. This is the implicit
+            # path — we want outputs to land somewhere fetchable, but the
+            # caller didn't say their data lives in the mount.
+            wants_workspace = backend == "skypilot" or (backend == "auto" and gpus > 0)
+            workspace_explicit = False
+
         actual_session_id = None
         if wants_workspace and (backend == "skypilot" or (backend == "auto" and gpus > 0)):
             actual_session_id = self._get_session_id(session_id)
@@ -442,7 +486,18 @@ For long jobs, use bg_wait(job_id) to block until complete."""
                         actual_session_id,
                         workspace_source=workspace_source,
                     )
-                    requirements.storage = [workspace_mount]
+                    # Guard against backends/mocks that return None — under
+                    # the auto-on-for-skypilot default we'd otherwise poison
+                    # requirements.storage with [None] and crash later when
+                    # the result builder reads mount.bucket.
+                    if workspace_mount is not None:
+                        # Stamp explicit/implicit so _build_task picks the
+                        # right run-CWD strategy (cd-into-mount vs symlink
+                        # _outputs/ into workdir).
+                        workspace_mount.implicit = not workspace_explicit
+                        requirements.storage = [workspace_mount]
+                    else:
+                        actual_session_id = None  # nothing was actually mounted
             except Exception:
                 pass  # Fall back to no workspace if unavailable
 

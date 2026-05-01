@@ -111,23 +111,57 @@ class SubAgent:
             self.tools.unregister("task")
             self.tools.unregister("spawn_agent")
         
-        # Create the underlying agent
+        # Create the underlying agent.
+        #
+        # verbose=True for nested subagents: this gates *display* output,
+        # not LLM context. The subagent's TOOL RESULTS still stay in the
+        # subagent's context (TaskTool returns a bounded summary; that's
+        # the LLM-context boundary). But its tool *calls* should print to
+        # the user's terminal so they have visibility into a long-running
+        # cloud job — without that, a `task(agent_name="compute", ...)`
+        # invocation looks frozen until completion.
         agent_config = AgentConfig(
             model=config.model,
             temperature=config.temperature,
             max_iterations=config.max_iterations,
             working_dir=working_dir,
-            verbose=False,  # Keep output clean
+            verbose=True,
             auto_save=False
         )
-        
+
+        # M1B provenance correlation: AgentLoop.__init__ calls
+        # ComputeTool.set_shared_session(state.session_id) +
+        # set_active_session(state.session_id), which would clobber the
+        # parent's session ids. compute_run events emitted from inside the
+        # subagent would then land in a different provenance log, fragmenting
+        # the audit trail. For nested subagents, restore the parent's session
+        # ids after the child AgentLoop has constructed — the child keeps
+        # state.session_id for its own state file, but compute / provenance
+        # correlation uses the parent's session so verify_session(parent_id)
+        # sees the full hierarchy. Top-level (non-nested) agents use their
+        # own session as before.
+        from .tools.atomic.compute import ComputeTool
+        from .provenance_log import set_active_session, _active_session_id
+
+        parent_shared_session = ComputeTool._shared_session_id if is_nested else None
+        parent_active_session = _active_session_id if is_nested else None
+
         self.agent = AgentLoop(
             config=agent_config,
             tools=self.tools,
             system_prompt=config.system_prompt
         )
-        
+
+        if is_nested and parent_shared_session:
+            ComputeTool.set_shared_session(parent_shared_session)
+        if is_nested and parent_active_session:
+            set_active_session(parent_active_session)
+
+        # Track BOTH ids: the child's own session_id (for state file
+        # naming, debug attribution) and the parent session this subagent
+        # emits provenance under. Equal at the top level; differ when nested.
         self.session_id = self.agent.state.session_id
+        self.parent_session_id = parent_shared_session
     
     def run(self, task: str) -> SubAgentResult:
         """Execute a task and return the result"""
@@ -333,6 +367,64 @@ Always cite sources. Do NOT fabricate information.""",
 Do NOT execute. Only plan.""",
             allowed_tools=["file_ops", "search", "bash", "web", "skill", "todo"],
             max_iterations=15
+        ))
+
+        # Compute agent - cloud job orchestration in an isolated context
+        # Uses CODING_MODEL (Sonnet) - writing 50-200 line scripts, debugging
+        # cloud errors, picking images all need real coding chops.
+        #
+        # WHY a subagent and not direct main-agent tools: every byte of cloud
+        # orchestration (script content, install chatter, 80+ line bg_output,
+        # status polls) currently lands in the main agent's context and stays
+        # there for the rest of the conversation. That was the bulk of the
+        # ~381k tokens on a "hello world on sky" run. Encapsulating cloud
+        # work in a subagent contains the chatter to its own bubble; the main
+        # agent only ever sees the bounded summary the subagent returns
+        # (TaskTool already caps at 4k chars).
+        self.register(SubAgentConfig(
+            name="compute",
+            description="Run jobs on the cloud (SkyPilot) and bring outputs back. Use for any 'on sky', 'on AWS', 'in the cloud' task.",
+            model=CODING_MODEL,
+            system_prompt="""You orchestrate cloud compute jobs end-to-end. Your goal is "user wants X run on the cloud, with results locally" — return when files are local.
+
+## Two flows, pick by task shape
+
+**Ad-hoc (default for 'hello world on sky', 'visualize X', script + outputs):**
+- file_ops: write the script in the project working dir
+- compute_run(image="python:3.11", command="pip install -q <deps> && python script.py", backend="skypilot")
+- bg_wait(job_id, block=True, timeout=600) — for jobs you expect within ~10 min, long-polls internally and returns on terminal status. Auto-fetches the job's per-job prefix to local on success; the file list comes back in the wait result.
+- For hours-long jobs, prefer bg_wait(job_id) (snapshot) and let the agent loop re-check sparsely instead.
+- Done — outputs are local at `./_outputs/<job_id>/`, no extra fetch step needed.
+
+**Output layout (important):** outputs land at `./_outputs/<job_id>/` locally and `s3://bucket/_outputs/<job_id>/` in the cloud — one path segment per job. This keeps parallel jobs collision-free without you having to think about it. Tell the user the path or read with file_ops.
+
+**Cross-tool pipeline (openfoam → scipy, MD → CFD, etc.):**
+- Job 1's outputs live at `/workspace/_outputs/<job_1_id>/...` in the bucket (and `./_outputs/<job_1_id>/` locally).
+- For Job 2 to read Job 1's outputs on the cluster, reference `/workspace/_outputs/<job_1_id>/<file>` directly in Job 2's command (you have `job_1_id` from the prior compute_run result).
+- Both jobs share the same session bucket — no extra setup.
+
+**Parallel sweep (N runs, varying parameters):**
+- Launch N compute_runs in parallel; each gets a distinct `job_id` automatically and its outputs land in `/workspace/_outputs/<job_id>/` — no collisions.
+- After all complete, each job's results are at `./_outputs/<job_id>/` locally. Aggregate by walking those subdirs.
+
+**Registry-backed reproductions (openfoam, gromacs, paper reproductions):**
+- compute_run(service="openfoam", workspace_source="s3://...", intent={paper, case, run}, expected_artifacts=[...])
+- bg_wait(job_id)
+- The manifest carries intent/expected_artifacts for the verifier — preserve that contract.
+
+## Hard rules
+- Use `pip install -q` (quiet) to keep install chatter out of bg_output.
+- Pass backend="skypilot" explicitly; never leave it as auto.
+- Don't `cat` cloud files via extra compute_run jobs — bg_wait auto-fetches; if you need a missing file, file_ops it locally after wait completes.
+- If a job fails, fetch logs with bg_output(job_id, tail_lines=40), diagnose, and decide: fix-and-relaunch, or report up to the main agent with the error preview.
+
+## Version-pinning (preserves source settings verbatim)
+When the manuscript / README / case files name a specific tool version (e.g. "OpenFOAM.com v.2012", "GROMACS 2021.5"), pick the version-tagged service entry, not the generic one. Inspect the registry first: `grep -n "<tool>" src/sciagent/services/registry.yaml`. For OpenFOAM v2012 specifically, the right entry is `openfoam-swak4foam-2012`, NOT the generic `openfoam-swak4foam` (which floats to whatever `:latest` points at and has burned reproductions before). If no version-tagged entry exists, surface that uncertainty to the parent instead of silently picking a near-match.
+
+## What to return to the parent
+A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.""",
+            allowed_tools=["file_ops", "bash", "compute_run", "bg_status", "bg_output", "bg_wait", "bg_kill", "web"],
+            max_iterations=20,
         ))
 
         # General agent - full capability for complex tasks
@@ -551,6 +643,7 @@ Available agents:
 - explore: Fast codebase search (uses Haiku). Quick file/pattern lookups.
 - debug: Error investigation with web research. Use when fixing errors.
 - research: Web research, documentation, literature review. Use for external knowledge.
+- compute: Run jobs on the cloud (SkyPilot) end-to-end and bring outputs back local. Use for any 'on sky', 'on AWS', 'in the cloud' task.
 - plan: Break down complex problems into steps.
 - general: Complex multi-step tasks requiring both exploration AND action.
 - verifier: Independent claim verification (fresh context, adversarial). Use for final output verification.
@@ -558,6 +651,7 @@ Available agents:
 Use 'explore' for quick local searches.
 Use 'debug' when investigating errors.
 Use 'research' for documentation, APIs, scientific methods.
+Use 'compute' for ANY task that runs on the cloud — keeps install chatter, status polls, and job logs out of your context. Returns a tight summary with local file paths.
 Use 'plan' before implementing anything non-trivial.
 Use 'general' for complex tasks that need to make changes.
 Use 'verifier' to independently verify claims before final output."""
@@ -568,7 +662,7 @@ Use 'verifier' to independently verify claims before final output."""
             "agent_name": {
                 "type": "string",
                 "description": "Name of the sub-agent to use",
-                "enum": ["explore", "debug", "research", "plan", "general", "verifier"]
+                "enum": ["explore", "debug", "research", "compute", "plan", "general", "verifier"]
             },
             "task": {
                 "type": "string",
@@ -581,13 +675,78 @@ Use 'verifier' to independently verify claims before final output."""
     def __init__(self, orchestrator: SubAgentOrchestrator):
         self.orchestrator = orchestrator
     
+    # Hard cap on what a subagent can return to its parent. Subagents already
+    # have isolated context (their own AgentLoop, their own conversation), but
+    # whatever they put in their final reply lands in the parent's tool result
+    # — and that tool result is replayed in every subsequent parent turn's
+    # prompt. A chatty subagent that pastes a 16k-char fetched page into its
+    # answer multiplies into ~16k * N_iterations of parent context.
+    # 4000 chars (~1000 tokens) is enough for a tight finding+location+fix
+    # summary; bulk content belongs in a file the subagent saved under
+    # _outputs/ and references by path.
+    _MAX_RETURN_CHARS = 4000
+
     def execute(self, agent_name: str, task: str) -> ToolResult:
+        # M1B provenance: emit subagent_spawned / subagent_completed events
+        # to the active (parent's) provenance log so the audit trail shows
+        # the orchestration. compute_run events emitted from inside the
+        # subagent join the same log (see SubAgent.__init__'s session
+        # restore), so verify_session(parent_id) gets the full picture:
+        # main spawned compute → which launched job X → completed.
+        from .provenance_log import get_active_session_log
+
+        plog = get_active_session_log()
+        spawn_event_id = None
+        if plog is not None:
+            try:
+                spawn_event_id = plog._write_event(
+                    "subagent_spawned",
+                    {
+                        "subagent_name": agent_name,
+                        "task_preview": task[:500],
+                    },
+                    actor=f"subagent:{agent_name}",
+                )
+            except Exception:
+                pass  # provenance is best-effort; never fail the spawn on log error
+
         result = self.orchestrator.spawn(agent_name, task)
-        
+
+        # subagent_completed always emitted (success or failure) so the
+        # audit pairs every spawn with its terminal state.
+        if plog is not None:
+            try:
+                plog._write_event(
+                    "subagent_completed",
+                    {
+                        "subagent_name": agent_name,
+                        "spawn_event_id": spawn_event_id,
+                        "success": bool(result.success),
+                        "iterations": getattr(result, "iterations", None),
+                        "tokens_used": getattr(result, "tokens_used", None),
+                        "duration_seconds": getattr(result, "duration_seconds", None),
+                        "child_session_id": getattr(result, "session_id", None),
+                        "error": result.error if not result.success else None,
+                    },
+                    actor=f"subagent:{agent_name}",
+                )
+            except Exception:
+                pass
+
         if result.success:
+            output = result.output or ""
+            if len(output) > self._MAX_RETURN_CHARS:
+                truncated = output[: self._MAX_RETURN_CHARS]
+                dropped = len(output) - self._MAX_RETURN_CHARS
+                output = (
+                    f"{truncated}\n\n"
+                    f"[truncated {dropped:,} chars to keep parent context clean — "
+                    f"if you need the full content, ask the sub-agent to write it to "
+                    f"_outputs/<file> and return only the path]"
+                )
             return ToolResult(
                 success=True,
-                output=f"[Sub-agent '{agent_name}' completed in {result.iterations} iterations]\n\n{result.output}"
+                output=f"[Sub-agent '{agent_name}' completed in {result.iterations} iterations]\n\n{output}"
             )
         else:
             return ToolResult(

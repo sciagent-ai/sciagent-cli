@@ -65,6 +65,32 @@ _SKY_STATUS_TO_JOB_STATUS: Dict[str, JobStatus] = {
 }
 
 
+import contextlib as _contextlib
+import io as _io
+import logging as _logging
+
+
+@_contextlib.contextmanager
+def _silence_sky_chatter():
+    """Suppress sky's rich-payload stdout AND its INFO-level logger output
+    (the "Considered resources" table) for the duration of a sky API call.
+
+    Both channels are non-load-bearing for sciagent — compute_run returns
+    a structured dict that already names the chosen cloud, instance type,
+    and cost. The chatter only litters the user's terminal between the
+    agent's tool-call lines. Restored on context exit so failures during
+    the call don't leave the system in a quiet state.
+    """
+    sky_logger = _logging.getLogger("sky")
+    prev_level = sky_logger.level
+    sky_logger.setLevel(_logging.WARNING)
+    try:
+        with _contextlib.redirect_stdout(_io.StringIO()):
+            yield
+    finally:
+        sky_logger.setLevel(prev_level)
+
+
 def _map_status(sky_status) -> JobStatus:
     """Map a sky.jobs.ManagedJobStatus to a sciagent JobStatus.
 
@@ -243,7 +269,16 @@ class SkyPilotBackend:
         # sky.jobs.launch is async-first; the controller takes ownership
         # of cluster lifecycle, autostop, and recovery. None of cluster-
         # mode's down=/idle_minutes_to_autostop= apply here.
-        request_id = sky.jobs.launch(task, name=name)
+        #
+        # Sky's optimizer phase runs synchronously inside .launch() and
+        # writes <sky-payload>"<rich_*>"</sky-payload> markers (rich console)
+        # plus a "Considered resources" table (Python logger) to the user's
+        # terminal. None of that reaches the LLM (compute_run returns a
+        # structured dict), but it litters the agent display. Silence both
+        # channels — the interesting bits (cloud, instance type, cost) are
+        # already in the cost_estimate dict the tool returns.
+        with _silence_sky_chatter():
+            request_id = sky.jobs.launch(task, name=name)
 
         # B4 fail-fast: bail out fast on a controller rejection (bad
         # image_id, missing creds, no capacity). The mechanism is the same
@@ -430,21 +465,67 @@ class SkyPilotBackend:
     @staticmethod
     def resolve_command(job: Job) -> str:
         """Apply the deterministic command rewrites the backend performs
-        before launch: cd-prepend off the first storage mount path, then
-        timeout-wrap with GNU ``timeout`` when ``timeout_sec > 0``.
+        before launch: storage-mount handling, then timeout-wrap with GNU
+        ``timeout`` when ``timeout_sec > 0``.
+
+        Two storage-mount strategies, picked off ``mount.implicit``:
+
+        * Explicit mount (``implicit=False``, e.g. registry service or
+          caller passed ``workspace_source=``): the caller's data lives
+          in the bucket. Prepend ``cd <mount> &&`` so the run-CWD is
+          there, regardless of the image's WORKDIR (rcwa: /opt; openfoam:
+          /opt/openfoam11 — without the cd, ``bash Allrun`` against a
+          /workspace mount fails with "No such file or directory", as in
+          the B8 #2 incident).
+
+        * Implicit mount (``implicit=True``, the default-on workspace we
+          attach so outputs survive cluster teardown and bg_wait can
+          fetch): the caller's *script* is in the local CWD, which Sky's
+          ``workdir=`` field rsynced to ~/sky_workdir/. Cd-into-mount
+          would defeat that (script not present at /workspace). Instead,
+          inject a tiny prologue that creates the mount's _outputs/ dir
+          and symlinks it into the workdir CWD. The user's script can
+          then write to relative ``_outputs/foo.txt`` and the bytes land
+          in the persistent bucket — bg_wait pulls them back.
+
+        Idempotent against callers that already cd themselves: if the
+        command already starts with ``cd ``, we trust them and skip both
+        rewrites.
 
         Extracted so M1B's compute_job_launched event can record exactly
         what the cluster will run (``command_resolved``) alongside the
-        original LLM-issued string (``command_original``). Callers that
-        need to know the on-cluster command without building the full
-        sky.Task object also use this.
+        original LLM-issued string (``command_original``).
         """
         run_command = job.command
         storage_mounts = getattr(job.requirements, "storage", None) or []
         if storage_mounts and not run_command.lstrip().startswith("cd "):
-            mount_path = storage_mounts[0].path
+            mount = storage_mounts[0]
+            mount_path = mount.path
             if mount_path:
-                run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
+                if getattr(mount, "implicit", False):
+                    # Implicit: keep workdir CWD, symlink ./_outputs/ to a
+                    # *job-specific* prefix in the mount. Per-job keying is
+                    # the universal layout — single jobs get one extra path
+                    # segment (small ergonomic cost), parallel sweeps are
+                    # collision-free by construction (each job's job_id is
+                    # unique). Bg_wait's auto-fetch pulls the matching
+                    # prefix back to ./_outputs/<job_id>/ locally.
+                    #
+                    # Cross-tool sharing: Job 2 reads Job 1's outputs via
+                    # absolute path /workspace/_outputs/<job_1_id>/... — the
+                    # agent has job_1_id from the prior launch result.
+                    quoted_mount = shlex.quote(mount_path)
+                    quoted_job_id = shlex.quote(job.id or "default")
+                    run_command = (
+                        f"mkdir -p {quoted_mount}/_outputs/{quoted_job_id} && "
+                        f"ln -sfn {quoted_mount}/_outputs/{quoted_job_id} ./_outputs && "
+                        f"{run_command}"
+                    )
+                else:
+                    # Explicit: cd into the mount as before. Caller's data
+                    # lives there (registry service, workspace_source=);
+                    # parallel collisions are the caller's responsibility.
+                    run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
 
         timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
         if timeout_sec > 0:
@@ -498,10 +579,17 @@ class SkyPilotBackend:
         # user command with the GNU ``timeout`` utility.
         run_command = self.resolve_command(job)
 
-        # Create task
+        # Create task. Pass `workdir=` so SkyPilot rsyncs the caller's local
+        # CWD up to the cluster's ~/sky_workdir/ before launch. Without this,
+        # `compute_run("python hello.py", backend="skypilot")` fails because
+        # hello.py never reaches the cluster — the agent then thrashes
+        # (inline `python -c` workarounds, extra cloud jobs to cat outputs).
+        # SkyPilot caps workdir at 250MB and honors .gitignore; bulk payloads
+        # belong in a storage mount.
         task = sky.Task(
             name=job.id,
             run=run_command,
+            workdir=job.working_dir,
         )
         task.set_resources(resources)
 
@@ -766,9 +854,12 @@ class SkyPilotBackend:
             dag = sky.Dag()
             dag.add(task)
 
-            # Get cost estimate from optimizer
+            # Get cost estimate from optimizer. Same chatter as sky.jobs.launch
+            # — silence it (the structured return below is what compute_run
+            # actually consumes).
             optimizer = sky.Optimizer()
-            optimized = optimizer.optimize(dag)
+            with _silence_sky_chatter():
+                optimized = optimizer.optimize(dag)
 
             # Extract cost info from optimized task
             if optimized and optimized.tasks:

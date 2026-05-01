@@ -72,7 +72,7 @@ Open-Source Coding Models (via Together AI / self-hosted):
 -----------------------------------------------------------------------------
 FAST TIER (Speed/cost optimized)
 -----------------------------------------------------------------------------
-Anthropic:    anthropic/claude-3-haiku-20240307       [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-haiku-4-5-20251001     [DEFAULT - TESTED]
 OpenAI:       openai/gpt-4.1-nano                     [untested]
 OpenAI:       openai/o4-mini                          [untested]
 Google:       gemini/gemini-2.5-flash-lite            [untested]
@@ -103,7 +103,7 @@ CODING_MODEL = "anthropic/claude-sonnet-4-20250514"
 
 # Fast model for simple tasks - Haiku for speed and cost
 # Use for: file exploration, extraction, summarization, simple queries
-FAST_MODEL = "anthropic/claude-3-haiku-20240307"
+FAST_MODEL = "anthropic/claude-haiku-4-5-20251001"
 #FAST_MODEL = "xai/grok-3-mini"
 
 # Vision/Multimodal model for image analysis

@@ -48,7 +48,7 @@ SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriA
 | **Vision** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
 | **Coding** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
 | **Verification** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Fast** | `claude-3-haiku-20240307` | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
+| **Fast** | `claude-haiku-4-5-20251001` | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
 
 **Open-Source alternatives** (via Together AI, Groq, or self-hosted):
 

@@ -129,13 +129,81 @@ def test_bg_wait_cloud_recovering_is_treated_as_non_terminal_snapshot():
     assert "recovering" in out.output.lower()
 
 
-def test_bg_wait_schema_no_blocking_kwargs():
-    """The tool's JSON schema still must not expose wait=/until=/block=
-    kwargs (M1A hard rule #1)."""
+def test_bg_wait_default_is_still_snapshot_only_for_cloud():
+    """M1A hard rule #1 evolved: the *default* must still be snapshot-only
+    for cloud jobs (no polling, no sleep). ``block=True`` is opt-in for
+    cases where the caller knows the wait is short and wants to collapse
+    N polling turns into 1; the default keeps the M1A contract intact so
+    M2A's wait/resume substrate isn't fighting a tool that sleeps inside
+    itself by accident."""
     schema = BgWaitTool().to_schema()
     props = schema["parameters"]["properties"]
-    for forbidden in ("wait", "until", "block"):
+
+    # `block` IS exposed (opt-in long-poll), but its default must be False
+    # so the M1A non-blocking contract is the default behavior.
+    assert "block" in props, "block parameter should be exposed for opt-in long-poll"
+    assert props["block"].get("default") is False, (
+        "block default must be False — agents must opt in explicitly to "
+        "long-poll, otherwise M1A hard rule #1 is silently violated"
+    )
+
+    # Other names from older designs should remain unused.
+    for forbidden in ("wait", "until"):
         assert forbidden not in props, (
-            f"bg_wait schema must not expose '{forbidden}' kwarg "
-            f"(M1A non-blocking contract)"
+            f"bg_wait schema must not expose deprecated '{forbidden}' kwarg"
         )
+
+
+def test_bg_wait_block_true_polls_until_terminal():
+    """Long-poll path: block=True polls every interval until the status
+    becomes terminal. Pin the loop's exit condition (one terminal status
+    ends the poll) and that the result is the COMPLETED branch result."""
+    # Sequence: RUNNING, RUNNING, COMPLETED — should make 3 get_status
+    # calls and exit on the third with the COMPLETED structured output.
+    states = [
+        JobResult(status=JobStatus.RUNNING, summary="step 1"),
+        JobResult(status=JobStatus.RUNNING, summary="step 2"),
+        JobResult(status=JobStatus.COMPLETED, summary="done"),
+    ]
+    fake_router = MagicMock()
+    fake_router.get_status.side_effect = states
+    fake_class = MagicMock(return_value=fake_router)
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch("sciagent.tools.atomic.bg_tools.time.sleep") as fake_sleep, \
+         patch("sciagent.tools.atomic.bg_tools.time.monotonic", side_effect=[0, 0, 1, 2, 3, 4]):
+        tool = BgWaitTool()
+        out = tool.execute(job_id="sciagent-loop", block=True, timeout=600)
+
+    assert out.success is True
+    assert "completed" in out.output.lower()
+    assert fake_router.get_status.call_count == 3
+    # Slept twice (between the 3 polls), at the configured interval.
+    assert fake_sleep.call_count == 2
+
+
+def test_bg_wait_block_true_returns_snapshot_on_timeout():
+    """Long-poll deadline reached without terminal — return a snapshot
+    that tells the agent the budget expired. Don't error: the job is
+    still progressing on sky's controller; the agent can re-issue with a
+    longer timeout or fall back to sparse re-polling."""
+    states = [JobResult(status=JobStatus.RUNNING, summary="still going")] * 5
+    fake_router = MagicMock()
+    fake_router.get_status.side_effect = states
+    fake_class = MagicMock(return_value=fake_router)
+
+    # monotonic sequence: deadline = 0 + 60 = 60. Make second monotonic
+    # call return 100 to trip the deadline check on the next iteration.
+    monotonic_values = iter([0, 0, 100, 100, 100])
+
+    with patch("sciagent.compute.router.ComputeRouter", fake_class), \
+         patch("sciagent.tools.atomic.bg_tools.time.sleep"), \
+         patch("sciagent.tools.atomic.bg_tools.time.monotonic", side_effect=lambda: next(monotonic_values)):
+        tool = BgWaitTool()
+        out = tool.execute(job_id="sciagent-slow", block=True, timeout=60)
+
+    assert out.success is True
+    assert "long-poll budget" in out.output.lower()
+    # Should not have polled forever — at most a couple of times before
+    # the deadline trip.
+    assert fake_router.get_status.call_count <= 2

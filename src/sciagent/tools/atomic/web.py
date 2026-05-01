@@ -995,9 +995,23 @@ Extract the requested information:"""
             return response.content
 
         except Exception as e:
-            # If LLM extraction fails, fall back to truncated content
-            print(f"⚠️ LLM extraction failed: {e}, falling back to truncated content")
-            return content[:WEB_FETCH_DISPLAY_LIMIT]
+            # If LLM extraction fails, return a small head of the page plus a
+            # clear marker. Previously this fell back to WEB_FETCH_DISPLAY_LIMIT
+            # (16k) chars of raw HTML soup, which the agent can't usefully act
+            # on — and at one fallback per failed fetch it dominated the
+            # subagent's token bill (e.g. when FAST_MODEL was a retired ID and
+            # every extraction 404'd). Cap to ~2k chars so the agent can see
+            # *something* but is nudged to retry with a narrower URL/query
+            # rather than chew on a wall of markup.
+            print(f"⚠️ LLM extraction failed: {e}, returning capped raw head")
+            cap = 2000
+            head = content[:cap]
+            tail_note = (
+                f"\n\n[extraction failed: {e}; showing first {cap} chars of "
+                f"{len(content):,}. Retry with a narrower 'prompt' or fetch a "
+                f"more specific URL.]"
+            )
+            return head + tail_note
 
     def to_schema(self) -> Dict:
         """Convert to OpenAI-style tool schema."""

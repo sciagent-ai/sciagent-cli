@@ -27,6 +27,13 @@ class StorageMount:
     mode: StorageMode = StorageMode.MOUNT
     source: Optional[str] = None        # Local path or s3://… URI to sync from (optional)
     persistent: bool = True             # Keep bucket after job ends
+    # implicit=True means "we attached this mount automatically for output
+    # retrieval, the caller didn't ask for it." The skypilot backend uses
+    # this to decide whether to cd into the mount (explicit: yes — caller's
+    # data lives there) or to keep workdir's CWD and just symlink the
+    # mount's _outputs/ into the workdir (implicit: outputs persist via the
+    # bucket but the user's local script still runs from ~/sky_workdir/).
+    implicit: bool = False
 
 
 class JobStatus(Enum):

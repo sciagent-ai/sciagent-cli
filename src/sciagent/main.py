@@ -27,6 +27,89 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 import os
 import sys
 import argparse
+
+# Strip macOS MallocStackLogging* env vars before any subprocess spawns.
+# These are often left in the user's shell by Xcode / Instruments / Activity
+# Monitor's "Sample Process", or injected by launchd. When inherited by
+# child Pythons (ours and SkyPilot's internal aws/ray/fork spawns), each
+# child prints
+#   Python(NNN) MallocStackLogging: can't turn off malloc stack logging
+#   because it was not enabled.
+# which spams `bg_status` and `compute_run` output.
+#
+# `pop()` alone wasn't enough in practice — SkyPilot's optimizer fork-spawns
+# helpers and on some macOS configs the var resurfaces. Belt-and-suspenders:
+# `pop()` to remove from our env (children inherit the cleaned set), then
+# leave nothing behind. The full family of these vars all trigger the same
+# warning, so strip them together.
+for _var in (
+    "MallocStackLogging",
+    "MallocStackLoggingNoCompact",
+    "MallocStackLoggingDirectory",
+    "MallocStackLoggingFile",
+    "MallocScribble",
+):
+    os.environ.pop(_var, None)
+
+# Some macOS Python builds emit the "MallocStackLogging: can't turn off ..."
+# warning regardless of env state — it comes from libc on subprocess Pythons
+# that SkyPilot's internal optimizer/queue paths fork-spawn, and there is
+# no env var that suppresses it cleanly. Wrapping every sky.* call site in
+# the backend is brittle (a future call site will forget). Instead, install
+# a line-level filter on sys.stdout/stderr that drops the known noise
+# patterns. Tiny per-write cost, one place to maintain.
+import re as _re
+
+_NOISE_PATTERNS = (
+    _re.compile(r"^Python\(\d+\) MallocStackLogging:"),
+    # SkyPilot rich-console payload markers when stdout isn't a TTY.
+    _re.compile(r"^<sky-payload[^>]*>.*</sky-payload>\s*$"),
+)
+
+
+class _NoiseFilteredStream:
+    """Wraps a real stream and drops lines that match _NOISE_PATTERNS.
+
+    Stateful across writes because Python frequently calls write() with
+    partial lines. Buffer non-newline writes; on a newline, decide whether
+    to emit. Anything that isn't a "complete line" (e.g. interactive
+    prompts) is flushed verbatim on close/flush so we don't swallow it.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._buf = ""
+
+    def write(self, s):
+        if not s:
+            return 0
+        self._buf += s
+        # Emit complete lines; keep any trailing partial line in the buffer.
+        if "\n" in self._buf:
+            *complete, trailing = self._buf.split("\n")
+            self._buf = trailing
+            for line in complete:
+                if not any(p.search(line) for p in _NOISE_PATTERNS):
+                    self._real.write(line + "\n")
+        return len(s)
+
+    def flush(self):
+        # Flush any pending partial line — don't drop on flush since we
+        # can't pattern-match an incomplete line reliably.
+        if self._buf:
+            self._real.write(self._buf)
+            self._buf = ""
+        self._real.flush()
+
+    def __getattr__(self, name):
+        # Pass through everything else (isatty, fileno, etc.) to the real
+        # stream — important for libraries that probe these.
+        return getattr(self._real, name)
+
+
+sys.stdout = _NoiseFilteredStream(sys.stdout)
+sys.stderr = _NoiseFilteredStream(sys.stderr)
+
 from pathlib import Path
 from typing import Optional
 

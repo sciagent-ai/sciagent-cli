@@ -10,6 +10,7 @@ Tools for managing background processes launched via bash(background=True):
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Dict, Any, Optional, List
 
@@ -395,8 +396,13 @@ class BgWaitTool:
     description = (
         "Wait for a background job. For LOCAL (bash) jobs, blocks until the "
         "job completes or the timeout elapses. For CLOUD (SkyPilot) jobs, "
-        "this returns a one-shot snapshot — the agent loop never blocks on "
-        "cloud jobs. To re-check a non-terminal cloud job, call bg_status."
+        "default behavior is a one-shot snapshot (M1A non-blocking contract); "
+        "pass block=True to long-poll internally (10s interval, up to "
+        "`timeout` seconds, default 600s) and return only on terminal status. "
+        "Long-poll collapses N polling turns into 1 — biggest token win for "
+        "jobs that take more than ~30s. On COMPLETED, auto-pulls "
+        "/workspace/_outputs/ from the bucket to local; the file list is "
+        "in the result."
     )
 
     parameters = {
@@ -409,10 +415,25 @@ class BgWaitTool:
             "timeout": {
                 "type": "integer",
                 "description": (
-                    "Maximum seconds to wait for LOCAL jobs. If omitted, "
-                    "waits indefinitely. Ignored for cloud jobs (the call "
-                    "always returns a snapshot)."
+                    "Maximum seconds to wait. For LOCAL jobs: omit for "
+                    "indefinite wait. For CLOUD jobs with block=True: "
+                    "defaults to 600s. Ignored for CLOUD jobs in default "
+                    "(snapshot) mode."
                 )
+            },
+            "block": {
+                "type": "boolean",
+                "description": (
+                    "Cloud jobs only. False (default): return a snapshot — "
+                    "honors the M1A non-blocking contract; cheap; agent "
+                    "polls explicitly. True: long-poll internally every "
+                    "10s up to `timeout`, returning early on terminal. Use "
+                    "block=True for jobs you expect to finish within a few "
+                    "minutes — saves N polling turns × full context. For "
+                    "hours-long simulations, prefer snapshot + sparse "
+                    "agent-paced re-checks."
+                ),
+                "default": False
             }
         },
         "required": ["job_id"]
@@ -425,39 +446,125 @@ class BgWaitTool:
         """Check if job_id is a compute/SkyPilot job."""
         return job_id and job_id.startswith("sciagent-")
 
-    def _wait_compute_job(self, job_id: str, timeout: int = None) -> ToolResult:
-        """Snapshot the cloud job's status; never block.
+    # Long-poll cadence for block=True. 10s strikes a balance between
+    # responsiveness (terminal status surfaced quickly) and cluster-load
+    # (sky.jobs.queue is not free; controllers throttle aggressive callers).
+    _BLOCK_POLL_INTERVAL_SEC = 10
+    _BLOCK_DEFAULT_TIMEOUT_SEC = 600
 
-        M1A: ``bg_wait`` is non-blocking for cloud jobs (hard rule #1 —
-        atomic tools for cloud jobs are non-blocking and one-shot). The
-        ``timeout`` kwarg is preserved for schema compatibility and still
-        works for local jobs, but for cloud jobs we make exactly one
-        ``get_status`` call:
+    def _wait_compute_job(self, job_id: str, timeout: int = None, block: bool = False) -> ToolResult:
+        """Wait on a cloud job's status.
 
+        M1A hard rule #1 says atomic tools for cloud jobs are non-blocking
+        and one-shot. We preserve that as the **default** (block=False)
+        because the multi-job / parallel cases need it and M2A's resume
+        substrate depends on it.
+
+        Opt-in long-poll (``block=True``) trades that for a token win on
+        the common single-job-wait case: instead of N polling turns each
+        replaying the full agent context, we make one tool call that
+        internally polls every ``_BLOCK_POLL_INTERVAL_SEC`` until terminal
+        or until ``timeout``. The job itself still runs on sky's
+        controller; the in-process wait is best-effort — if sciagent
+        crashes during the wait, the manifest-based resume path picks
+        the job up by job_id.
+
+        Returns:
           - terminal (COMPLETED / FAILED / CANCELLED) -> structured result.
-          - non-terminal (PENDING / RUNNING / RECOVERING) -> a snapshot
-            describing the current state and pointing the agent at
-            ``bg_status`` for re-polling.
-
-        The earlier 5s-interval, 30s-default polling loop violated the
-        spirit of the rule and would have forced M2A's wait/resume
-        substrate to fight a tool that sleeps inside itself.
+          - non-terminal (PENDING / RUNNING / RECOVERING) AND block=False
+            -> snapshot pointing the agent at bg_status for re-polling.
+          - non-terminal AND block=True AND timeout reached -> snapshot
+            telling the caller the wait expired (state is still pending);
+            agent can re-issue with a longer timeout or fall back to
+            sparse re-polling.
         """
         try:
             from sciagent.compute.job import JobStatus
             from sciagent.compute.router import ComputeRouter
 
             router = ComputeRouter()
-            result = router.get_status(job_id)
+
+            # When block=True, internally poll until terminal or timeout.
+            # We thread a small loop here rather than recurse so a long
+            # wait emits a single tool result, not nested ones.
+            if block:
+                effective_timeout = timeout if timeout and timeout > 0 else self._BLOCK_DEFAULT_TIMEOUT_SEC
+                deadline = time.monotonic() + effective_timeout
+
+                while True:
+                    result = router.get_status(job_id)
+                    if result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
+                        break
+                    if time.monotonic() >= deadline:
+                        # Timed out without terminal — return a snapshot
+                        # with a clear hint about the budget.
+                        return ToolResult(
+                            success=True,
+                            output=(
+                                f"Cloud job {job_id} still {result.status.value} after "
+                                f"{effective_timeout}s long-poll budget.\n\n"
+                                f"Summary: {result.summary}\n\n"
+                                f"Re-issue bg_wait with block=True and a longer timeout, "
+                                f"or fall back to sparse bg_status re-checks."
+                            ),
+                            error=None,
+                        )
+                    # Sleep up to the next interval, but never past the deadline.
+                    sleep_for = min(self._BLOCK_POLL_INTERVAL_SEC, max(0.0, deadline - time.monotonic()))
+                    if sleep_for > 0:
+                        time.sleep(sleep_for)
+                # Fall through with the terminal `result`.
+            else:
+                result = router.get_status(job_id)
 
             if result.status == JobStatus.COMPLETED:
+                # Auto-pull workspace outputs from the cloud bucket. Folded
+                # into bg_wait (rather than exposed as a separate tool) so
+                # the agent's mental model is "I run a job and get files
+                # back" — no extra tool call. Best-effort: a fetch failure
+                # doesn't fail the wait (the job did succeed); the reason
+                # is surfaced so the agent can act on it.
+                fetch_lines = []
+                try:
+                    from .compute_fetch import fetch_workspace_outputs
+
+                    fetched = fetch_workspace_outputs(
+                        job_id=job_id,
+                        working_dir=self.working_dir,
+                    )
+                    if fetched.get("ok"):
+                        fetch_lines = [
+                            "",
+                            f"Fetched {fetched['file_count']} file(s) "
+                            f"({fetched['bytes_total']:,} bytes) from "
+                            f"{fetched['bucket']} to {fetched['dest']}/_outputs/:",
+                        ]
+                        # Token-light: paths only, no contents. Cap at 20
+                        # entries so a job that produced hundreds of files
+                        # doesn't bloat the wait result.
+                        for f in fetched["files"][:20]:
+                            fetch_lines.append(f"  - {f['path']} ({f['bytes']:,} B)")
+                        if fetched["file_count"] > 20:
+                            fetch_lines.append(
+                                f"  ... and {fetched['file_count'] - 20} more"
+                            )
+                    else:
+                        # Surface the reason but don't dramatize it.
+                        fetch_lines = [
+                            "",
+                            f"(outputs not auto-fetched: {fetched.get('reason')})",
+                        ]
+                except Exception as fetch_err:
+                    fetch_lines = ["", f"(outputs not auto-fetched: {fetch_err})"]
+
                 return ToolResult(
                     success=True,
                     output=(
                         f"Compute job {job_id} completed.\n\n"
                         f"Status: {result.status.value}\n"
-                        f"Summary: {result.summary}\n\n"
-                        f"Use 'sky logs {job_id}' to view full logs.\n"
+                        f"Summary: {result.summary}"
+                        + "\n".join(fetch_lines)
+                        + f"\n\nUse 'sky logs {job_id}' to view full logs.\n"
                         f"Use 'sky jobs cancel {job_id}' if you need to stop a follow-up."
                     ),
                     error=None,
@@ -511,7 +618,7 @@ class BgWaitTool:
         except Exception as e:
             return ToolResult(success=False, output=None, error=str(e))
 
-    def execute(self, job_id: str = None, timeout: int = None) -> ToolResult:
+    def execute(self, job_id: str = None, timeout: int = None, block: bool = False) -> ToolResult:
         """Wait for a background job to complete."""
         from sciagent.process_manager import ProcessManager
 
@@ -524,7 +631,7 @@ class BgWaitTool:
 
         # Handle compute jobs (SkyPilot)
         if self._is_compute_job(job_id):
-            return self._wait_compute_job(job_id, timeout)
+            return self._wait_compute_job(job_id, timeout, block=block)
 
         try:
             pm = ProcessManager.get_instance()
