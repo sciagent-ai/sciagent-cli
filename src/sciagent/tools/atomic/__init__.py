@@ -29,6 +29,7 @@ from .todo import TodoTool, ContentValidator
 from .ask_user import AskUserTool
 from .skill import SkillTool
 from .bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
+from .task_tools import TaskListTool, TaskGetTool
 
 __all__ = [
     "ShellTool",
@@ -47,4 +48,6 @@ __all__ = [
     "BgOutputTool",
     "BgWaitTool",
     "BgKillTool",
+    "TaskListTool",
+    "TaskGetTool",
 ]
