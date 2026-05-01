@@ -49,8 +49,15 @@ class BgStatusTool:
         self.working_dir = working_dir
 
     def _is_compute_job(self, job_id: str) -> bool:
-        """Check if job_id is a compute/SkyPilot job."""
-        return job_id and job_id.startswith("sciagent-")
+        """Check if job_id is a compute/SkyPilot job.
+
+        Routes via task_index.kind_of so the manifest's kind field wins over
+        a prefix collision — a future kind=subagent manifest with a
+        sciagent-prefixed id won't get misrouted to the compute path.
+        """
+        from sciagent.compute.task_index import kind_of
+
+        return kind_of(job_id) == "compute_job"
 
     def _get_compute_status(self, job_id: str) -> Optional[Dict[str, Any]]:
         """Get joined status from local task_index manifest + SkyPilot router.
@@ -307,8 +314,15 @@ class BgOutputTool:
         self.working_dir = working_dir
 
     def _is_compute_job(self, job_id: str) -> bool:
-        """Check if job_id is a compute/SkyPilot job."""
-        return job_id and job_id.startswith("sciagent-")
+        """Check if job_id is a compute/SkyPilot job.
+
+        Routes via task_index.kind_of so the manifest's kind field wins over
+        a prefix collision — a future kind=subagent manifest with a
+        sciagent-prefixed id won't get misrouted to the compute path.
+        """
+        from sciagent.compute.task_index import kind_of
+
+        return kind_of(job_id) == "compute_job"
 
     def _get_compute_output(self, job_id: str, tail_lines: int = None) -> ToolResult:
         """Get logs from a compute/SkyPilot job."""
@@ -453,8 +467,15 @@ class BgWaitTool:
         self.working_dir = working_dir
 
     def _is_compute_job(self, job_id: str) -> bool:
-        """Check if job_id is a compute/SkyPilot job."""
-        return job_id and job_id.startswith("sciagent-")
+        """Check if job_id is a compute/SkyPilot job.
+
+        Routes via task_index.kind_of so the manifest's kind field wins over
+        a prefix collision — a future kind=subagent manifest with a
+        sciagent-prefixed id won't get misrouted to the compute path.
+        """
+        from sciagent.compute.task_index import kind_of
+
+        return kind_of(job_id) == "compute_job"
 
     # Long-poll cadence for block=True. 10s strikes a balance between
     # responsiveness (terminal status surfaced quickly) and cluster-load
@@ -765,8 +786,15 @@ class BgKillTool:
         self.working_dir = working_dir
 
     def _is_compute_job(self, job_id: str) -> bool:
-        """Check if job_id is a compute/SkyPilot job."""
-        return job_id and job_id.startswith("sciagent-")
+        """Check if job_id is a compute/SkyPilot job.
+
+        Routes via task_index.kind_of so the manifest's kind field wins over
+        a prefix collision — a future kind=subagent manifest with a
+        sciagent-prefixed id won't get misrouted to the compute path.
+        """
+        from sciagent.compute.task_index import kind_of
+
+        return kind_of(job_id) == "compute_job"
 
     def _kill_compute_job(self, job_id: str) -> ToolResult:
         """Terminate a compute/SkyPilot cluster."""

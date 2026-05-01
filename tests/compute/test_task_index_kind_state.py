@@ -408,5 +408,56 @@ def test_normalize_handles_non_dict(tmp_manifest_dir: Path):
     assert task_index._normalize(42) == {}
 
 
+# ---- kind_of ----------------------------------------------------------------
+
+
+def test_kind_of_returns_kind_from_manifest(tmp_manifest_dir: Path):
+    task_index.write_task(
+        {"job_id": "sciagent-k1", "kind": "compute_job", "state": "running"}
+    )
+    assert task_index.kind_of("sciagent-k1") == "compute_job"
+
+
+def test_kind_of_returns_kind_for_non_compute_manifest(tmp_manifest_dir: Path):
+    """A manifest with kind=subagent that happens to share the sciagent-
+    prefix must NOT be misrouted to compute_job. Manifest wins over prefix —
+    this is the load-bearing property the prefix-sniff replacement enables."""
+    _write_raw(
+        tmp_manifest_dir,
+        "sciagent-sub1",
+        {"job_id": "sciagent-sub1", "kind": "subagent", "state": "running"},
+    )
+    assert task_index.kind_of("sciagent-sub1") == "subagent"
+
+
+def test_kind_of_falls_back_to_prefix_for_no_manifest(tmp_manifest_dir: Path):
+    """Legacy / brief-window-after-sky.launch / pre-B7 jobs have no manifest.
+    The prefix is the only signal — fall back to compute_job so existing
+    routing still works."""
+    assert task_index.kind_of("sciagent-legacy") == "compute_job"
+
+
+def test_kind_of_no_manifest_no_prefix_is_local(tmp_manifest_dir: Path):
+    """ProcessManager-tracked bash jobs have no manifest and no sciagent-
+    prefix. Default is local."""
+    assert task_index.kind_of("bash-job-42") == "local"
+
+
+def test_kind_of_kindless_manifest_defaults_to_compute_job(tmp_manifest_dir: Path):
+    """A pre-PR1 manifest (no kind field) defaults to compute_job per
+    DEFAULT_KIND. Same behavior as list_tasks/get_task."""
+    _write_raw(
+        tmp_manifest_dir,
+        "sciagent-old",
+        {"job_id": "sciagent-old"},  # no kind, no state
+    )
+    assert task_index.kind_of("sciagent-old") == "compute_job"
+
+
+def test_kind_of_handles_empty_or_none(tmp_manifest_dir: Path):
+    assert task_index.kind_of("") == "local"
+    assert task_index.kind_of(None) == "local"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

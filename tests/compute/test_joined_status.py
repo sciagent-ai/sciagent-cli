@@ -333,6 +333,44 @@ def test_bg_status_kindless_manifest_surfaces_default_kind_and_state():
     assert "State: running" in result.output
 
 
+def test_bg_status_routing_respects_kind_over_prefix(tmp_path, monkeypatch):
+    """PR2: a manifest with kind=subagent that happens to share the sciagent-
+    prefix must NOT be routed to the compute path. The manifest wins via
+    task_index.kind_of, regardless of how the id starts.
+
+    This is the load-bearing property that lets future non-compute kinds
+    land without breaking the existing routing."""
+    from pathlib import Path
+    from sciagent.compute import task_index
+    from sciagent.tools.atomic.bg_tools import BgStatusTool
+
+    fake_home = Path(tmp_path) / "home" / ".sciagent" / "tasks"
+    monkeypatch.setattr(task_index, "manifest_dir", lambda: fake_home)
+    fake_home.mkdir(parents=True, exist_ok=True)
+    # Plant a kind=subagent manifest with a sciagent-prefixed id.
+    import json as _json
+
+    (fake_home / "sciagent-sub1.json").write_text(
+        _json.dumps(
+            {
+                "job_id": "sciagent-sub1",
+                "kind": "subagent",
+                "state": "running",
+            }
+        )
+    )
+
+    tool = BgStatusTool()
+    # If the prefix sniff still ran, this would call into ComputeRouter and
+    # the formatter would print "Compute Job:". With kind_of routing, the
+    # subagent kind sends the lookup to ProcessManager (which doesn't know
+    # this id) and bg_status reports not-found from the local path —
+    # specifically NOT a compute_job result.
+    result = tool.execute(job_id="sciagent-sub1")
+    assert result.success is False
+    assert "compute job" not in (result.output or "").lower()
+
+
 def test_bg_status_tool_missing_both_returns_not_found():
     """Sky get_status raises AND no manifest exists → bg_status reports the
     job as not found rather than fabricating a status."""

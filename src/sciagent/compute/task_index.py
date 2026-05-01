@@ -290,6 +290,37 @@ def _normalize(record: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def kind_of(task_id: str) -> str:
+    """Return the kind of a task id. Manifest wins; prefix is a fallback.
+
+    Resolution order:
+
+      1. If a manifest exists for ``task_id``, return its ``kind`` field
+         (defaulting to ``compute_job`` for pre-PR1 manifests via the
+         normalized read).
+      2. Otherwise, if the id starts with ``"sciagent-"``, return
+         ``compute_job`` — covers the legacy/no-manifest path that the B7
+         writer didn't yet cover, plus jobs in the brief window between
+         sky.launch and manifest write.
+      3. Otherwise, return ``"local"`` — the catch-all for ProcessManager-
+         tracked bash background jobs and anything else.
+
+    Callers route on this result instead of prefix-sniffing directly. That
+    way, when a non-compute kind (e.g. ``subagent``) lands with an id that
+    happens to share the ``sciagent-`` prefix, the manifest's ``kind`` wins
+    and the routing goes to the correct per-kind handler — no silent
+    misroute to the compute_job path.
+    """
+    if not task_id or not isinstance(task_id, str):
+        return "local"
+    record = read_task(task_id)
+    if record is not None:
+        return record.get("kind") or DEFAULT_KIND
+    if task_id.startswith("sciagent-"):
+        return "compute_job"
+    return "local"
+
+
 def get_task(task_id: str, strict: bool = False) -> Optional[Dict[str, Any]]:
     """Read a manifest by id (alias for read_task with broader naming).
 
