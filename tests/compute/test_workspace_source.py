@@ -154,28 +154,39 @@ def test_build_storage_mounts_passes_persistent_false_when_set():
 
 
 def test_compute_tool_workspace_source_auto_enables_mount_on_skypilot():
-    """B5 acceptance: compute_run(service=…, workspace_source='s3://…',
-    command=…) — without explicit workspace=True — must still attach the
-    workspace mount and forward workspace_source to get_workspace_mount."""
+    """compute_run(service=…, workspace_source='s3://…', command=…) on
+    skypilot must build an input mount at /workspace (back-compat for the
+    string form) and an always-on output mount, then surface both in the
+    result payload under workspace.inputs / workspace.outputs."""
     from sciagent.tools.atomic.compute import ComputeTool
 
     ComputeTool._shared_session_id = None
     tool = ComputeTool()
 
-    fake_mount = StorageMount(
+    fake_input_mount = StorageMount(
         path="/workspace",
         bucket="my-paper-data",
         store="s3",
         mode=StorageMode.MOUNT,
         source="s3://my-paper-data/case-typical-c",
         persistent=True,
+        kind="input",
+    )
+    fake_output_mount = StorageMount(
+        path="/outputs",
+        bucket="sciagent-workspace-test-sess",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="output",
     )
 
     # Stand in for the real router/backend so no sky calls happen.
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
-    fake_skypilot.get_workspace_mount.return_value = fake_mount
-    # M1A: SkyPilotBackend.run returns (name, managed_job_id).
+    fake_skypilot.build_outputs_mount.return_value = fake_output_mount
+    fake_skypilot.build_input_mounts.return_value = [fake_input_mount]
     fake_skypilot.run.return_value = ("sciagent-job-xyz", None)
 
     fake_router = MagicMock()
@@ -187,25 +198,30 @@ def test_compute_tool_workspace_source_auto_enables_mount_on_skypilot():
 
     with patch.object(tool, "_get_router", return_value=fake_router):
         result = tool.execute(
-            command="bash Allrun",
+            command="cd /workspace && bash Allrun",
             service="openfoam-swak4foam-2012",
             workspace_source="s3://my-paper-data/case-typical-c",
             backend="skypilot",
         )
 
-    assert result.success is True
+    assert result.success is True, result.error
 
-    # workspace_source was forwarded into get_workspace_mount.
-    fake_skypilot.get_workspace_mount.assert_called_once()
-    args, kwargs = fake_skypilot.get_workspace_mount.call_args
-    assert kwargs.get("workspace_source") == "s3://my-paper-data/case-typical-c", (
-        f"expected workspace_source kwarg; got args={args}, kwargs={kwargs}"
-    )
+    # Both new mount methods called; workspace_source reached build_input_mounts
+    # in normalized list-of-dicts form.
+    fake_skypilot.build_outputs_mount.assert_called_once()
+    fake_skypilot.build_input_mounts.assert_called_once()
+    inputs_arg = fake_skypilot.build_input_mounts.call_args.args[0]
+    assert inputs_arg == [
+        {"path": "/workspace", "source": "s3://my-paper-data/case-typical-c"}
+    ]
 
-    # Output reports the URI's bucket, not the synthesized session bucket.
-    assert result.output["workspace"]["bucket"] == "my-paper-data"
-    assert result.output["workspace"]["mount_path"] == "/workspace"
-    assert result.output["workspace"]["source"] == "s3://my-paper-data/case-typical-c"
+    # Result reports both inputs and outputs separately under the workspace key.
+    workspace = result.output["workspace"]
+    assert workspace["inputs"][0]["path"] == "/workspace"
+    assert workspace["inputs"][0]["bucket"] == "my-paper-data"
+    assert workspace["inputs"][0]["source"] == "s3://my-paper-data/case-typical-c"
+    assert workspace["outputs"][0]["path"] == "/outputs"
+    assert workspace["outputs_dir_env"] == "$OUTPUTS_DIR"
 
 
 def test_compute_tool_no_workspace_source_no_mount_on_local_backend():

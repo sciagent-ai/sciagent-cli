@@ -12,11 +12,32 @@ Use existing bg_status, bg_wait, bg_output, bg_kill for job management.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional, Union
 
 import yaml
+
+
+# Path-contract validation: agent-visible absolute paths. References to
+# these in the user command must match a declared mount; otherwise the
+# command is launched into an empty path and silently produces nothing.
+# Strict whitelisting of every absolute path would reject /usr/bin/python
+# and /tmp/foo — we only watch the paths the agent uses for inputs.
+_WATCHED_INPUT_PATHS: tuple = ("/workspace", "/data", "/inputs")
+
+# Always-allowed (output mount is auto-mounted; OUTPUTS_DIR env var is
+# exported by the prologue).
+_OUTPUTS_PATH: str = "/outputs"
+
+# Forbidden — internal SkyPilot rsync target.
+_FORBIDDEN_PATTERN = re.compile(r"~?/?sky_workdir(/|\s|\"|'|$|\\b)")
+
+# Watched-path matcher. Captures the path so we can echo it in the error.
+_WATCHED_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9_/])(/(?:workspace|data|inputs)(?:/[^\s\"';|&]*)?)"
+)
 
 
 @dataclass
@@ -112,6 +133,24 @@ class ComputeTool:
 
 Use EITHER service (from registry) OR image (direct Docker image).
 
+Path contract (image-agnostic, identical across every registry image):
+  - Inputs (read): pass workspace_source= to mount buckets/dirs.
+      Single source     -> "s3://bucket/prefix" (mounts at /workspace/)
+      Multi-source      -> [{"path": "/workspace", "source": "s3://q/"},
+                            {"path": "/data/nr",  "source": "gs://nr/"}]
+      Any cloud SkyPilot supports works (s3, gs, az, r2, oci) — the
+      agent never has to pick or hardcode.
+  - Outputs (write): write to $OUTPUTS_DIR (= /outputs/<job_id>/) — always
+      mounted, always isolated by job, auto-fetched by bg_wait on terminal
+      status. Cross-job reads in the same session: /outputs/<other-job-id>/.
+  - Local code: pass workdir=<path> to rsync a local dir to the cluster.
+      CWD becomes ~/sky_workdir/. Without this, no rsync — image's WORKDIR
+      is honored.
+  - Never reference ~/sky_workdir/ — it's internal SkyPilot.
+
+CWD precedence: input mount > workdir= rsync target > image WORKDIR.
+The compute layer never invents a CWD.
+
 Honor user intent on backend: if the user named a target ("on sky", "on
 skypilot", "in the cloud", "on AWS"), pass backend="skypilot" explicitly —
 do NOT leave it as "auto" and hope the router picks cloud. Same the other
@@ -120,13 +159,18 @@ way: "run locally" / "use Docker" → backend="local". Only fall back to
 
 Examples:
   compute_run(service="scipy-base", command="python3 -c 'print(1+1)'")
-  compute_run(image="python:3.11", command="python -c 'import sys; print(sys.version)'")
-  compute_run(service="scipy-base", command="...", backend="skypilot")  # user said "on the sky"
+  compute_run(service="openfoam", workspace_source="/local/case",
+              command="bash Allrun && cp -r postProcessing $OUTPUTS_DIR/")
+  compute_run(service="scipy-base",
+              workspace_source=[{"path":"/workspace","source":"s3://q/"},
+                                {"path":"/data/nr","source":"gs://nr/"}],
+              command="blastn -query query.fa -db /data/nr/nr -out $OUTPUTS_DIR/hits.txt",
+              backend="skypilot")
 
 Returns job_id. Check status with bg_status(job_id).
 For long jobs, use bg_wait(job_id) to block until complete.
 
-For skypilot jobs, bg_wait auto-pulls /workspace/_outputs/ from the cloud
+For skypilot jobs, bg_wait auto-pulls /outputs/<job_id>/ from the cloud
 to your local working dir on success — the file paths come back in
 bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
 
@@ -197,19 +241,23 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
             "workspace": {
                 "type": ["boolean", "null"],
                 "description": (
-                    "Mount a persistent workspace bucket. Defaults on for "
-                    "skypilot jobs so outputs written to /workspace/_outputs/ "
-                    "survive cluster teardown and bg_wait can auto-pull them "
-                    "back locally; pass false to explicitly opt out."
+                    "Deprecated no-op; outputs are now always auto-mounted "
+                    "at /outputs/<job_id>/ for skypilot jobs."
                 ),
                 "default": None
             },
             "workspace_source": {
+                "description": (
+                    "Input mount(s). Single string is a cloud URI or local "
+                    "path mounted at /workspace/. List form mounts each entry "
+                    "at its declared path: [{path, source}, ...]."
+                )
+            },
+            "workdir": {
                 "type": "string",
                 "description": (
-                    "Source for the workspace mount: a cloud URI like 's3://bucket[/prefix]' "
-                    "(reuses that bucket directly) or a local path Sky should sync up. "
-                    "Setting this auto-enables the workspace mount on skypilot."
+                    "Local directory to rsync to the cluster via SkyPilot. "
+                    "When set, CWD becomes ~/sky_workdir/. Default: no rsync."
                 )
             },
             "session_id": {
@@ -281,6 +329,9 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
         service: Optional[str],
         timeout_sec: int,
         managed_job_id: Optional[int] = None,
+        outputs_uri: Optional[str] = None,
+        outputs_prefix: Optional[str] = None,
+        mounts: Optional[List[Dict[str, str]]] = None,
     ) -> None:
         """B7: write the per-job manifest to ~/.sciagent/tasks/<job_id>.json.
 
@@ -321,11 +372,68 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                 "image": image,
                 "service": service,
                 "timeout_sec": int(timeout_sec) if timeout_sec else 0,
+                # Workspace contract additions (cloud-agnostic). outputs_uri
+                # carries the cloud identity through to fetch time so
+                # compute_fetch.py can dispatch to the right CLI without
+                # re-reading SkyPilot config. outputs_prefix is the bucket-
+                # side path. mounts is the declared input mount list at
+                # launch (used for validation read-back / debug).
+                "outputs_uri": outputs_uri,
+                "outputs_prefix": outputs_prefix,
+                "mounts": list(mounts) if mounts else [],
             }
             write_task(record)
         except Exception:
             # Best-effort; never break the launch path on a manifest write.
             pass
+
+    @staticmethod
+    def _validate_path_contract(
+        command: str,
+        declared_input_paths: List[str],
+    ) -> Optional[str]:
+        """Return an error message when the command references a path that
+        violates the input/output contract, else None.
+
+        Two hard rules:
+          1. ``~/sky_workdir/`` (or ``sky_workdir/`` anywhere) → forbidden;
+             it's internal SkyPilot.
+          2. Watched input paths (/workspace/, /data/, /inputs/) referenced
+             without a covering declared mount → forbidden; the path is
+             empty on the cluster and the command would silently produce
+             nothing.
+
+        ``/outputs/`` is always allowed (auto-mounted).
+        """
+        if _FORBIDDEN_PATTERN.search(command):
+            return (
+                "Command references ~/sky_workdir/ but that's internal "
+                "SkyPilot. For inputs pass workspace_source=. For outputs "
+                "write to $OUTPUTS_DIR or /outputs/<job_id>/."
+            )
+
+        # Build allowed-prefix set: declared mounts + the always-on output
+        # mount. A path matches if any allowed prefix is its prefix.
+        allowed_prefixes = list(declared_input_paths) + [_OUTPUTS_PATH]
+        for match in _WATCHED_PATTERN.finditer(command):
+            referenced = match.group(1).rstrip("/")
+            covered = False
+            for prefix in allowed_prefixes:
+                norm_prefix = prefix.rstrip("/")
+                if (
+                    referenced == norm_prefix
+                    or referenced.startswith(norm_prefix + "/")
+                ):
+                    covered = True
+                    break
+            if not covered:
+                return (
+                    f"Command references {referenced} but no matching input "
+                    f"mount was declared. Pass workspace_source=[{{path: "
+                    f"'{referenced.rsplit('/', 1)[0] or '/workspace'}', "
+                    f"source: '...'}}, ...], or use $OUTPUTS_DIR for outputs."
+                )
+        return None
 
     def execute(
         self,
@@ -340,7 +448,8 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
         estimate_only: bool = False,
         backend: str = "auto",
         workspace: Optional[bool] = None,
-        workspace_source: str = None,
+        workspace_source: Optional[Union[str, list, dict]] = None,
+        workdir: Optional[str] = None,
         session_id: str = None,
         intent: Dict[str, Any] = None,
         expected_artifacts: list = None,
@@ -454,61 +563,112 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
             requirements_kwargs["timeout_sec"] = int(timeout_sec)
         requirements = ComputeRequirements(**requirements_kwargs)
 
-        # Add workspace storage mount when needed. Tri-state on `workspace`:
-        #   - True              -> mount, regardless of backend
-        #   - False             -> never mount (explicit opt-out)
-        #   - None (default)    -> auto-on for skypilot so outputs survive
-        #                          cluster teardown and bg_wait can pull
-        #                          them back to local. Without this the
-        #                          agent cannot retrieve files generated on
-        #                          the cluster except by launching extra
-        #                          cloud jobs to cat them — wasteful
-        #                          pattern observed in real transcripts.
-        # workspace_source implies the user wants a mount, so it always wins.
-        # Track whether the mount is *explicit* (caller asked) or *implicit*
-        # (we attached it automatically just so outputs can be fetched).
-        # The skypilot backend uses this to decide whether to cd into the
-        # mount (explicit) or keep workdir's CWD and symlink _outputs/
-        # through (implicit). See StorageMount.implicit and _build_task.
-        if workspace is False:
-            wants_workspace = False
-            workspace_explicit = False
-        elif workspace is True or workspace_source:
-            wants_workspace = True
-            workspace_explicit = True
-        else:
-            # workspace is None — auto-decide. On for skypilot (or auto-routed
-            # cloud jobs); off for purely local runs. This is the implicit
-            # path — we want outputs to land somewhere fetchable, but the
-            # caller didn't say their data lives in the mount.
-            wants_workspace = backend == "skypilot" or (backend == "auto" and gpus > 0)
-            workspace_explicit = False
+        # New mount layout (cloud-agnostic):
+        #   - Output mount at /outputs/<job_id>/ — ALWAYS attached for
+        #     skypilot jobs. Auto-fetched by bg_wait on terminal status.
+        #   - Input mounts at caller-declared paths — built from
+        #     workspace_source= (str or list[{path, source}]).
+        # The legacy `workspace` boolean is now a no-op; outputs are always
+        # mounted. Pass-through preserved for back-compat callers.
+        actual_session_id: Optional[str] = None
+        outputs_uri_for_manifest: Optional[str] = None
+        outputs_prefix_for_manifest: Optional[str] = None
+        mounts_for_manifest: List[Dict[str, str]] = []
 
-        actual_session_id = None
-        if wants_workspace and (backend == "skypilot" or (backend == "auto" and gpus > 0)):
+        will_attach_mounts = backend == "skypilot" or (
+            backend == "auto" and gpus > 0
+        )
+
+        # Resolve a relative workdir= to absolute against the agent's
+        # project dir before handing it to SkyPilot. Sky rejects relative
+        # paths with "Workdir must be a valid directory", and the agent
+        # naturally reaches for relative ("_outputs", "."). Without this,
+        # the agent burns a turn on a structured-error retry.
+        # Use .absolute() (not .resolve()) so symlinks like /tmp -> /private/tmp
+        # on macOS aren't followed — the caller's path stays as-written.
+        if workdir is not None:
+            workdir_path = Path(workdir)
+            if not workdir_path.is_absolute():
+                workdir_path = (Path(self._working_dir) / workdir_path).absolute()
+            workdir = str(workdir_path)
+
+        # Validate workspace_source shape early so a malformed list shows
+        # a structured error instead of crashing inside the backend.
+        try:
+            from sciagent.compute.backends.skypilot import (
+                _normalize_workspace_source as _normalize_ws,
+            )
+            normalized_inputs = _normalize_ws(workspace_source)
+        except ValueError as e:
+            return ToolResult(
+                success=False,
+                output={"error_kind": "path_contract", "field": "workspace_source"},
+                error=f"Invalid workspace_source: {e}",
+            )
+
+        # Path-contract validation (fail-fast, before the backend launch).
+        # Only enforced for skypilot — local Docker has its own filesystem
+        # semantics that don't share /workspace, /outputs, or ~/sky_workdir.
+        if will_attach_mounts:
+            declared_paths = [entry["path"] for entry in normalized_inputs]
+            err = self._validate_path_contract(command, declared_paths)
+            if err is not None:
+                return ToolResult(
+                    success=False,
+                    output={
+                        "error_kind": "path_contract",
+                        "command": command[:200],
+                        "declared_inputs": declared_paths,
+                    },
+                    error=err,
+                )
+
+        if will_attach_mounts:
             actual_session_id = self._get_session_id(session_id)
             try:
                 router = self._get_router()
                 if "skypilot" in router.list_backends():
                     skypilot_backend = router._backends["skypilot"]
-                    workspace_mount = skypilot_backend.get_workspace_mount(
-                        actual_session_id,
-                        workspace_source=workspace_source,
+                    storage_list = []
+
+                    # Always-on output mount.
+                    outputs_mount = skypilot_backend.build_outputs_mount(
+                        actual_session_id
                     )
-                    # Guard against backends/mocks that return None — under
-                    # the auto-on-for-skypilot default we'd otherwise poison
-                    # requirements.storage with [None] and crash later when
-                    # the result builder reads mount.bucket.
-                    if workspace_mount is not None:
-                        # Stamp explicit/implicit so _build_task picks the
-                        # right run-CWD strategy (cd-into-mount vs symlink
-                        # _outputs/ into workdir).
-                        workspace_mount.implicit = not workspace_explicit
-                        requirements.storage = [workspace_mount]
-                    else:
-                        actual_session_id = None  # nothing was actually mounted
+                    if outputs_mount is not None:
+                        storage_list.append(outputs_mount)
+
+                    # Input mounts, if any.
+                    input_mounts = skypilot_backend.build_input_mounts(
+                        normalized_inputs,
+                        session_id=actual_session_id,
+                    )
+                    storage_list.extend(input_mounts)
+
+                    if storage_list:
+                        requirements.storage = storage_list
+
+                    # Build the manifest's outputs_uri/prefix now (the
+                    # job_id isn't known yet — we patch it post-launch).
+                    if outputs_mount is not None:
+                        from sciagent.compute.backends.skypilot import (
+                            _build_outputs_uri as _bld_uri,
+                        )
+                        outputs_prefix_for_manifest = "{job_id}/"
+                        outputs_uri_for_manifest = _bld_uri(
+                            outputs_mount.store,
+                            outputs_mount.bucket,
+                            "{job_id}/",
+                        )
+
+                    mounts_for_manifest = [
+                        {"path": m.path, "source": m.source or ""}
+                        for m in input_mounts
+                    ]
+                else:
+                    actual_session_id = None
             except Exception:
-                pass  # Fall back to no workspace if unavailable
+                actual_session_id = None  # Fall back to no workspace
 
         # Build job. The backend cd's into the workspace mount (when one is
         # attached) before running the command — see SkyPilotBackend._build_task
@@ -526,6 +686,7 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
             image=resolved_image,
             command=command,
             working_dir=self._working_dir,
+            ship_workdir=workdir,
             requirements=requirements,
             session_id=session_for_job,
             intent=intent,
@@ -606,6 +767,16 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
             # the job after a process restart. Local jobs are tracked by
             # ProcessManager already; no double-bookkeeping for them.
             if selected_backend.name == "skypilot":
+                # Substitute the launched job_id into the URI/prefix templates
+                # built before launch (job_id is assigned by the backend).
+                resolved_outputs_uri = (
+                    outputs_uri_for_manifest.replace("{job_id}", job_id)
+                    if outputs_uri_for_manifest else None
+                )
+                resolved_outputs_prefix = (
+                    outputs_prefix_for_manifest.replace("{job_id}", job_id)
+                    if outputs_prefix_for_manifest else None
+                )
                 self._write_session_manifest(
                     job_id=job_id,
                     session_id=actual_session_id,
@@ -616,6 +787,9 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                     service=service,
                     timeout_sec=requirements.timeout_sec,
                     managed_job_id=managed_job_id,
+                    outputs_uri=resolved_outputs_uri,
+                    outputs_prefix=resolved_outputs_prefix,
+                    mounts=mounts_for_manifest,
                 )
 
             if background:
@@ -637,22 +811,46 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                 # Add GPU hint if applicable
                 if gpu_hint == "gpu_beneficial":
                     output["gpu_hint"] = f"Service '{service}' benefits from GPU. Consider adding gpus=1 for 5-13x speedup."
-                # Add workspace info if enabled. Read bucket/mount_path from the
-                # actual StorageMount we attached so cloud-URI workspace_source
-                # values (which override the synthesized bucket name) report
-                # honestly.
+                # Add workspace info — names every attached mount so the
+                # caller can see what's at /workspace/, /outputs/, /data/...,
+                # and which source URI populated each (cloud-agnostic).
                 if actual_session_id and requirements.storage:
-                    mount = requirements.storage[0]
+                    output_mounts: List[Dict[str, str]] = []
+                    input_mounts_info: List[Dict[str, str]] = []
+                    for m in requirements.storage:
+                        info = {
+                            "path": m.path,
+                            "bucket": m.bucket,
+                            "store": m.store,
+                        }
+                        if m.source:
+                            info["source"] = m.source
+                        if getattr(m, "kind", "input") == "output":
+                            output_mounts.append(info)
+                        else:
+                            input_mounts_info.append(info)
                     workspace_info = {
                         "session_id": actual_session_id,
-                        "bucket": mount.bucket,
-                        "mount_path": mount.path,
-                        "cleanup_hint": f"sky storage delete {mount.bucket}",
+                        "outputs": output_mounts,
+                        "inputs": input_mounts_info,
+                        "outputs_dir_env": "$OUTPUTS_DIR",
                     }
-                    if workspace_source:
-                        workspace_info["source"] = workspace_source
+                    if output_mounts:
+                        workspace_info["cleanup_hint"] = (
+                            f"sky storage delete {output_mounts[0]['bucket']}"
+                        )
                     output["workspace"] = workspace_info
-                    output["message"] += f" Workspace mounted at {mount.path} (session: {actual_session_id})"
+                    if input_mounts_info:
+                        paths = ", ".join(m["path"] for m in input_mounts_info)
+                        output["message"] += (
+                            f" Inputs at {paths}; outputs at /outputs/{job_id}/ "
+                            f"(session: {actual_session_id})"
+                        )
+                    else:
+                        output["message"] += (
+                            f" Outputs at /outputs/{job_id}/ "
+                            f"(session: {actual_session_id})"
+                        )
                 return ToolResult(success=True, output=output)
             else:
                 # Foreground - wait and return result

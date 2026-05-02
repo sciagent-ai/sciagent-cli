@@ -164,13 +164,37 @@ class ToolRegistry:
                 error=f"Tool '{name}' not found. Available: {self.list_tools()}"
             )
 
-        # Warn if no arguments provided (likely LLM response truncation)
+        # Some tools are legitimately callable with no args (bg_status to
+        # list all jobs, todo to show the current graph). Others have
+        # required args and a no-args call is a strong truncation signal.
+        # Distinguish by introspecting tool.execute's signature: if every
+        # non-self parameter has a default, no-args is fine.
         if not kwargs:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"Tool '{name}' called with no arguments. This may indicate response truncation."
-            )
+            import inspect
+            try:
+                sig = inspect.signature(tool.execute)
+                required = [
+                    p
+                    for p in sig.parameters.values()
+                    if p.name != "self"
+                    and p.default is inspect.Parameter.empty
+                    and p.kind not in (
+                        inspect.Parameter.VAR_POSITIONAL,
+                        inspect.Parameter.VAR_KEYWORD,
+                    )
+                ]
+            except (TypeError, ValueError):
+                required = []  # Couldn't introspect; let the call through.
+            if required:
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=(
+                        f"Tool '{name}' called with no arguments but requires "
+                        f"{[p.name for p in required]}. This may indicate "
+                        f"response truncation."
+                    ),
+                )
 
         try:
             result = tool.execute(**kwargs)

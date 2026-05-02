@@ -21,18 +21,22 @@ class StorageMode(Enum):
 @dataclass
 class StorageMount:
     """Cloud storage mount configuration for SkyPilot jobs."""
-    path: str                           # Mount path in container (e.g., /workspace)
+    path: str                           # Mount path in container (e.g., /workspace, /outputs)
     bucket: str                         # Bucket name (e.g., sciagent-workspace-abc)
-    store: str = "s3"                   # s3, gcs, azure, r2
+    store: str = "s3"                   # s3, gcs, azure, r2, oci
     mode: StorageMode = StorageMode.MOUNT
     source: Optional[str] = None        # Local path or s3://… URI to sync from (optional)
     persistent: bool = True             # Keep bucket after job ends
-    # implicit=True means "we attached this mount automatically for output
-    # retrieval, the caller didn't ask for it." The skypilot backend uses
-    # this to decide whether to cd into the mount (explicit: yes — caller's
-    # data lives there) or to keep workdir's CWD and just symlink the
-    # mount's _outputs/ into the workdir (implicit: outputs persist via the
-    # bucket but the user's local script still runs from ~/sky_workdir/).
+    # kind="input" or "output". The output mount is auto-attached at
+    # /outputs/ and exposes $OUTPUTS_DIR=/outputs/<job_id>/ to the user
+    # command; auto-fetched on terminal status. Input mounts (default)
+    # come from the caller's workspace_source= and may have any path.
+    # Only input mounts are eligible to be the run-CWD target.
+    kind: str = "input"
+    # Deprecated: was used to discriminate auto-attached output flow from
+    # caller-asked input flow. Now subsumed by kind. Field retained as a
+    # no-op so legacy callers constructing StorageMount(implicit=True) don't
+    # crash, but it's no longer read.
     implicit: bool = False
 
 
@@ -70,8 +74,16 @@ class Job:
     service: str = ""
     image: str = ""
     command: str = ""
+    # Local-side bookkeeping only: where compute_fetch writes results to.
+    # NOT shipped to the cluster.
     working_dir: str = "."
     requirements: ComputeRequirements = field(default_factory=ComputeRequirements)
+
+    # ship_workdir: when set, SkyPilot rsyncs this local directory to
+    # ~/sky_workdir/ on the cluster before running. CWD becomes
+    # ~/sky_workdir/ unless an input mount overrides it. None (default)
+    # means no rsync — the image's WORKDIR is honored.
+    ship_workdir: Optional[str] = None
 
     # M1B provenance fields. Optional and non-load-bearing for execution —
     # SkyPilotBackend uses them to emit a compute_job_launched event that

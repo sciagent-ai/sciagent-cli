@@ -40,6 +40,11 @@ def _stub_router_returning(name="sciagent-job1"):
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.run.return_value = (name, 1)
+    # New mount API: outputs auto-attached, inputs from caller. Resource-
+    # defaults tests don't exercise mounts, so return None / [] to keep
+    # storage_list empty.
+    fake_skypilot.build_outputs_mount.return_value = None
+    fake_skypilot.build_input_mounts.return_value = []
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router._backends = {"skypilot": fake_skypilot}

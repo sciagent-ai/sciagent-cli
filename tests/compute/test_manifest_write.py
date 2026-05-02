@@ -105,7 +105,11 @@ def test_compute_tool_writes_manifest_after_skypilot_launch(tmp_manifest_dir: Pa
 
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
-    fake_skypilot.get_workspace_mount.return_value = None  # not exercised here
+    # New mount API: outputs mount always built, input mounts list (empty
+    # when no workspace_source). The test doesn't exercise mount details.
+    fake_skypilot.build_outputs_mount.return_value = None
+    fake_skypilot.build_input_mounts.return_value = []
+    fake_skypilot.get_workspace_mount.return_value = None  # legacy alias, unused
     # M1A: SkyPilotBackend.run returns (name, managed_job_id). The integer
     # is what flows into the manifest's new managed_job_id field.
     fake_skypilot.run.return_value = ("sciagent-manifest1", 7777)
@@ -202,6 +206,8 @@ def test_compute_tool_manifest_write_failure_does_not_break_launch(
 
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
+    fake_skypilot.build_outputs_mount.return_value = None
+    fake_skypilot.build_input_mounts.return_value = []
     fake_skypilot.run.return_value = ("sciagent-flaky-fs", None)
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]

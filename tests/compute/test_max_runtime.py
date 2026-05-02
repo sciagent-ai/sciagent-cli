@@ -60,10 +60,16 @@ def test_build_task_quotes_commands_with_special_chars():
 
 
 def test_build_task_does_not_wrap_when_timeout_zero():
-    """Callers can opt out of the timeout wrapper by passing timeout_sec=0."""
+    """Callers can opt out of the timeout wrapper by passing timeout_sec=0.
+    The always-on output prologue (mkdir/export $OUTPUTS_DIR) still applies
+    — only the `timeout` wrapper is conditional."""
     run = _build_task_with_timeout("bash Allrun", 0)
-    assert run == "bash Allrun"
+    # No `timeout` wrapper.
     assert "timeout" not in run.split()
+    # The user command is run verbatim after the layered prologue.
+    assert run == (
+        "mkdir -p /outputs/t1 && export OUTPUTS_DIR=/outputs/t1 && bash Allrun"
+    )
 
 
 # ---- driver-side reaper -----------------------------------------------------

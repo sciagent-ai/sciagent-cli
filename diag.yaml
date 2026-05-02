@@ -1,0 +1,9 @@
+  name: diag-of                                                                 
+  resources:                                             
+    image_id: docker:ghcr.io/sciagent-ai/openfoam-swak4foam-2012:latest
+    cpus: 4+                                                                    
+    memory: 32+
+  run: |                                                                        
+    echo OK                                              
+    which simpleFoam                                                            
+    cat /etc/os-release

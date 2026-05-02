@@ -30,7 +30,7 @@ class SubAgentConfig:
     description: str
     system_prompt: str
     model: str = DEFAULT_MODEL
-    max_iterations: int = 20
+    max_iterations: int = 40
     allowed_tools: Optional[List[str]] = None  # None = all tools
     temperature: float = 0.0
     
@@ -267,7 +267,7 @@ Be concise:
 
 Do NOT make changes. Only explore and report.""",
             allowed_tools=["file_ops", "search", "bash"],
-            max_iterations=15
+            max_iterations=40
         ))
 
         # Debug agent - capable, read-only, for error investigation
@@ -302,7 +302,7 @@ Do NOT make changes. Only explore and report.""",
 
 Do NOT make changes. Only investigate and report.""",
             allowed_tools=["file_ops", "search", "bash", "web", "skill"],
-            max_iterations=30
+            max_iterations=60
         ))
 
         # Research agent - for web-based research and documentation
@@ -333,7 +333,7 @@ Do NOT make changes. Only investigate and report.""",
 
 Always cite sources. Do NOT fabricate information.""",
             allowed_tools=["web", "file_ops", "search"],
-            max_iterations=20
+            max_iterations=50
         ))
 
         # Plan agent - for breaking down complex problems
@@ -371,7 +371,7 @@ Always cite sources. Do NOT fabricate information.""",
 
 Do NOT execute. Only plan.""",
             allowed_tools=["file_ops", "search", "bash", "web", "skill", "todo"],
-            max_iterations=15
+            max_iterations=40
         ))
 
         # Compute agent - cloud job orchestration in an isolated context
@@ -392,35 +392,57 @@ Do NOT execute. Only plan.""",
             model=CODING_MODEL,
             system_prompt="""You orchestrate cloud compute jobs end-to-end. Your goal is "user wants X run on the cloud, with results locally" — return when files are local.
 
+## Path contract (image-agnostic, identical across every registry image)
+
+Three roles, three paths. One rule for inputs, one for outputs, one for code shipping. Image WORKDIR is irrelevant for the contract — sciagent never invents a CWD.
+
+**Inputs — `/workspace/` (and friends), conditional.** Mounted ONLY when you pass `workspace_source=`. The conventional default path is `/workspace/`, but you can declare any path. Cloud-agnostic: the source URI scheme picks the cloud (`s3://`, `gs://`, `az://`, `r2://`, `oci://`).
+
+  - Single source (back-compat): `workspace_source="s3://bucket/case/"` → mounted at `/workspace/`.
+  - Multi-source (e.g. query + reference DB, code + vendored data): `workspace_source=[{"path":"/workspace","source":"s3://q/"},{"path":"/data/nr","source":"gs://nr-public/"}]` → two mounts at the declared paths. Mixing clouds is fine.
+
+**Outputs — `/outputs/<job_id>/`, ALWAYS.** Auto-mounted, isolated by job_id, auto-fetched on terminal status. Exposed as `$OUTPUTS_DIR` to your command. Always write results there:
+  - `python solve.py --out $OUTPUTS_DIR/result.json`
+  - `cp -r postProcessing $OUTPUTS_DIR/`
+  - `gmx mdrun -o $OUTPUTS_DIR/traj.xtc`
+  Cross-job reads in the same session: `/outputs/<other_job_id>/...` directly. (Job 2 reads Job 1's outputs by absolute path; you have job_1_id from the prior launch result.)
+
+**Local code — `workdir=<path>`, opt-in.** When set, SkyPilot rsyncs that local directory to the cluster and CWD becomes `~/sky_workdir/`. Use this for ad-hoc scripts you wrote locally. Default (omitted) → no rsync, image WORKDIR is honored.
+
+**Never reference `~/sky_workdir/` directly in your command** — that's internal SkyPilot. The compute layer will reject any command that does.
+
+CWD precedence on the cluster: input mount > `workdir=` rsync target > image WORKDIR. The compute layer's prologue sets the cd and `$OUTPUTS_DIR` for you.
+
 ## Two flows, pick by task shape
 
-**Ad-hoc (default for 'hello world on sky', 'visualize X', script + outputs):**
-- file_ops: write the script in the project working dir
-- compute_run(image="python:3.11", command="pip install -q <deps> && python script.py", backend="skypilot")
-- bg_wait(job_id, block=True, timeout=600) — for jobs you expect within ~10 min, long-polls internally and returns on terminal status. Auto-fetches the job's per-job prefix to local on success; the file list comes back in the wait result.
-- For hours-long jobs, prefer bg_wait(job_id) (snapshot) and let the agent loop re-check sparsely instead.
-- Done — outputs are local at `./_outputs/<job_id>/`, no extra fetch step needed.
+**Ad-hoc script + outputs (hello world, plot X, small Python work):**
+- file_ops: write `script.py` in the project working dir.
+- compute_run(image="python:3.11", workdir=".", command="pip install -q <deps> && python script.py --out $OUTPUTS_DIR/result.json", backend="skypilot")
+- bg_wait(job_id, block=True, timeout=600) — auto-fetches `/outputs/<job_id>/` to local on success.
+- For hours-long jobs prefer bg_wait(job_id) (snapshot) and re-check sparsely.
 
-**Output layout (important):** outputs land at `./_outputs/<job_id>/` locally and `s3://bucket/_outputs/<job_id>/` in the cloud — one path segment per job. This keeps parallel jobs collision-free without you having to think about it. Tell the user the path or read with file_ops.
+**Case-files reproductions (OpenFOAM, GROMACS, paper repros):**
+- file_ops: stage the case dir locally if you transformed it (e.g., `_outputs/boussinesq_case/` after copying from CaseFiles/ + edits).
+- compute_run(service="openfoam-swak4foam-2012", workspace_source="<absolute-local-case-path>", command="bash Allrun && cp -r postProcessing log.* $OUTPUTS_DIR/", backend="skypilot", intent={paper, case, run}, expected_artifacts=[...])
+  - workspace_source uploads the case dir → mounted at `/workspace/`. Sciagent cd's there for you; `bash Allrun` runs from the case dir.
+  - The Allrun output (postProcessing/, log.*) needs an explicit `cp` to `$OUTPUTS_DIR` — that's what gets auto-fetched.
+  - Use the version-tagged service entry from the registry (see Version-pinning below).
+  - intent/expected_artifacts feed the verifier path; preserve them.
+- bg_wait(job_id, block=True, timeout=1800) for the solver phase (10–30 min typical for 60K-grid cases).
 
-**Cross-tool pipeline (openfoam → scipy, MD → CFD, etc.):**
-- Job 1's outputs live at `/workspace/_outputs/<job_1_id>/...` in the bucket (and `./_outputs/<job_1_id>/` locally).
-- For Job 2 to read Job 1's outputs on the cluster, reference `/workspace/_outputs/<job_1_id>/<file>` directly in Job 2's command (you have `job_1_id` from the prior compute_run result).
-- Both jobs share the same session bucket — no extra setup.
+**Multi-source workflow (BLAST query + reference DB; code + vendored data):**
+- compute_run(service="...", workspace_source=[{"path":"/workspace","source":"s3://my-q/"},{"path":"/data/nr","source":"gs://public-nr/"}], command="blastn -query /workspace/q.fa -db /data/nr/nr -out $OUTPUTS_DIR/hits.tsv", backend="skypilot")
+- The agent doesn't care which cloud each bucket lives on — sciagent picks the right CLI per scheme. Reference data (read-only, multi-GB) just gets its own mount path.
 
-**Parallel sweep (N runs, varying parameters):**
-- Launch N compute_runs in parallel; each gets a distinct `job_id` automatically and its outputs land in `/workspace/_outputs/<job_id>/` — no collisions.
-- After all complete, each job's results are at `./_outputs/<job_id>/` locally. Aggregate by walking those subdirs.
-
-**Registry-backed reproductions (openfoam, gromacs, paper reproductions):**
-- compute_run(service="openfoam", workspace_source="s3://...", intent={paper, case, run}, expected_artifacts=[...])
-- bg_wait(job_id)
-- The manifest carries intent/expected_artifacts for the verifier — preserve that contract.
+**Parallel sweep (N runs, varying parameters):** launch N compute_runs in parallel; distinct job_ids → distinct `/outputs/<job_id>/` prefixes; no collisions; aggregate locally by walking the per-job subdirs returned by bg_wait.
 
 ## Hard rules
 - Use `pip install -q` (quiet) to keep install chatter out of bg_output.
 - Pass backend="skypilot" explicitly; never leave it as auto.
-- Don't `cat` cloud files via extra compute_run jobs — bg_wait auto-fetches; if you need a missing file, file_ops it locally after wait completes.
+- ALWAYS write results to `$OUTPUTS_DIR/...` (or `/outputs/<job_id>/...`). Relative writes (`./out.txt`) land in CWD and are NOT auto-fetched.
+- For case-files workflows: pass `workspace_source=<local-case-path>`. Never reference `/workspace/<X>` without first declaring the mount.
+- Never reference `~/sky_workdir/`. It's internal SkyPilot — the compute layer rejects commands that mention it.
+- If you need a missing file from the bucket, use bash with the cloud's CLI matching the scheme (e.g., `aws s3 sync` for s3://, `gsutil rsync` for gs://). Bg_wait auto-fetches the per-job prefix; you only invoke the CLI manually for cross-job or mid-run peeks.
 - If a job fails, fetch logs with bg_output(job_id, tail_lines=40), diagnose, and decide: fix-and-relaunch, or report up to the main agent with the error preview.
 
 ## Version-pinning (preserves source settings verbatim)
@@ -429,7 +451,7 @@ When the manuscript / README / case files name a specific tool version (e.g. "Op
 ## What to return to the parent
 A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.""",
             allowed_tools=["file_ops", "bash", "compute_run", "bg_status", "bg_output", "bg_wait", "bg_kill", "web"],
-            max_iterations=20,
+            max_iterations=60,
         ))
 
         # General agent - full capability for complex tasks
@@ -447,7 +469,7 @@ Think step by step:
 4. Verify the result
 
 Use all available tools as needed.""",
-            max_iterations=50
+            max_iterations=100
         ))
 
         # Verifier agent - independent verification with FRESH context
@@ -491,7 +513,7 @@ Default to skepticism. Only "verified" if evidence is strong."""
             model=VERIFICATION_MODEL,
             system_prompt=verifier_prompt,
             allowed_tools=["file_ops", "search", "bash"],  # Read-only + can run verification commands
-            max_iterations=10,
+            max_iterations=20,
             temperature=0.0,  # Deterministic for reproducible verification
         ))
     

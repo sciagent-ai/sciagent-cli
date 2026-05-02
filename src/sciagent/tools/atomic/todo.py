@@ -13,6 +13,7 @@ FEATURES:
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
 from typing import Dict, Any, List, Optional, Set, Tuple
@@ -704,6 +705,36 @@ COMMANDS:
             self.graph = TodoGraph()
 
             for i, todo_dict in enumerate(todos):
+                # Defensive: the LLM occasionally double-encodes a list
+                # element as a JSON string instead of a dict. Try to
+                # recover by parsing; fall through to a clear error if
+                # it's not parseable JSON or not a dict at all. Without
+                # this guard the next ``"id" not in todo_dict`` line
+                # raises the cryptic
+                # "'str' object does not support item assignment".
+                if isinstance(todo_dict, str):
+                    try:
+                        todo_dict = json.loads(todo_dict)
+                    except (json.JSONDecodeError, TypeError):
+                        return ToolResult(
+                            success=False,
+                            output=None,
+                            error=(
+                                f"todos[{i}] is a string, not a dict. "
+                                f"Pass a list of dicts like "
+                                f"[{{'id': 'x', 'task': '...'}}]. "
+                                f"Got: {todo_dict[:80]!r}"
+                            ),
+                        )
+                if not isinstance(todo_dict, dict):
+                    return ToolResult(
+                        success=False,
+                        output=None,
+                        error=(
+                            f"todos[{i}] must be a dict; "
+                            f"got {type(todo_dict).__name__}"
+                        ),
+                    )
                 # Auto-generate ID if not provided
                 if "id" not in todo_dict or not todo_dict["id"]:
                     todo_dict["id"] = f"task_{i}"

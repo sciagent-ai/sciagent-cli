@@ -8,10 +8,11 @@ Cloud credentials must be configured (aws configure, gcloud auth, etc.)
 from __future__ import annotations
 
 import shlex
+import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Iterable, List, Tuple, Union
 
 from ..job import Job, JobResult, JobStatus, ComputeRequirements, LaunchError
 from ..task_index import read_task as _read_task_manifest
@@ -31,7 +32,32 @@ _CLOUD_URI_PREFIXES: Dict[str, str] = {
     "s3://": "s3",
     "gs://": "gcs",
     "r2://": "r2",
+    "oci://": "oci",
 }
+
+# sciagent store name → URI scheme used in the manifest's outputs_uri field
+# and in compute_fetch's dispatch table. Internal representation only —
+# Azure's actual storage URLs (https://<acct>.blob.core.windows.net/...)
+# are richer than a single scheme can carry; the fetch path resolves the
+# account from SkyPilot's config when dispatching to `az storage`.
+_STORE_TO_URI_SCHEME: Dict[str, str] = {
+    "s3": "s3",
+    "gcs": "gs",
+    "azure": "az",
+    "r2": "r2",
+    "oci": "oci",
+}
+
+
+# Always-on output mount: caller writes results to /outputs/<job_id>/ on
+# the cluster (also exposed as $OUTPUTS_DIR). Auto-fetched on terminal
+# status. Path is image-agnostic — never collides with image WORKDIRs or
+# input mounts.
+_OUTPUTS_MOUNT_PATH: str = "/outputs"
+
+# Conventional input mount path. Single-string workspace_source= maps here
+# for back-compat. Multi-mount callers can declare any path.
+_DEFAULT_INPUT_MOUNT_PATH: str = "/workspace"
 
 
 # sky.jobs.ManagedJobStatus -> sciagent JobStatus (v4.1 §1, M1A deliverable).
@@ -123,6 +149,8 @@ def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     Examples:
         s3://my-bucket           -> ("s3", "my-bucket")
         s3://my-bucket/case/foo  -> ("s3", "my-bucket")
+        gs://my-bucket/dir       -> ("gcs", "my-bucket")
+        oci://my-bucket          -> ("oci", "my-bucket")
         /local/path              -> (None, None)
         None                     -> (None, None)
     """
@@ -135,7 +163,99 @@ def _parse_cloud_uri(uri: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
             if bucket:
                 return store, bucket
             return None, None
+    # az:// is sciagent's internal scheme for Azure-mounted buckets in the
+    # manifest. Real Azure URLs (https://<acct>.blob.core.windows.net/<container>/)
+    # need account-level config from SkyPilot to resolve; we keep the
+    # internal scheme uniform and resolve at fetch time.
+    if uri.startswith("az://"):
+        rest = uri[len("az://"):]
+        bucket = rest.split("/", 1)[0]
+        if bucket:
+            return "azure", bucket
     return None, None
+
+
+def _build_outputs_uri(store: str, bucket: str, prefix: str) -> str:
+    """Build the manifest's outputs_uri from a store, bucket, and prefix.
+
+    Internal scheme (s3/gs/az/r2/oci) chosen by store-type lookup. Used by
+    compute_fetch.py to dispatch to the right cloud CLI without re-reading
+    SkyPilot config.
+    """
+    scheme = _STORE_TO_URI_SCHEME.get(store, store)
+    safe_prefix = prefix.lstrip("/")
+    return f"{scheme}://{bucket}/{safe_prefix}"
+
+
+def _pick_primary_input_mount(storage_mounts: Iterable["StorageMount"]):
+    """Pick the run-CWD target from a list of storage mounts.
+
+    Rules (image-agnostic):
+      - Skip the always-on output mount (kind="output").
+      - Prefer an input mount with path /workspace if present (the
+        conventional default that string-form workspace_source= maps to).
+      - Else, the first input mount in declaration order.
+      - Else, None — no cd is prepended; CWD falls through to ship_workdir
+        (~/sky_workdir/) if rsynced, else the image's WORKDIR.
+    """
+    inputs = [m for m in storage_mounts if getattr(m, "kind", "input") != "output"]
+    if not inputs:
+        return None
+    for m in inputs:
+        if m.path == _DEFAULT_INPUT_MOUNT_PATH:
+            return m
+    return inputs[0]
+
+
+def _normalize_workspace_source(
+    workspace_source,
+) -> List[Dict[str, Optional[str]]]:
+    """Normalize the polymorphic workspace_source= argument to a list of dicts.
+
+    Accepted shapes:
+      - None                      -> []
+      - "" / empty                -> []
+      - "<str>"                   -> [{"path": "/workspace", "source": "<str>"}]
+      - [{"path": ..., "source": ...}, ...]   -> as-is (validated)
+      - list of (path, source) tuples         -> normalized
+
+    Raises ValueError for unrecognized shapes so the caller can surface a
+    structured failure to the agent instead of letting a misuse mount
+    silently with default values.
+    """
+    if workspace_source is None:
+        return []
+    if isinstance(workspace_source, str):
+        if not workspace_source.strip():
+            return []
+        return [{"path": _DEFAULT_INPUT_MOUNT_PATH, "source": workspace_source}]
+    if isinstance(workspace_source, dict):
+        # Single dict — wrap into a list.
+        workspace_source = [workspace_source]
+    if not isinstance(workspace_source, (list, tuple)):
+        raise ValueError(
+            f"workspace_source must be a str, dict, or list of dicts; "
+            f"got {type(workspace_source).__name__}"
+        )
+    out: List[Dict[str, Optional[str]]] = []
+    for entry in workspace_source:
+        if isinstance(entry, dict):
+            path = entry.get("path") or _DEFAULT_INPUT_MOUNT_PATH
+            source = entry.get("source")
+            if not source:
+                raise ValueError(
+                    f"workspace_source entry missing 'source': {entry!r}"
+                )
+            out.append({"path": path, "source": source})
+        elif isinstance(entry, (list, tuple)) and len(entry) == 2:
+            path, source = entry
+            out.append({"path": path or _DEFAULT_INPUT_MOUNT_PATH, "source": source})
+        else:
+            raise ValueError(
+                f"workspace_source entry must be a dict with 'path' and "
+                f"'source' (or a (path, source) tuple); got {entry!r}"
+            )
+    return out
 
 
 class SkyPilotBackend:
@@ -206,20 +326,107 @@ class SkyPilotBackend:
         except Exception:
             return "s3"
 
+    def build_outputs_mount(
+        self,
+        session_id: str,
+        store_type: Optional[str] = None,
+    ) -> "StorageMount":
+        """Build the always-on output StorageMount at /outputs/.
+
+        The bucket name is `sciagent-workspace-<session>` (provider-neutral
+        — exists in whichever cloud backs the cluster). Store type
+        precedence: explicit ``store_type=`` arg > cluster's enabled store.
+        Never hardcoded.
+
+        Marked ``kind="output"`` so the prologue logic skips it when
+        picking a run-CWD target. Caller writes results to
+        ``/outputs/<job_id>/`` (also exposed as ``$OUTPUTS_DIR``).
+        Auto-fetched on terminal status.
+        """
+        from ..job import StorageMount, StorageMode
+
+        store = store_type or self.get_enabled_store()
+        bucket_name = f"sciagent-workspace-{session_id}"
+        return StorageMount(
+            path=_OUTPUTS_MOUNT_PATH,
+            bucket=bucket_name,
+            store=store,
+            mode=StorageMode.MOUNT,
+            source=None,
+            persistent=True,
+            kind="output",
+        )
+
+    def build_input_mounts(
+        self,
+        workspace_source,
+        session_id: Optional[str] = None,
+        store_type: Optional[str] = None,
+    ) -> List["StorageMount"]:
+        """Build a list of input StorageMounts from the polymorphic
+        ``workspace_source`` argument.
+
+        Accepted shapes (see ``_normalize_workspace_source``):
+          - ``None`` / empty       → ``[]`` (no input mount)
+          - ``"s3://..."`` (str)   → single mount at ``/workspace/`` (back-compat)
+          - ``list[{"path","source"}]`` → one mount per entry, at the given paths
+
+        Each mount's ``store`` is auto-detected from its source URI scheme;
+        local paths fall back to the cluster's enabled store. ``store_type=``
+        overrides at the call level (rare; intended for tests).
+        """
+        from ..job import StorageMount, StorageMode
+
+        normalized = _normalize_workspace_source(workspace_source)
+        if not normalized:
+            return []
+
+        fallback_store = store_type or self.get_enabled_store()
+        mounts: List["StorageMount"] = []
+        for entry in normalized:
+            path = entry["path"]
+            source = entry["source"]
+            store_from_uri, bucket_from_uri = _parse_cloud_uri(source)
+            if bucket_from_uri:
+                bucket_name = bucket_from_uri
+                store = store_from_uri
+            else:
+                # Local path or unrecognized URI: fall back to a per-session
+                # bucket so SkyPilot can rsync the local source up.
+                if session_id:
+                    bucket_name = f"sciagent-workspace-{session_id}-input-{len(mounts)}"
+                else:
+                    bucket_name = f"sciagent-input-{len(mounts)}"
+                store = fallback_store
+            mounts.append(
+                StorageMount(
+                    path=path,
+                    bucket=bucket_name,
+                    store=store,
+                    mode=StorageMode.MOUNT,
+                    source=source,
+                    persistent=True,
+                    kind="input",
+                )
+            )
+        return mounts
+
     def get_workspace_mount(
         self,
         session_id: str,
         workspace_source: Optional[str] = None,
     ) -> "StorageMount":
-        """Get a StorageMount for the session workspace bucket.
+        """Back-compat shim for the legacy single-mount API.
 
-        Args:
-            session_id: agent session id; used to derive the default bucket name.
-            workspace_source: optional URI or local path passed to sky.Storage as
-                `source`. When it is a recognized cloud URI (s3://bucket[/...]),
-                the bucket name is taken from the URI so sky.Storage doesn't try
-                to upload into a different bucket. Local paths fall back to the
-                session-derived bucket name and get synced up by Sky on launch.
+        Older callers (and tests) ask for one workspace mount at
+        ``/workspace/`` — input bucket if ``workspace_source`` is given,
+        else a session-derived bucket. The new model splits inputs from
+        outputs and supports multi-mount inputs; this method continues to
+        return a single mount that mirrors the legacy shape so existing
+        tests keep passing during the migration.
+
+        New code should use :meth:`build_outputs_mount` and
+        :meth:`build_input_mounts` directly.
         """
         from ..job import StorageMount, StorageMode
 
@@ -232,12 +439,13 @@ class SkyPilotBackend:
             store = self.get_enabled_store()
 
         return StorageMount(
-            path="/workspace",
+            path=_DEFAULT_INPUT_MOUNT_PATH,
             bucket=bucket_name,
             store=store,
             mode=StorageMode.MOUNT,
             source=workspace_source,
             persistent=True,
+            kind="input",
         )
 
     def run(self, job: Job, background: bool = True) -> Tuple[str, Optional[int]]:
@@ -263,8 +471,17 @@ class SkyPilotBackend:
         """
         sky = self._get_sky()
 
+        # Canonicalize: from this point on, job.id IS the cluster name,
+        # so the prologue (`mkdir -p /outputs/<job_id>`), the manifest's
+        # outputs_uri, and the auto-fetch prefix all agree on one string.
+        # Without this the prologue uses the raw uuid (job-abc) while the
+        # manifest uses the sciagent-prefixed cluster name (sciagent-job-abc),
+        # so user writes go to bucket prefix /job-abc/ but the fetcher looks
+        # at /sciagent-job-abc/ and silently returns 0 files.
+        if job.id and not job.id.startswith("sciagent-"):
+            job.id = f"sciagent-{job.id}"
+        name = job.id
         task = self._build_task(job)
-        name = f"sciagent-{job.id}"
 
         # sky.jobs.launch is async-first; the controller takes ownership
         # of cluster lifecycle, autostop, and recovery. None of cluster-
@@ -349,12 +566,19 @@ class SkyPilotBackend:
         try:
             log = get_provenance_log(session_id)
             storage_mounts = getattr(job.requirements, "storage", None) or []
+            # Record the primary input mount (the cd target). When no input
+            # mount is declared, fall back to the always-on output mount
+            # so the event still names a real bucket.
             mount_path: Optional[str] = None
             mount_bucket: Optional[str] = None
-            if storage_mounts:
-                first = storage_mounts[0]
-                mount_path = getattr(first, "path", None)
-                mount_bucket = getattr(first, "bucket", None)
+            primary = _pick_primary_input_mount(storage_mounts)
+            if primary is not None:
+                mount_path = primary.path
+                mount_bucket = primary.bucket
+            elif storage_mounts:
+                fallback = storage_mounts[0]
+                mount_path = getattr(fallback, "path", None)
+                mount_bucket = getattr(fallback, "bucket", None)
             log.emit_compute_job_launched(
                 job_id=name,
                 managed_job_id=managed_job_id,
@@ -403,6 +627,106 @@ class SkyPilotBackend:
             or f"sky.launch {status_name.lower()} for cluster {cluster_name} "
                f"(no detail provided; check `sky api logs <request_id>`)"
         )
+
+    # Words that mark "this is the actual reason" lines in sky controller
+    # logs. Matched case-insensitively. Hits surface with a 2-line trailing
+    # context window; on no hits we fall back to the last 30 lines.
+    _LOG_SIGNAL_KEYWORDS = (
+        "error",
+        "failed",
+        "denied",
+        "exception",
+        "fatal",
+        "not found",
+        "quota",
+        "no matching manifest",
+        "permission denied",
+        "unauthorized",
+        "no capacity",
+        "no available",
+    )
+
+    @staticmethod
+    def _filter_signal_lines(
+        text: str,
+        max_lines: int = 30,
+        context_after: int = 2,
+    ) -> str:
+        """Pick error-keyword lines (with a small trailing context window)
+        from a noisy log; fall back to the last ``max_lines`` if no keywords
+        matched. Drops sky's retry chatter so the LaunchError surfaces the
+        actual cause, not 30 "tried region X" lines.
+
+        Bounded: never returns more than ``max_lines * 2`` lines.
+        """
+        keywords = SkyPilotBackend._LOG_SIGNAL_KEYWORDS
+        lines = text.splitlines()
+        n = len(lines)
+
+        # Find indices of lines containing any signal keyword.
+        hits: list = []
+        for i, line in enumerate(lines):
+            low = line.lower()
+            for kw in keywords:
+                if kw in low:
+                    hits.append(i)
+                    break
+
+        if not hits:
+            # No signal keyword anywhere — fall through to the tail.
+            return "\n".join(lines[-max_lines:])
+
+        # Build a window: each hit + next ``context_after`` lines, deduped.
+        wanted: set = set()
+        for idx in hits:
+            for j in range(idx, min(idx + 1 + context_after, n)):
+                wanted.add(j)
+
+        # Cap total surfaced lines so a log full of warnings doesn't blow up.
+        ordered = sorted(wanted)
+        if len(ordered) > max_lines * 2:
+            ordered = ordered[-(max_lines * 2):]
+        return "\n".join(lines[i] for i in ordered)
+
+    @staticmethod
+    def _tail_sky_api_logs(
+        request_id: Any,
+        max_lines: int = 30,
+        timeout: float = 10.0,
+    ) -> str:
+        """Shell out to ``sky api logs <request_id>`` and return the
+        signal-filtered tail.
+
+        The api_status payload's ``status_msg``/``error`` fields are routinely
+        ``null`` even on rejection — the real reason lives in the controller
+        logs that ``sky api logs`` exposes. This helper is the same dig the
+        operator would do manually, surfaced automatically so the agent's
+        LaunchError carries the actual reason instead of "(no detail provided)".
+
+        Returns error-keyword lines + 2-line trailing context (signal-focused);
+        falls back to a flat tail when no keywords matched.
+
+        Best-effort: any failure returns "". Bounded by ``timeout`` and
+        ``max_lines`` so a hung sky CLI never blocks the launch path.
+        """
+        if request_id is None:
+            return ""
+        rid = str(request_id)
+        try:
+            result = subprocess.run(
+                ["sky", "api", "logs", rid],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return ""
+        # sky api logs writes the controller-side trace; both stdout and
+        # stderr can carry signal depending on the sky version.
+        combined = (result.stdout or "") + (result.stderr or "")
+        if not combined.strip():
+            return ""
+        return SkyPilotBackend._filter_signal_lines(combined, max_lines=max_lines)
 
     def _await_launch_or_fail(
         self,
@@ -453,6 +777,26 @@ class SkyPilotBackend:
 
                 if status_name in ("FAILED", "CANCELLED"):
                     msg = self._extract_launch_error_msg(payload, status_name, cluster_name)
+                    # If sky reported FAILED with no usable status_msg/error,
+                    # the real reason lives in `sky api logs <request_id>`.
+                    # Pull the tail automatically so the agent gets the
+                    # actual cause (image pull failure, capacity, auth, etc.)
+                    # instead of an opaque "(no detail provided)" message.
+                    if "no detail provided" in msg:
+                        log_tail = self._tail_sky_api_logs(request_id)
+                        if log_tail:
+                            msg = (
+                                f"sky.launch {status_name.lower()} for cluster "
+                                f"{cluster_name} (request_id={request_id}). "
+                                f"Controller log tail:\n{log_tail}"
+                            )
+                        else:
+                            # Append the request_id even when log fetch fails
+                            # so the operator can dig manually with one command.
+                            msg = (
+                                f"{msg.rstrip('.)')} request_id={request_id}; "
+                                f"manually: sky api logs {request_id})"
+                            )
                     raise LaunchError(msg, cluster_name=cluster_name)
 
                 if status_name == "SUCCEEDED":
@@ -465,67 +809,47 @@ class SkyPilotBackend:
     @staticmethod
     def resolve_command(job: Job) -> str:
         """Apply the deterministic command rewrites the backend performs
-        before launch: storage-mount handling, then timeout-wrap with GNU
-        ``timeout`` when ``timeout_sec > 0``.
+        before launch.
 
-        Two storage-mount strategies, picked off ``mount.implicit``:
+        Layered prologue (image-agnostic, applied in order, then the user
+        command, then optionally wrapped in ``timeout``):
 
-        * Explicit mount (``implicit=False``, e.g. registry service or
-          caller passed ``workspace_source=``): the caller's data lives
-          in the bucket. Prepend ``cd <mount> &&`` so the run-CWD is
-          there, regardless of the image's WORKDIR (rcwa: /opt; openfoam:
-          /opt/openfoam11 — without the cd, ``bash Allrun`` against a
-          /workspace mount fails with "No such file or directory", as in
-          the B8 #2 incident).
-
-        * Implicit mount (``implicit=True``, the default-on workspace we
-          attach so outputs survive cluster teardown and bg_wait can
-          fetch): the caller's *script* is in the local CWD, which Sky's
-          ``workdir=`` field rsynced to ~/sky_workdir/. Cd-into-mount
-          would defeat that (script not present at /workspace). Instead,
-          inject a tiny prologue that creates the mount's _outputs/ dir
-          and symlinks it into the workdir CWD. The user's script can
-          then write to relative ``_outputs/foo.txt`` and the bytes land
-          in the persistent bucket — bg_wait pulls them back.
+          1. ``mkdir -p /outputs/<job_id>`` — ensure the per-job output
+             subdir exists inside the always-on output mount.
+          2. ``export OUTPUTS_DIR=/outputs/<job_id>`` — ergonomic env var
+             for the user command. Writing to ``$OUTPUTS_DIR/foo.txt``
+             lands in the auto-fetched bucket.
+          3. ``cd <primary input mount path>`` — only when an input mount
+             is declared (caller passed ``workspace_source=``). Skipped
+             entirely when there are no input mounts: CWD then falls
+             through to ``ship_workdir`` (~/sky_workdir/) if rsynced, else
+             the image's WORKDIR. Sciagent never invents a CWD.
 
         Idempotent against callers that already cd themselves: if the
-        command already starts with ``cd ``, we trust them and skip both
-        rewrites.
+        command already starts with ``cd ``, the cd step is skipped (the
+        export and mkdir still apply — they're prerequisites for outputs).
 
         Extracted so M1B's compute_job_launched event can record exactly
         what the cluster will run (``command_resolved``) alongside the
         original LLM-issued string (``command_original``).
         """
         run_command = job.command
+        job_id = job.id or "default"
         storage_mounts = getattr(job.requirements, "storage", None) or []
-        if storage_mounts and not run_command.lstrip().startswith("cd "):
-            mount = storage_mounts[0]
-            mount_path = mount.path
-            if mount_path:
-                if getattr(mount, "implicit", False):
-                    # Implicit: keep workdir CWD, symlink ./_outputs/ to a
-                    # *job-specific* prefix in the mount. Per-job keying is
-                    # the universal layout — single jobs get one extra path
-                    # segment (small ergonomic cost), parallel sweeps are
-                    # collision-free by construction (each job's job_id is
-                    # unique). Bg_wait's auto-fetch pulls the matching
-                    # prefix back to ./_outputs/<job_id>/ locally.
-                    #
-                    # Cross-tool sharing: Job 2 reads Job 1's outputs via
-                    # absolute path /workspace/_outputs/<job_1_id>/... — the
-                    # agent has job_1_id from the prior launch result.
-                    quoted_mount = shlex.quote(mount_path)
-                    quoted_job_id = shlex.quote(job.id or "default")
-                    run_command = (
-                        f"mkdir -p {quoted_mount}/_outputs/{quoted_job_id} && "
-                        f"ln -sfn {quoted_mount}/_outputs/{quoted_job_id} ./_outputs && "
-                        f"{run_command}"
-                    )
-                else:
-                    # Explicit: cd into the mount as before. Caller's data
-                    # lives there (registry service, workspace_source=);
-                    # parallel collisions are the caller's responsibility.
-                    run_command = f"cd {shlex.quote(mount_path)} && {run_command}"
+
+        prologue_parts: List[str] = [
+            f"mkdir -p /outputs/{shlex.quote(job_id)}",
+            f"export OUTPUTS_DIR=/outputs/{shlex.quote(job_id)}",
+        ]
+
+        # Conditionally cd into the primary input mount, but only if the
+        # caller didn't already cd themselves.
+        if not run_command.lstrip().startswith("cd "):
+            primary = _pick_primary_input_mount(storage_mounts)
+            if primary is not None and primary.path:
+                prologue_parts.append(f"cd {shlex.quote(primary.path)}")
+
+        run_command = " && ".join(prologue_parts + [run_command])
 
         timeout_sec = getattr(job.requirements, "timeout_sec", 0) or 0
         if timeout_sec > 0:
@@ -555,42 +879,27 @@ class SkyPilotBackend:
 
         resources = sky.Resources(**resources_kwargs)
 
-        # M0 follow-up #1: cd into the workspace mount before running the
-        # command. Sky's managed jobs run from the cluster user's home by
-        # default, ignoring the image's WORKDIR directive — so without this,
-        # ``bash Allrun`` against an /workspace mount fails with "No such
-        # file or directory" (B8 #2 incident).
-        #
-        # We drive off the actual storage-mount path, NOT the registry's
-        # ``workdir:`` hint, because the registry's hint and the mount path
-        # can drift (registry says /workspace; a future caller mounts at
-        # /data). The mount path is the only field guaranteed to point at
-        # data the user just attached. Side benefits:
-        #   - image-only callers with workspace_source= also get the cd
-        #     (they'd be broken by a registry-driven approach since the
-        #     registry isn't consulted without a service).
-        #   - service-only callers without a mount keep the M0 default
-        #     (Sky's home CWD), so images whose Dockerfile WORKDIR isn't
-        #     /workspace (e.g. rcwa: /opt) don't regress.
-        #
-        # Idempotent against M0 cd-prefixed callers: if the command already
-        # starts with ``cd ``, we trust the caller and don't double-prepend.
-        # B6: enforce ComputeRequirements.timeout_sec on-VM by wrapping the
-        # user command with the GNU ``timeout`` utility.
+        # Layered prologue is built inside resolve_command:
+        #   1. mkdir/export $OUTPUTS_DIR (always)
+        #   2. cd into primary input mount (only when one is declared)
+        #   3. timeout-wrap (when ComputeRequirements.timeout_sec > 0)
+        # The image's WORKDIR is honored when no input mount is declared —
+        # sciagent never invents a CWD.
         run_command = self.resolve_command(job)
 
-        # Create task. Pass `workdir=` so SkyPilot rsyncs the caller's local
-        # CWD up to the cluster's ~/sky_workdir/ before launch. Without this,
-        # `compute_run("python hello.py", backend="skypilot")` fails because
-        # hello.py never reaches the cluster — the agent then thrashes
-        # (inline `python -c` workarounds, extra cloud jobs to cat outputs).
-        # SkyPilot caps workdir at 250MB and honors .gitignore; bulk payloads
-        # belong in a storage mount.
-        task = sky.Task(
-            name=job.id,
-            run=run_command,
-            workdir=job.working_dir,
-        )
+        # Pass `workdir=` to sky.Task ONLY when the caller asked us to
+        # ship a local directory (job.ship_workdir set). Default (None) →
+        # no rsync, image WORKDIR is honored. SkyPilot caps workdir at
+        # 250MB and honors .gitignore; bulk payloads belong in an input
+        # storage mount.
+        task_kwargs: Dict[str, Any] = {
+            "name": job.id,
+            "run": run_command,
+        }
+        ship_workdir = getattr(job, "ship_workdir", None)
+        if ship_workdir:
+            task_kwargs["workdir"] = ship_workdir
+        task = sky.Task(**task_kwargs)
         task.set_resources(resources)
 
         # Add storage mounts if specified

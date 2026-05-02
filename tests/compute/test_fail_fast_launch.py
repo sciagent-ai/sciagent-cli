@@ -82,8 +82,11 @@ def test_fail_fast_raises_launch_error_on_failed_status():
 def test_fail_fast_falls_back_when_payload_carries_null_strings():
     """Sky stores empty payload fields as the literal JSON string ``"null"``.
     Surfacing that as ``LaunchError("null")`` is useless — the helper must
-    treat ``None``/``""``/``"null"`` as "no info" and fall through to a
-    descriptive default that points the user at ``sky api logs``."""
+    treat ``None``/``""``/``"null"`` as "no info" and surface either (a) the
+    actual controller log tail it dug via ``sky api logs <request_id>`` or
+    (b) a manual hint with the request_id when the dig itself fails."""
+    import subprocess
+
     backend = _backend_with_mock_sky()
     backend._sky.api_status.return_value = [
         SimpleNamespace(
@@ -93,15 +96,58 @@ def test_fail_fast_falls_back_when_payload_carries_null_strings():
         )
     ]
 
-    with patch("sciagent.compute.backends.skypilot.time.sleep"), pytest.raises(
-        LaunchError
-    ) as exc_info:
+    # Force the auto-dig to fail (timeout) so we hit the manual-hint fallback
+    # path. The "dig succeeded" path is covered separately below.
+    with patch("sciagent.compute.backends.skypilot.time.sleep"), patch(
+        "sciagent.compute.backends.skypilot.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="sky", timeout=10),
+    ), pytest.raises(LaunchError) as exc_info:
         backend.run(_job(), background=True)
 
     msg = str(exc_info.value)
     assert msg != "null"
     assert "sciagent-abc123" in msg
     assert "sky api logs" in msg.lower()
+
+
+def test_fail_fast_surfaces_controller_log_tail_when_payload_is_null():
+    """When the api_status payload carries no usable error but the
+    controller logs do, the auto-dig (`sky api logs <request_id>`) must
+    enrich the LaunchError with the actual reason — operator no longer has
+    to drop to bash to find out the launch failed because of, e.g., bucket
+    auth or image pull."""
+    import subprocess
+
+    backend = _backend_with_mock_sky()
+    backend._sky.api_status.return_value = [
+        SimpleNamespace(
+            status=SimpleNamespace(name="FAILED"),
+            status_msg="null",
+            error=None,
+        )
+    ]
+
+    fake_log_output = (
+        "ERROR: Failed to pull docker:ghcr.io/sciagent-ai/openfoam:latest\n"
+        "denied: requested access to the resource is denied"
+    )
+    fake_completed = subprocess.CompletedProcess(
+        args=[], returncode=0, stdout=fake_log_output, stderr=""
+    )
+
+    with patch("sciagent.compute.backends.skypilot.time.sleep"), patch(
+        "sciagent.compute.backends.skypilot.subprocess.run",
+        return_value=fake_completed,
+    ), pytest.raises(LaunchError) as exc_info:
+        backend.run(_job(), background=True)
+
+    msg = str(exc_info.value)
+    # The actual controller-side reason is now in the LaunchError, not just
+    # "(no detail provided)".
+    assert "denied: requested access to the resource is denied" in msg
+    assert "Failed to pull docker:ghcr.io/sciagent-ai/openfoam" in msg
+    assert "Controller log tail" in msg
+    assert "no detail provided" not in msg
 
 
 def test_fail_fast_raises_on_cancelled_status():

@@ -64,38 +64,51 @@ def _read_events(log: ProvenanceLog) -> list[dict]:
 
 
 def test_resolve_command_applies_cd_and_timeout():
+    """Layered prologue: outputs always-on (mkdir + export), cd into the
+    primary input mount when one is declared, then timeout-wrap."""
     job = Job(
         id="j1",
         command="bash Allrun",
         requirements=ComputeRequirements(
             timeout_sec=600,
-            storage=[StorageMount(path="/workspace", bucket="b", store="s3")],
+            storage=[StorageMount(path="/workspace", bucket="b", store="s3", kind="input")],
         ),
     )
     resolved = SkyPilotBackend.resolve_command(job)
-    assert resolved == "timeout 600 bash -c 'cd /workspace && bash Allrun'"
+    assert resolved == (
+        "timeout 600 bash -c 'mkdir -p /outputs/j1 && export OUTPUTS_DIR=/outputs/j1 "
+        "&& cd /workspace && bash Allrun'"
+    )
 
 
 def test_resolve_command_passthrough_when_no_mount_no_timeout():
+    """No mount, no timeout: only the always-on outputs prologue runs."""
     job = Job(
         id="j2",
         command="python -V",
         requirements=ComputeRequirements(timeout_sec=0),
     )
-    assert SkyPilotBackend.resolve_command(job) == "python -V"
+    assert SkyPilotBackend.resolve_command(job) == (
+        "mkdir -p /outputs/j2 && export OUTPUTS_DIR=/outputs/j2 && python -V"
+    )
 
 
 def test_resolve_command_idempotent_on_caller_cd():
-    """v4.2 §C5: idempotent against M0 cd-prefixed callers."""
+    """v4.2 §C5: idempotent against M0 cd-prefixed callers — sciagent's
+    own cd is suppressed when the user command already starts with one.
+    The always-on outputs prologue (mkdir + export) still applies."""
     job = Job(
         id="j3",
         command="cd /workspace && bash Allrun",
         requirements=ComputeRequirements(
             timeout_sec=0,
-            storage=[StorageMount(path="/workspace", bucket="b", store="s3")],
+            storage=[StorageMount(path="/workspace", bucket="b", store="s3", kind="input")],
         ),
     )
-    assert SkyPilotBackend.resolve_command(job) == "cd /workspace && bash Allrun"
+    assert SkyPilotBackend.resolve_command(job) == (
+        "mkdir -p /outputs/j3 && export OUTPUTS_DIR=/outputs/j3 && "
+        "cd /workspace && bash Allrun"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +125,7 @@ def test_emit_launched_records_all_required_fields(session_log: ProvenanceLog):
         command="bash Allrun",
         requirements=ComputeRequirements(
             cpus=4, memory_gb=32, gpus=0, timeout_sec=3600,
-            storage=[StorageMount(path="/workspace", bucket="b8-bucket", store="s3")],
+            storage=[StorageMount(path="/workspace", bucket="b8-bucket", store="s3", kind="input")],
         ),
         session_id="testsess",
         intent={"paper": "doi:10.example/foo", "case": "typical_c"},
@@ -130,7 +143,11 @@ def test_emit_launched_records_all_required_fields(session_log: ProvenanceLog):
     assert ev["service"] == "openfoam"
     assert ev["image"].startswith("ghcr.io/sciagent-ai/openfoam")
     assert ev["command_original"] == "bash Allrun"
-    assert ev["command_resolved"] == "timeout 3600 bash -c 'cd /workspace && bash Allrun'"
+    assert ev["command_resolved"] == (
+        "timeout 3600 bash -c 'mkdir -p /outputs/abc123 && "
+        "export OUTPUTS_DIR=/outputs/abc123 && cd /workspace && bash Allrun'"
+    )
+    # Primary input mount — the cd target — is what _emit_launched_event records.
     assert ev["mount_path"] == "/workspace"
     assert ev["mount_bucket"] == "b8-bucket"
     assert ev["requirements"]["cpus"] == 4

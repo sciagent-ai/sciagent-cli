@@ -34,6 +34,12 @@ schema_version: "1.0"
 # Use 'packages' to determine if a container has the libraries you need.
 # Use 'extends' to find compatible bases for building combined containers.
 # Use 'architectures' to check cloud vs local compatibility.
+#
+# workdir field: the IMAGE's expected CWD (informational only). The compute
+# layer's CWD policy is documented in the compute_run tool description and
+# is image-agnostic. In short: input mount > ship_workdir rsync target >
+# image WORKDIR. Inputs go to /workspace/ when caller passes
+# workspace_source=; outputs always go to /outputs/<job_id>/ (auto-fetched).
 
 defaults:
   organization: sciagent-ai
