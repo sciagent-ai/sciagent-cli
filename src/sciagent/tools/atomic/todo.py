@@ -701,6 +701,39 @@ COMMANDS:
                     metadata={"todos": [t.to_dict() for t in self.graph.get_all()]}
                 )
 
+            # Defensive: LLMs occasionally JSON-stringify the entire list
+            # arg instead of passing a real Python list. Without this guard
+            # the for-loop below iterates the string's CHARACTERS — the
+            # user sees a useless 'todos[0] is a string... Got "["' error
+            # because [ is the first character. Normalize string → list
+            # here so the rest of the body can assume a real list.
+            if isinstance(todos, str):
+                try:
+                    todos = json.loads(todos)
+                except (json.JSONDecodeError, TypeError):
+                    return ToolResult(
+                        success=False,
+                        output=None,
+                        error=(
+                            f"todos was passed as a string that doesn't "
+                            f"parse as JSON. Pass a real list of dicts: "
+                            f"[{{'id': 'x', 'task': '...'}}]. "
+                            f"Got string starting with: {todos[:80]!r}"
+                        ),
+                    )
+            # Single-dict shorthand: wrap in a list.
+            if isinstance(todos, dict):
+                todos = [todos]
+            if not isinstance(todos, list):
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error=(
+                        f"todos must be a list of dicts; "
+                        f"got {type(todos).__name__}"
+                    ),
+                )
+
             # Clear and rebuild graph
             self.graph = TodoGraph()
 

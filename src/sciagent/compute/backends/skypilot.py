@@ -552,6 +552,8 @@ class SkyPilotBackend:
         job: Job,
         name: str,
         managed_job_id: Optional[int],
+        mode: str = "managed_jobs",
+        cluster_name: Optional[str] = None,
     ) -> None:
         """Emit a compute_job_launched event, best-effort.
 
@@ -559,6 +561,12 @@ class SkyPilotBackend:
         callers without an agent context) or when log write fails — the
         cluster job is already running and the verification record is
         secondary to the launch's success.
+
+        ``mode`` distinguishes Sky's two execution surfaces. The default
+        ``"managed_jobs"`` matches the existing call from ``run()``;
+        cluster-mode call sites pass their specific mode so a verifier
+        reading the log can tell whether the integer in ``managed_job_id``
+        is a managed-jobs id or a per-cluster job index.
         """
         session_id = getattr(job, "session_id", None)
         if not session_id:
@@ -579,6 +587,10 @@ class SkyPilotBackend:
                 fallback = storage_mounts[0]
                 mount_path = getattr(fallback, "path", None)
                 mount_bucket = getattr(fallback, "bucket", None)
+            # For cluster modes, the int we have IS the per-cluster job id;
+            # surface it under cluster_job_id explicitly so new readers don't
+            # have to know that managed_job_id was overloaded.
+            cluster_job_id = managed_job_id if mode != "managed_jobs" else None
             log.emit_compute_job_launched(
                 job_id=name,
                 managed_job_id=managed_job_id,
@@ -598,6 +610,9 @@ class SkyPilotBackend:
                 },
                 intent=getattr(job, "intent", None),
                 expected_artifacts=getattr(job, "expected_artifacts", None),
+                mode=mode,
+                cluster_name=cluster_name or (name if mode != "managed_jobs" else None),
+                cluster_job_id=cluster_job_id,
             )
         except Exception:
             pass  # Best-effort.
@@ -760,14 +775,37 @@ class SkyPilotBackend:
             # to compare-by-name on the status enum. Better than crashing.
             RequestStatus = None  # type: ignore
 
+        # Pull the agent's interrupt event lazily so a Ctrl+C during the
+        # 60s fail-fast budget wakes immediately instead of looping until
+        # the next tick. Standalone callers (no AgentLoop wired) leave
+        # the event as None and fall back to plain time.sleep.
+        from sciagent.tools.registry import BaseTool
+        interrupt_event = BaseTool._shared_interrupt_event
+
         deadline = time.monotonic() + budget_sec
         while time.monotonic() < deadline:
+            if interrupt_event is not None and interrupt_event.is_set():
+                # Treat user-cancellation as a structured launch rejection
+                # so callers (compute_run / compute_exec / launch_cluster)
+                # surface it cleanly instead of looping further.
+                raise LaunchError(
+                    f"sky.launch interrupted by user before terminal status "
+                    f"(request_id={request_id}). The request may still be "
+                    f"in-flight on Sky's controller — check `sky api status` "
+                    f"or wait for autostop.",
+                    cluster_name=cluster_name,
+                    request_id=str(request_id) if request_id is not None else None,
+                )
             try:
                 payloads = sky.api_status(request_ids=[request_id])
             except Exception:
                 # Transient API hiccup — retry within the budget. Don't let
                 # an api_status flake convert into a phantom LaunchError.
-                time.sleep(poll_interval_sec)
+                if interrupt_event is not None:
+                    if interrupt_event.wait(poll_interval_sec):
+                        continue
+                else:
+                    time.sleep(poll_interval_sec)
                 continue
 
             if payloads:
@@ -797,12 +835,23 @@ class SkyPilotBackend:
                                 f"{msg.rstrip('.)')} request_id={request_id}; "
                                 f"manually: sky api logs {request_id})"
                             )
-                    raise LaunchError(msg, cluster_name=cluster_name)
+                    raise LaunchError(
+                        msg,
+                        cluster_name=cluster_name,
+                        request_id=str(request_id) if request_id is not None else None,
+                    )
 
                 if status_name == "SUCCEEDED":
                     return True
 
-            time.sleep(poll_interval_sec)
+            # Wait until the next poll, but wake immediately on Ctrl+C
+            # so the user doesn't have to sit through the rest of the
+            # poll interval before bail-out.
+            if interrupt_event is not None:
+                if interrupt_event.wait(poll_interval_sec):
+                    continue
+            else:
+                time.sleep(poll_interval_sec)
         # Budget exceeded; treat as a still-launching cluster.
         return False
 
@@ -1018,6 +1067,604 @@ class SkyPilotBackend:
         except (TypeError, ValueError):
             return None
 
+    # ------------------------------------------------------------------
+    # Cluster-mode surface (sky.launch + sky.exec).
+    #
+    # Sky has two execution models. ``run()`` above uses managed-jobs
+    # (sky.jobs.launch) — Sky owns cluster lifecycle, fresh cluster per
+    # call. The methods below use cluster-mode (sky.launch / sky.exec) —
+    # the agent owns lifecycle, clusters are persistent and reusable. Per
+    # Sky's docs: managed-jobs is for batch / scale-out / spot-recovery;
+    # cluster-mode is for iterative dev (probe → fix → retry on the same
+    # warm cluster, ~10s per follow-up vs. ~3-5min per fresh provision).
+    #
+    # Both surfaces coexist; compute_run picks via mode= kwarg.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _coerce_int_job_id(value) -> Optional[int]:
+        """Cast a sky-returned job_id to int, tolerating str / None."""
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _extract_cluster_job_id(self, request_id) -> Optional[int]:
+        """sky.launch / sky.exec return RequestId[(Optional[int], Handle)].
+        Pull the int job_id out without blocking longer than necessary —
+        only call this AFTER _await_launch_or_fail has confirmed the
+        request reached SUCCEEDED inside the fail-fast budget.
+        """
+        sky = self._get_sky()
+        try:
+            payload = sky.get(request_id)
+        except Exception:
+            return None
+        if isinstance(payload, tuple) and payload:
+            return self._coerce_int_job_id(payload[0])
+        return None
+
+    def launch_cluster(
+        self,
+        cluster_name: str,
+        job: Job,
+        autostop_minutes: int = 30,
+        autostop_hook: Optional[str] = None,
+        wait_for: str = "jobs",
+    ) -> Tuple[str, Optional[int]]:
+        """Provision (or reuse) a persistent cluster and run ``job`` on it.
+
+        ``sky.launch(cluster_name=X)`` is **idempotent** on UP clusters: if
+        cluster X is already UP, Sky skips reprovisioning and runs the task
+        on the warm cluster. This is the contract sciagent leans on for
+        warm-cluster iteration.
+
+        Args:
+            cluster_name: Persistent cluster identifier. Same name on
+                subsequent calls reuses the cluster.
+            job: Compute job to build the task from.
+            autostop_minutes: Idle minutes before Sky auto-stops the
+                cluster. Reset on every job submission (launch or exec).
+                Default 30, matching Sky's interactive-dev guidance scaled
+                for agent inter-step latency.
+            autostop_hook: Optional shell snippet that runs on the cluster
+                before autostop fires (e.g., ``aws s3 sync /scratch s3://...``
+                to flush state). Set via a follow-up ``sky.autostop()`` call
+                because ``sky.launch`` doesn't accept the hook directly.
+            wait_for: Idle definition. ``"jobs"`` (default for sciagent —
+                the agent never SSHes), ``"jobs_and_ssh"`` (Sky's default,
+                for human dev), or ``"none"`` (hard timeout).
+
+        Returns:
+            ``(cluster_name, int_job_id)``. ``int_job_id`` is the
+            per-cluster job index Sky assigns (1, 2, 3, ...); use it with
+            ``sky.tail_logs(cluster_name, job_id=...)``. Returns
+            ``(cluster_name, None)`` when launch is still in-flight after
+            the fail-fast budget elapses (rare for warm-cluster launches).
+
+        Raises:
+            LaunchError: when Sky reports FAILED/CANCELLED inside the
+                fail-fast budget. Same shape as ``run()``.
+        """
+        from ..cluster_manifest import write_cluster
+
+        sky = self._get_sky()
+        task = self._build_task(job)
+
+        with _silence_sky_chatter():
+            request_id = sky.launch(
+                task,
+                cluster_name=cluster_name,
+                idle_minutes_to_autostop=autostop_minutes,
+            )
+
+        succeeded = self._await_launch_or_fail(
+            request_id=request_id,
+            cluster_name=cluster_name,
+            budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
+        )
+
+        int_job_id: Optional[int] = None
+        if succeeded:
+            int_job_id = self._extract_cluster_job_id(request_id)
+
+        # Apply autostop hook (and refine wait_for) via a follow-up call
+        # because sky.launch doesn't accept hook= directly. Best-effort:
+        # a hook-set failure doesn't fail the launch.
+        if autostop_hook or wait_for != "jobs_and_ssh":
+            self._set_cluster_autostop(
+                cluster_name=cluster_name,
+                idle_minutes=autostop_minutes,
+                wait_for=wait_for,
+                hook=autostop_hook,
+            )
+
+        # Best-effort manifest write so subsequent compute_cluster(action=
+        # "status") can enrich Sky's bare response with sciagent context.
+        write_cluster(
+            cluster_name=cluster_name,
+            autostop_minutes=autostop_minutes,
+            autostop_hook=autostop_hook,
+            session_id=getattr(job, "session_id", None),
+            service=job.service or None,
+            image=job.image or None,
+            last_job_id=int_job_id,
+        )
+
+        # Reuse the launched-event channel — verifier doesn't care whether
+        # the launch went via jobs.launch or launch; the bucket / mounts /
+        # command_resolved facts are identical. mode= distinguishes the
+        # surface so the integer in managed_job_id isn't ambiguous.
+        self._emit_launched_event(
+            job, cluster_name, int_job_id,
+            mode="cluster_launch", cluster_name=cluster_name,
+        )
+
+        return cluster_name, int_job_id
+
+    def exec_on_cluster(
+        self,
+        cluster_name: str,
+        job: Job,
+    ) -> Tuple[str, Optional[int]]:
+        """Run a follow-up job on an existing UP cluster via ``sky.exec``.
+
+        Skips provisioning AND setup — only ships the workdir (if any) and
+        runs the command. Returns in seconds, not minutes. The cluster's
+        existing storage_mounts apply unchanged; to update mounts use
+        :meth:`refresh_cluster_mounts`.
+
+        Args:
+            cluster_name: Existing UP cluster. If not UP, Sky raises and
+                this method propagates a LaunchError pointing the caller
+                at ``compute_cluster(action='status')``.
+            job: Job to build the task from. Resources are ignored
+                (the cluster's resources apply); workdir + run + envs
+                go through.
+
+        Returns:
+            ``(cluster_name, int_job_id)``. ``int_job_id`` is the
+            per-cluster index for this exec invocation.
+        """
+        from ..cluster_manifest import write_cluster
+
+        sky = self._get_sky()
+        task = self._build_task(job)
+
+        with _silence_sky_chatter():
+            request_id = sky.exec(task, cluster_name=cluster_name)
+
+        succeeded = self._await_launch_or_fail(
+            request_id=request_id,
+            cluster_name=cluster_name,
+            budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
+        )
+
+        int_job_id: Optional[int] = None
+        if succeeded:
+            int_job_id = self._extract_cluster_job_id(request_id)
+
+        write_cluster(
+            cluster_name=cluster_name,
+            session_id=getattr(job, "session_id", None),
+            last_job_id=int_job_id,
+        )
+
+        self._emit_launched_event(
+            job, cluster_name, int_job_id,
+            mode="cluster_exec", cluster_name=cluster_name,
+        )
+
+        return cluster_name, int_job_id
+
+    def refresh_cluster_mounts(
+        self,
+        cluster_name: str,
+        job: Job,
+    ) -> Tuple[str, Optional[int]]:
+        """Re-sync ``file_mounts`` on an existing cluster without re-running
+        ``setup``.
+
+        Wraps ``sky.launch(no_setup=True, cluster_name=X)`` — Sky's
+        canonical pattern for "iterate on data while reusing a cluster"
+        per the syncing-code-artifacts docs. The new task's storage_mounts
+        replace the cluster's prior mount set; the run command (if set)
+        executes after the mount sync.
+
+        Use case: agent has a warm cluster pointed at workspace_source A;
+        wants to point it at workspace_source B without paying full
+        reprovisioning. Setup is idempotent and expensive (often hours
+        for compiled scientific stacks), so skipping it is the win.
+        """
+        from ..cluster_manifest import write_cluster
+
+        sky = self._get_sky()
+        task = self._build_task(job)
+
+        with _silence_sky_chatter():
+            request_id = sky.launch(
+                task,
+                cluster_name=cluster_name,
+                no_setup=True,
+            )
+
+        succeeded = self._await_launch_or_fail(
+            request_id=request_id,
+            cluster_name=cluster_name,
+            budget_sec=_LAUNCH_FAIL_FAST_BUDGET_SEC,
+        )
+
+        int_job_id: Optional[int] = None
+        if succeeded:
+            int_job_id = self._extract_cluster_job_id(request_id)
+
+        write_cluster(
+            cluster_name=cluster_name,
+            session_id=getattr(job, "session_id", None),
+            last_job_id=int_job_id,
+        )
+
+        self._emit_launched_event(
+            job, cluster_name, int_job_id,
+            mode="cluster_refresh_mounts", cluster_name=cluster_name,
+        )
+
+        return cluster_name, int_job_id
+
+    def cluster_status(self, cluster_name: str) -> Dict[str, Any]:
+        """Return a sciagent-shaped status dict for a cluster.
+
+        Combines Sky's ``sky.status(cluster_names=[name])`` response with
+        the local manifest (if present) so callers see both the cloud-side
+        truth (UP/STOPPED/INIT/AUTOSTOPPING/PENDING) and sciagent context
+        (created_at, autostop_minutes, last_used_at, recent job_ids).
+
+        Returns:
+            ``{
+                "cluster_name": ...,
+                "exists": bool,           # is the cluster known to Sky?
+                "status": "UP" | "STOPPED" | ... | None,
+                "autostop": {"idle_minutes": int, "down": bool} | None,
+                "manifest": {...} | None, # local manifest content
+            }``
+        """
+        from ..cluster_manifest import read_cluster
+
+        sky = self._get_sky()
+        manifest = read_cluster(cluster_name)
+
+        try:
+            request_id = sky.status(cluster_names=[cluster_name])
+            payloads = sky.stream_and_get(request_id)
+        except Exception as exc:
+            return {
+                "cluster_name": cluster_name,
+                "exists": False,
+                "status": None,
+                "autostop": None,
+                "manifest": manifest,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+
+        if not payloads:
+            return {
+                "cluster_name": cluster_name,
+                "exists": False,
+                "status": None,
+                "autostop": None,
+                "manifest": manifest,
+            }
+
+        record = payloads[0]
+        status_obj = getattr(record, "status", None)
+        status_name = (
+            getattr(status_obj, "name", None)
+            or getattr(status_obj, "value", None)
+            or str(status_obj) if status_obj else None
+        )
+        autostop_minutes = getattr(record, "autostop", None)
+        to_down = bool(getattr(record, "to_down", False))
+        autostop_block: Optional[Dict[str, Any]] = None
+        if autostop_minutes is not None and autostop_minutes >= 0:
+            autostop_block = {
+                "idle_minutes": int(autostop_minutes),
+                "down": to_down,
+            }
+
+        return {
+            "cluster_name": cluster_name,
+            "exists": True,
+            "status": status_name,
+            "autostop": autostop_block,
+            "manifest": manifest,
+        }
+
+    def wait_cluster_up(
+        self,
+        cluster_name: str,
+        timeout: float = 300.0,
+        poll_interval: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Block until the cluster reaches UP, hits a terminal-bad state, or
+        ``timeout`` elapses. Returns a structured verdict so the caller
+        knows whether to proceed (status == UP), bail (FAILED/STOPPED), or
+        wait again (still INIT/PENDING after the budget).
+
+        Architectural intent: collapse the agent's status-polling loop
+        (which burns one LLM turn per snapshot) into a single tool call
+        that internally polls. Each LLM turn that polls instead of
+        waiting costs ~5–30s of thinking + tokens; for a 5-min provision
+        that's 10+ turns. This wait collapses it to one.
+
+        Returns:
+            ``{"ready": bool, "status": str | None, "elapsed_sec": float,
+              "timed_out": bool, "manifest": ...}``
+            - ``ready=True, status="UP"`` — proceed; cluster is provisioned.
+            - ``ready=False, timed_out=True`` — call again with longer
+              timeout, or fall back to status snapshots.
+            - ``ready=False, status="STOPPED"|"AUTOSTOPPING"`` — terminal-
+              bad; agent should not exec on this cluster.
+
+        Honors the BaseTool interrupt event so a user Ctrl+C wakes the
+        wait immediately and returns a structured "interrupted" verdict.
+        """
+        from sciagent.tools.registry import BaseTool
+
+        interrupt_event = BaseTool._shared_interrupt_event
+        start = time.monotonic()
+        deadline = start + timeout
+        last_status: Optional[str] = None
+
+        while time.monotonic() < deadline:
+            if interrupt_event is not None and interrupt_event.is_set():
+                return {
+                    "ready": False,
+                    "status": last_status,
+                    "elapsed_sec": round(time.monotonic() - start, 1),
+                    "timed_out": False,
+                    "interrupted": True,
+                    "reason": "user-interrupted",
+                }
+
+            info = self.cluster_status(cluster_name)
+            last_status = info.get("status")
+
+            if last_status == "UP":
+                return {
+                    "ready": True,
+                    "status": "UP",
+                    "elapsed_sec": round(time.monotonic() - start, 1),
+                    "timed_out": False,
+                    "manifest": info.get("manifest"),
+                }
+
+            if last_status in ("STOPPED", "AUTOSTOPPING"):
+                # Terminal-bad: the cluster is going away. exec'ing on it
+                # would fail; surface this so the caller doesn't waste a
+                # follow-up call.
+                return {
+                    "ready": False,
+                    "status": last_status,
+                    "elapsed_sec": round(time.monotonic() - start, 1),
+                    "timed_out": False,
+                    "manifest": info.get("manifest"),
+                    "reason": (
+                        f"cluster reached {last_status} (not UP); relaunch "
+                        f"with launch_cluster or pick a new cluster_name."
+                    ),
+                }
+
+            # INIT / PENDING / unknown: keep waiting. Use the interrupt-
+            # aware wait so a Ctrl+C wakes us right away.
+            remaining = max(0.0, deadline - time.monotonic())
+            interval = min(poll_interval, remaining)
+            if interval <= 0:
+                break
+            if interrupt_event is not None:
+                if interrupt_event.wait(interval):
+                    continue
+            else:
+                time.sleep(interval)
+
+        return {
+            "ready": False,
+            "status": last_status,
+            "elapsed_sec": round(time.monotonic() - start, 1),
+            "timed_out": True,
+            "reason": (
+                f"cluster {cluster_name} still {last_status} after "
+                f"{timeout}s; call wait_until_up again with a longer "
+                f"timeout, or check sky api logs."
+            ),
+        }
+
+    def wait_cluster_job(
+        self,
+        cluster_name: str,
+        cluster_job_id: int,
+        timeout: float = 1800.0,
+        poll_interval: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Block until a per-cluster job reaches a terminal state.
+
+        Cluster-mode equivalent of ``bg_wait`` for managed-jobs. Polls
+        ``sky.queue(cluster_name)`` for the job whose int id matches
+        ``cluster_job_id`` and reports its mapped sciagent JobStatus
+        when the job is terminal (COMPLETED / FAILED / CANCELLED).
+
+        Returns:
+            ``{"terminal": bool, "status": "COMPLETED"|"FAILED"|... | None,
+              "elapsed_sec": float, "timed_out": bool, "summary": str | None}``
+
+        Honors the BaseTool interrupt event.
+        """
+        from sciagent.tools.registry import BaseTool
+
+        sky = self._get_sky()
+        interrupt_event = BaseTool._shared_interrupt_event
+        start = time.monotonic()
+        deadline = start + timeout
+        last_status_name: Optional[str] = None
+
+        terminal_names = {
+            "SUCCEEDED", "FAILED", "FAILED_SETUP", "FAILED_PRECHECKS",
+            "FAILED_DRIVER", "CANCELLED",
+        }
+
+        while time.monotonic() < deadline:
+            if interrupt_event is not None and interrupt_event.is_set():
+                return {
+                    "terminal": False,
+                    "status": last_status_name,
+                    "elapsed_sec": round(time.monotonic() - start, 1),
+                    "timed_out": False,
+                    "interrupted": True,
+                    "reason": "user-interrupted",
+                }
+
+            try:
+                request_id = sky.queue(cluster_name)
+                records = sky.stream_and_get(request_id)
+            except Exception:
+                records = []
+
+            match = None
+            if records:
+                for rec in records:
+                    rec_id = getattr(rec, "job_id", None)
+                    if rec_id is not None and int(rec_id) == int(cluster_job_id):
+                        match = rec
+                        break
+
+            if match is not None:
+                status_obj = getattr(match, "status", None)
+                last_status_name = (
+                    getattr(status_obj, "name", None)
+                    or str(status_obj) if status_obj else None
+                )
+                if last_status_name in terminal_names:
+                    summary = f"Job {cluster_job_id} on {cluster_name}: {last_status_name}"
+                    return {
+                        "terminal": True,
+                        "status": last_status_name,
+                        "elapsed_sec": round(time.monotonic() - start, 1),
+                        "timed_out": False,
+                        "summary": summary,
+                    }
+
+            remaining = max(0.0, deadline - time.monotonic())
+            interval = min(poll_interval, remaining)
+            if interval <= 0:
+                break
+            if interrupt_event is not None:
+                if interrupt_event.wait(interval):
+                    continue
+            else:
+                time.sleep(interval)
+
+        return {
+            "terminal": False,
+            "status": last_status_name,
+            "elapsed_sec": round(time.monotonic() - start, 1),
+            "timed_out": True,
+            "reason": (
+                f"cluster job {cluster_job_id} on {cluster_name} still "
+                f"{last_status_name or 'unknown'} after {timeout}s; "
+                f"call wait_for_job again with a longer timeout."
+            ),
+        }
+
+    def cluster_down(self, cluster_name: str, graceful: bool = True) -> bool:
+        """Tear down a cluster. Returns True on success, False on error.
+
+        ``graceful=True`` (default) gives in-flight jobs a chance to flush
+        state before teardown. Best-effort: a torn-down cluster's manifest
+        is removed so a stale entry doesn't surface in subsequent status
+        listings.
+
+        Emits a ``compute_cluster_down`` event into the session's
+        provenance log so audits can see *when* and *why* a cluster died,
+        not just that it's gone. The session_id is recovered from the
+        cluster manifest (written at launch); without it the event is
+        skipped silently — there's no log to write to.
+        """
+        from ..cluster_manifest import delete_cluster, read_cluster
+
+        # Read the manifest BEFORE deleting it — we need session_id to
+        # emit the down event into the right log.
+        manifest = read_cluster(cluster_name)
+        session_id = (manifest or {}).get("session_id")
+
+        sky = self._get_sky()
+        success = True
+        reason: Optional[str] = None
+        try:
+            request_id = sky.down(cluster_name, graceful=graceful)
+            sky.stream_and_get(request_id)
+        except Exception as exc:
+            success = False
+            reason = f"{type(exc).__name__}: {exc}"
+
+        # Best-effort provenance: emit even on failure so an audit can see
+        # the attempted teardown. Skipped silently when no session_id is
+        # known (orphan cluster, or manifest missing).
+        if session_id:
+            try:
+                log = get_provenance_log(session_id)
+                log.emit_compute_cluster_down(
+                    cluster_name=cluster_name,
+                    graceful=graceful,
+                    success=success,
+                    reason=reason,
+                )
+            except Exception:
+                pass  # Best-effort.
+
+        if success:
+            delete_cluster(cluster_name)
+        return success
+
+    def _set_cluster_autostop(
+        self,
+        cluster_name: str,
+        idle_minutes: int,
+        wait_for: str = "jobs",
+        hook: Optional[str] = None,
+    ) -> bool:
+        """Apply autostop config (idle threshold, wait_for, hook) to an
+        existing cluster. Best-effort.
+
+        Wraps ``sky.autostop()``. Used by ``launch_cluster`` to apply
+        the hook (since ``sky.launch`` doesn't take it directly) and
+        callable directly via the ``compute_cluster`` tool.
+        """
+        sky = self._get_sky()
+        try:
+            from sky.skylet.autostop_lib import AutostopWaitFor
+        except Exception:
+            AutostopWaitFor = None  # type: ignore
+
+        wait_enum = None
+        if AutostopWaitFor is not None:
+            try:
+                wait_enum = AutostopWaitFor(wait_for)
+            except Exception:
+                wait_enum = None
+
+        try:
+            request_id = sky.autostop(
+                cluster_name,
+                idle_minutes=idle_minutes,
+                wait_for=wait_enum,
+                hook=hook,
+            )
+            sky.stream_and_get(request_id)
+            return True
+        except Exception:
+            return False
+
     def get_status(self, job_id: str) -> JobResult:
         """Get managed-job status, mapped to sciagent's JobStatus.
 
@@ -1067,8 +1714,13 @@ class SkyPilotBackend:
 
         if mapped == JobStatus.FAILED:
             # Pull a log tail so the agent gets actionable stderr without a
-            # second round-trip. Same shape as M0's failure path.
-            error_logs = self.get_logs(job_id, tail=200)
+            # second round-trip. Same shape as M0's failure path. Pass the
+            # int we already extracted from the queue record — Sky's name
+            # lookup only resolves non-terminal jobs, so a FAILED job needs
+            # the int form to retrieve any logs at all.
+            error_logs = self.get_logs(
+                job_id, tail=200, managed_job_id=managed_job_id
+            )
             log_file = self._write_logs_to_file(job_id, error_logs)
             error_preview = self._extract_error_line(error_logs)
             failure_reason = getattr(record, "failure_reason", None) or ""
@@ -1237,7 +1889,20 @@ class SkyPilotBackend:
         """
         return self.cleanup(job_id)
 
-    def get_logs(self, job_id: str, tail: int = 100) -> str:
+    # Sky's dump_managed_job_logs returns this literal string when a name
+    # lookup hits no non-terminal job (sky/jobs/utils.py:1587). Terminal jobs
+    # are invisible to tail_logs(name=...) — they're only reachable by integer
+    # job_id. Treating the sentinel as logs would let _extract_error_line
+    # surface "not found" as the user's error preview, which is exactly the
+    # bg_wait-lying-about-terminal-jobs bug.
+    _SKY_NONTERMINAL_NAME_SENTINEL = "No running managed job found with name"
+
+    def get_logs(
+        self,
+        job_id: str,
+        tail: int = 100,
+        managed_job_id: Optional[int] = None,
+    ) -> str:
         """Get tail of a managed job's logs.
 
         Uses ``sky.jobs.tail_logs`` — the managed-jobs equivalent of M0's
@@ -1247,9 +1912,23 @@ class SkyPilotBackend:
         buffer so the function returns once the tail is buffered, not at
         end-of-time.
 
+        Resolution strategy:
+          1. If ``managed_job_id`` is provided (or recoverable from the
+             managed-job queue), call ``tail_logs(job_id=<int>)``. This is
+             the *only* form that works for terminal jobs — Sky's name
+             lookup goes through ``get_nonterminal_job_ids_by_name`` and
+             returns a "not found" sentinel for any FAILED/COMPLETED job.
+          2. Fall back to ``tail_logs(name=<str>)`` only when no int is
+             recoverable (orphaned manifest, queue lookup transiently
+             failed). Useful for still-running jobs.
+
         Args:
             job_id: Managed-job name (the value passed to ``sky.jobs.launch(name=...)``).
             tail: Number of trailing log lines to return.
+            managed_job_id: Integer Sky-side job id. Pass it through when
+                the caller already has it in hand (typically ``get_status``,
+                which holds the queue record). Saves a redundant queue_v2
+                round-trip and is the only path that works post-terminal.
 
         Returns:
             Log content as a string; never None — callers (notably
@@ -1259,20 +1938,39 @@ class SkyPilotBackend:
         sky = self._get_sky()
         import io
 
+        if managed_job_id is None:
+            managed_job_id = self.get_managed_job_id(job_id)
+
         buf = io.StringIO()
         try:
-            sky.jobs.tail_logs(
-                name=job_id,
-                job_id=None,
-                follow=False,
-                tail=tail,
-                output_stream=buf,
-            )
-            return buf.getvalue()
+            if managed_job_id is not None:
+                sky.jobs.tail_logs(
+                    name=None,
+                    job_id=managed_job_id,
+                    follow=False,
+                    tail=tail,
+                    output_stream=buf,
+                )
+            else:
+                sky.jobs.tail_logs(
+                    name=job_id,
+                    job_id=None,
+                    follow=False,
+                    tail=tail,
+                    output_stream=buf,
+                )
+            text = buf.getvalue()
         except Exception as e:
             partial = buf.getvalue()
             err_line = f"[get_logs error: {type(e).__name__}: {e}]"
             return f"{partial}\n{err_line}" if partial else err_line
+
+        # Defensive: if Sky still emitted the non-terminal name sentinel
+        # (e.g. a future code path or the int lookup also returned it),
+        # treat it as "no logs" rather than feeding it to _extract_error_line.
+        if self._SKY_NONTERMINAL_NAME_SENTINEL in text:
+            return ""
+        return text
 
     def _write_logs_to_file(self, job_id: str, logs: str) -> str:
         """Write logs to file for agent to read later.

@@ -38,11 +38,61 @@ class BaseTool:
     - description: str - what the tool does
     - parameters: dict - JSON schema for parameters
     - execute(**kwargs) -> ToolResult - the implementation
+
+    Interrupt contract (for tools that may block longer than ~5s on a
+    network call, subprocess, or polling loop):
+
+      - The AgentLoop sets ``BaseTool._shared_interrupt_event`` to its
+        own threading.Event at startup. The signal handler sets that
+        event on Ctrl+C.
+      - Tools that block in a poll loop should replace ``time.sleep(N)``
+        with ``self._shared_interrupt_event.wait(N)`` so a Ctrl+C wakes
+        the wait immediately.
+      - Tools that do a single blocking RPC should check
+        ``self._shared_interrupt_event.is_set()`` before the call and
+        bail with a structured "interrupted" result if so.
+      - Standalone callers (no AgentLoop) leave the event unset; the
+        helpers below tolerate that (``None`` → skip the check).
+
+    The shared event is class-level (not instance-level) so all tools
+    across all subagents in the process see the same event. The
+    AgentLoop wires it once at construction time.
     """
 
     name: str = ""
     description: str = ""
     parameters: Dict[str, Any] = {}
+
+    # Wired by AgentLoop.__init__. Class-level so subclass instances
+    # across the process share it without per-instance plumbing.
+    _shared_interrupt_event = None  # type: ignore[var-annotated]
+
+    @classmethod
+    def set_shared_interrupt_event(cls, event):
+        """Wire the AgentLoop's interrupt event into all tools."""
+        cls._shared_interrupt_event = event
+
+    @classmethod
+    def is_interrupted(cls) -> bool:
+        """True when a Ctrl+C has been signaled and the agent is asking
+        tools to bail. False when no event is wired (standalone use)."""
+        ev = cls._shared_interrupt_event
+        return bool(ev is not None and ev.is_set())
+
+    @classmethod
+    def interruptible_sleep(cls, seconds: float) -> bool:
+        """Sleep up to ``seconds``, but wake immediately on interrupt.
+
+        Returns True when the wait was interrupted (caller should bail),
+        False when the full duration elapsed (caller should continue).
+        Falls back to plain time.sleep when no event is wired.
+        """
+        import time as _time
+        ev = cls._shared_interrupt_event
+        if ev is None:
+            _time.sleep(seconds)
+            return False
+        return ev.wait(seconds)
 
     def execute(self, **kwargs) -> ToolResult:
         """Execute the tool. Override in subclasses."""
@@ -154,6 +204,26 @@ class ToolRegistry:
         """Get all tool schemas for LLM."""
         return [tool.to_schema() for tool in self._tools.values()]
 
+    def clone(self, exclude: Optional[set] = None) -> "ToolRegistry":
+        """Return a new registry with the same tool instances, optionally
+        omitting the names in ``exclude``.
+
+        Used to give the main agent a different view of the toolset than
+        the subagents (e.g., main agent doesn't see compute_*, those tools
+        are reachable only via the `compute` subagent — which keeps cloud
+        chatter inside its own context bubble per subagent.py:380-388).
+        Tools are shared by reference; both registries see the same
+        underlying instance, so a stateful tool (e.g., ComputeTool's
+        shared session) stays consistent.
+        """
+        excluded = set(exclude or ())
+        new_registry = ToolRegistry()
+        for name, tool in self._tools.items():
+            if name in excluded:
+                continue
+            new_registry.register(tool)
+        return new_registry
+
     def execute(self, name: str, **kwargs) -> ToolResult:
         """Execute a tool by name."""
         tool = self.get(name)
@@ -252,6 +322,9 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.bg_tools import BgStatusTool, BgOutputTool, BgWaitTool, BgKillTool
     from .atomic.task_tools import TaskListTool, TaskGetTool, TaskWaitTool
     from .atomic.compute import ComputeTool
+    from .atomic.compute_exec import ComputeExecTool
+    from .atomic.compute_cluster import ComputeClusterTool
+    from .atomic.service_search import ServiceSearchTool
 
     registry = ToolRegistry()
 
@@ -279,6 +352,19 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
 
     # Compute tool
     registry.register(ComputeTool(working_dir))
+
+    # Cluster-mode follow-ups (sky.exec on a warm cluster) and lifecycle
+    # surface (status / down / autostop / refresh_mounts). compute_run
+    # picks managed-jobs vs cluster mode via the mode= kwarg; these two
+    # tools cover everything else the agent needs for cluster-mode
+    # iteration.
+    registry.register(ComputeExecTool(working_dir))
+    registry.register(ComputeClusterTool(working_dir))
+
+    # Service registry discovery — keyword search across name, description,
+    # packages, and capabilities. Cheaper than reading registry.yaml (which
+    # file_ops truncates) and tolerant of case mismatch.
+    registry.register(ServiceSearchTool())
 
     # Add skill tool if skills exist
     try:

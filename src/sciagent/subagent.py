@@ -392,6 +392,80 @@ Do NOT execute. Only plan.""",
             model=CODING_MODEL,
             system_prompt="""You orchestrate cloud compute jobs end-to-end. Your goal is "user wants X run on the cloud, with results locally" — return when files are local.
 
+## Never poll across LLM turns (read this BEFORE waiting on anything)
+
+Every LLM turn that polls a status (status snapshot → think → status →
+think) costs ~5–30s of thinking + tokens. For a 5-min cluster
+provisioning that's 10+ wasted turns; for a 30-min solver that's 60+
+turns and tens of thousands of tokens. The LLM client also caps a
+single turn at ~600s, so excessive polling can crash the session.
+
+For every long-running operation there is a paired wait_* tool that
+blocks INSIDE one tool call until the wait condition is met:
+
+  - Cluster provisioning to UP:
+    `compute_cluster(action="wait_until_up", cluster_name=..., timeout=300)`
+  - Cluster-mode job to terminal (compute_exec result):
+    `compute_cluster(action="wait_for_job", cluster_name=...,
+                     cluster_job_id=..., timeout=1800)`
+  - Managed-jobs to terminal:
+    `bg_wait(job_id, block=True, timeout=600)`
+  - Any registered task (kind-agnostic) to terminal:
+    `task_wait(id, timeout=600)`
+
+These wait_* tools all honor Ctrl+C (interrupt-aware) and return a
+structured verdict: `{ready/terminal: bool, status, elapsed_sec,
+timed_out: bool, ...}`. If `timed_out=True`, call the same wait_* tool
+again with a longer timeout. NEVER intersperse status snapshots —
+that's the polling anti-pattern this rule exists to prevent.
+
+Only use status snapshots (`bg_status`, `compute_cluster(action="status")`)
+to read state ONCE at decision points (e.g., before a follow-up exec),
+not in a loop.
+
+## Pick a mode FIRST (read this before any compute_run call)
+
+Sky offers two execution surfaces. Choose deliberately, per task shape:
+
+  - **mode="cluster"** — provision a persistent cluster ONCE, then run
+    N follow-ups on it via `compute_exec`. Each follow-up is ~10
+    seconds. Use this whenever the task may involve more than one
+    compute call against the same workspace: probes, env checks,
+    fix-and-retry loops, multi-step pipelines, paper reproductions
+    where you'll iterate on Allrun. This is the default for ANY
+    iterative work.
+  - **mode="job"** (default) — managed-jobs: Sky owns lifecycle, fresh
+    cluster per call (3–5 min provisioning each). Use ONLY for genuine
+    one-shot batch where you know the run command works and you don't
+    expect to iterate.
+
+If you find yourself about to call compute_run two or more times
+against the same workspace, STOP — you should be in cluster mode. Doing
+20 probes via mode="job" burns 60+ minutes on provisioning that
+mode="cluster" would have done in seconds.
+
+The iteration loop:
+  1. compute_run(..., mode="cluster", cluster_name="sciagent-<sid>-i",
+                  autostop_minutes=30, command=...)
+       — first call provisions; same cluster_name on subsequent calls
+       reuses the warm cluster (sky.launch is idempotent on UP clusters).
+  2. compute_exec(cluster_name, command) for follow-ups (probes, fixes,
+       reruns) — runs in seconds, no provisioning.
+  3. compute_cluster(action="refresh_mounts", cluster_name,
+                     workspace_source=...) to point a warm cluster at
+       new input data without re-running setup.
+  4. compute_cluster(action="down", cluster_name) when done — or rely
+       on autostop (30 min idle by default).
+
+Hard rules for cluster mode:
+  - Resources (instance type, GPUs, num_nodes, disk_size) are immutable
+    once a cluster is launched. Different resources require a new
+    cluster_name (after sky.down on the old one).
+  - file_mounts and the run command CAN change between calls.
+  - setup runs only on initial launch; refresh_mounts skips it.
+  - Cluster mode requires backend="skypilot" — local Docker has no
+    cluster equivalent.
+
 ## Path contract (image-agnostic, identical across every registry image)
 
 Three roles, three paths. One rule for inputs, one for outputs, one for code shipping. Image WORKDIR is irrelevant for the contract — sciagent never invents a CWD.
@@ -450,7 +524,7 @@ When the manuscript / README / case files name a specific tool version (e.g. "Op
 
 ## What to return to the parent
 A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.""",
-            allowed_tools=["file_ops", "bash", "compute_run", "bg_status", "bg_output", "bg_wait", "bg_kill", "web"],
+            allowed_tools=["file_ops", "bash", "compute_run", "compute_exec", "compute_cluster", "service_search", "bg_status", "bg_output", "bg_wait", "bg_kill", "web"],
             max_iterations=60,
         ))
 
@@ -1097,13 +1171,18 @@ def create_agent_with_subagents(
     tools = create_default_registry(working_dir)
     orchestrator = SubAgentOrchestrator(tools=tools, working_dir=working_dir)
     tools.register(TaskTool(orchestrator))
-    
+    # Main agent doesn't see compute_*; those reach the compute subagent
+    # via its allowed_tools. Keeps cloud chatter contained.
+    main_tools = tools.clone(
+        exclude={"compute_run", "compute_exec", "compute_cluster"}
+    )
+
     config = AgentConfig(
         model=model,
         working_dir=working_dir,
         verbose=verbose
     )
-    
+
     system_prompt = """You are an expert software engineering agent with the ability to delegate tasks to specialized sub-agents.
 
 ## Available Sub-Agents
@@ -1127,7 +1206,7 @@ Use the `task` tool to delegate work:
 Current working directory: {working_dir}
 """.format(working_dir=os.path.abspath(working_dir))
 
-    return AgentLoop(config=config, tools=tools, system_prompt=system_prompt)
+    return AgentLoop(config=config, tools=main_tools, system_prompt=system_prompt)
 
 
 # =============================================================================
@@ -1307,6 +1386,11 @@ def create_agent_with_orchestration(
     tools.register(TaskTool(orchestrator))
     tools.register(WorkflowTool(orchestrator, working_dir))
 
+    # Main agent doesn't see compute_*; reachable via the `compute` subagent.
+    main_tools = tools.clone(
+        exclude={"compute_run", "compute_exec", "compute_cluster"}
+    )
+
     config = AgentConfig(
         model=model,
         working_dir=working_dir,
@@ -1359,4 +1443,4 @@ Use for complex multi-step work with dependencies:
 Current working directory: {working_dir}
 """.format(working_dir=os.path.abspath(working_dir))
 
-    return AgentLoop(config=config, tools=tools, system_prompt=system_prompt)
+    return AgentLoop(config=config, tools=main_tools, system_prompt=system_prompt)

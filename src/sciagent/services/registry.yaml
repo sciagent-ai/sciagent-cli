@@ -1,45 +1,13 @@
 schema_version: "1.0"
 
-# Service Registry
-# Defines containerized simulation/compute services available to the agent
+# Service registry. Discovery: use the `service_search` tool — case-
+# insensitive substring match across name/description/packages/capabilities.
+# Per-entry execution conventions (CWD, mounts, runtime dispatch) live in
+# the compute_run tool description, not here.
 #
-# Resolution order:
-# 1. Check local Docker images
-# 2. Pull from GHCR (ghcr.io/sciagent-ai/{name}:latest)
-# 3. Build from Dockerfile (services/{name}/Dockerfile)
-#
-# Execution pattern:
-#   docker run --rm -v <local_path>:/workspace <image> <runtime> /workspace/<script>
-#
-# Runtime conventions:
-#   python3 → python3 /workspace/script.py
-#   bash    → bash /workspace/script.sh  OR  bash -c "<commands>"
-#   julia   → julia /workspace/script.jl
-#
-# Special cases: If 'invoke' field is present, use it instead of runtime.
-#   Example: invoke: "--skip bash -c {cmd}" means run:
-#   docker run --rm -v <local_path>:/workspace <image> --skip bash -c "<commands>"
-#
-# Package fields (for multi-service workflows):
-#   packages: List of key importable packages in the container
-#   extends: The base sciagent service this was built on (null if external base)
-#
-# Architecture support:
-#   architectures: List of supported platforms [linux/amd64, linux/arm64]
-#   - Default (in defaults section): both amd64 and arm64
-#   - Override per-service for those with arch-specific binaries
-#   - SkyPilot (cloud) requires linux/amd64
-#   - Local Mac M1/M2/M3 uses linux/arm64
-#
-# Use 'packages' to determine if a container has the libraries you need.
-# Use 'extends' to find compatible bases for building combined containers.
-# Use 'architectures' to check cloud vs local compatibility.
-#
-# workdir field: the IMAGE's expected CWD (informational only). The compute
-# layer's CWD policy is documented in the compute_run tool description and
-# is image-agnostic. In short: input mount > ship_workdir rsync target >
-# image WORKDIR. Inputs go to /workspace/ when caller passes
-# workspace_source=; outputs always go to /outputs/<job_id>/ (auto-fetched).
+# Fields: description, image, runtime (python3|bash|julia), packages,
+# capabilities, extends (parent service), architectures (default both
+# linux/amd64 and linux/arm64), resources (memory/cpu/gpu hints).
 
 defaults:
   organization: sciagent-ai

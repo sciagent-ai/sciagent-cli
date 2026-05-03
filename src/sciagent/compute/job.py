@@ -98,18 +98,25 @@ class Job:
 class LaunchError(RuntimeError):
     """Raised when a Sky launch is rejected before the job can run.
 
-    Carries the underlying message and the would-be cluster name so callers
-    can (a) show a structured failure and (b) attempt cleanup on the
-    partially-provisioned cluster — Sky may have brought an instance up
-    before the setup phase failed (e.g. wrong image without /bin/bash).
+    Carries the underlying message, the would-be cluster name, and the
+    Sky request_id so callers can (a) show a structured failure, (b)
+    attempt cleanup on the partially-provisioned cluster, and (c) point
+    the agent at ``sky api logs <request_id>`` when the auto log-tail
+    fetch comes back empty.
 
     B4 fail-fast contract: a deliberately broken job must surface within
     the fail-fast budget instead of after a 10-min poll loop.
     """
 
-    def __init__(self, message: str, cluster_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        cluster_name: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.cluster_name = cluster_name
+        self.request_id = request_id
 
 
 @dataclass

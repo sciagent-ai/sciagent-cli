@@ -330,13 +330,34 @@ class TaskWaitTool:
                 error=f"No task with id {id!r} in the registry.",
             )
 
+        # Honor the BaseTool interrupt event so a user Ctrl+C wakes the
+        # poll wait immediately. Without this, task_wait blocks for the
+        # full poll_interval before checking again — same trap bg_wait
+        # had until it was made interrupt-aware.
+        from sciagent.tools.registry import BaseTool
+        interrupt_event = BaseTool._shared_interrupt_event
+
         deadline = time.time() + timeout
         timed_out = False
         while record.get("state", "running") not in TERMINAL_STATES:
+            if interrupt_event is not None and interrupt_event.is_set():
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"task_wait on {id!r} interrupted by user. The task "
+                        f"is still running — call task_get('{id}') to "
+                        f"check, or task_wait again with a fresh budget."
+                    ),
+                    error=None,
+                )
             if time.time() >= deadline:
                 timed_out = True
                 break
-            time.sleep(poll_interval)
+            if interrupt_event is not None:
+                if interrupt_event.wait(poll_interval):
+                    continue
+            else:
+                time.sleep(poll_interval)
             record = get_task(id)
             if record is None:
                 # Manifest deleted while we were waiting — surface the

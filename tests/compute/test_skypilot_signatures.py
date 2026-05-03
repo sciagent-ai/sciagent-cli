@@ -126,6 +126,70 @@ def test_tail_logs_signature_matches_installed_sky():
     sig.bind_partial(name="sciagent-abc123", job_id=None, follow=False, tail=50)
 
 
+def test_get_logs_prefers_int_managed_job_id_when_provided():
+    """When the caller has the integer Sky-side job id, get_logs must call
+    tail_logs(job_id=<int>, name=None) — not tail_logs(name=<str>). Sky's
+    name lookup only resolves non-terminal jobs, so a FAILED job's logs are
+    only retrievable via the int form. Passing the int through avoids the
+    'No running managed job found' sentinel that bg_wait used to surface as
+    the user's error preview."""
+    mock_sky = MagicMock()
+
+    captured = {}
+
+    def _stub_tail_logs(name=None, job_id=None, follow=False, tail=None,
+                       output_stream=None, **kwargs):
+        captured["name"] = name
+        captured["job_id"] = job_id
+        if output_stream is not None:
+            output_stream.write("real error: container exited 1\n")
+        return 0
+
+    mock_sky.jobs.tail_logs.side_effect = _stub_tail_logs
+
+    backend = _make_backend_with_mock_sky(mock_sky)
+    out = backend.get_logs("sciagent-abc123", tail=50, managed_job_id=42)
+
+    assert captured["name"] is None, (
+        "When the int is in hand, name must be None — name= only resolves "
+        "non-terminal jobs and would return Sky's 'not found' sentinel for "
+        "any FAILED job."
+    )
+    assert captured["job_id"] == 42
+    assert "real error" in out
+
+
+def test_get_logs_filters_sky_nonterminal_name_sentinel():
+    """If Sky returns the 'No running managed job found with name X' string
+    (server-side sentinel for terminal jobs queried by name), get_logs must
+    treat it as 'no logs' rather than passing it through. Otherwise
+    _extract_error_line matches the 'not found' keyword and the sentinel
+    gets surfaced as the user's error — the original bg_wait-lying bug."""
+    mock_sky = MagicMock()
+
+    def _stub_tail_logs(name=None, job_id=None, follow=False, tail=None,
+                       output_stream=None, **kwargs):
+        if output_stream is not None:
+            output_stream.write(
+                "No running managed job found with name 'sciagent-abc123'.\n"
+            )
+        return 0
+
+    mock_sky.jobs.tail_logs.side_effect = _stub_tail_logs
+    # Empty queue → no int recoverable → falls back to name lookup, which
+    # is the path that produces the sentinel.
+    mock_sky.jobs.queue_v2.return_value = "rid"
+    mock_sky.stream_and_get.return_value = ([], 0, {}, 0)
+
+    backend = _make_backend_with_mock_sky(mock_sky)
+    out = backend.get_logs("sciagent-abc123", tail=50)
+
+    assert out == "", (
+        "Sky's non-terminal-name sentinel must be filtered to empty, not "
+        "returned as logs."
+    )
+
+
 # ---- status / failure recovery -------------------------------------------
 
 

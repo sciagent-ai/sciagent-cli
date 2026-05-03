@@ -40,6 +40,39 @@ _WATCHED_PATTERN = re.compile(
 )
 
 
+# Probe-shape heuristic: command tokens that strongly suggest the agent
+# is doing a quick diagnostic check (env query, file listing, binary
+# resolution) rather than running a real workload. Used to nudge toward
+# mode="cluster" — every probe via mode="job" burns a 3-5 min cluster
+# cycle. Conservative on purpose: false positives mean an unwarranted
+# hint, not behavior change. Matches the FIRST shell token only so a
+# real workload like `python -c "echo bla"` doesn't trip it.
+_PROBE_TOKENS: frozenset = frozenset({
+    "echo", "which", "whereis", "ls", "pwd", "find", "cat", "head",
+    "tail", "env", "printenv", "whoami", "id", "uname", "df", "du",
+    "wc", "stat", "file", "type", "command",
+})
+
+
+def _looks_like_probe(command: str) -> bool:
+    """Heuristic: True when the command's first non-trivial token is a
+    diagnostic probe (echo, which, ls, etc.) and the overall command is
+    short. Returns False on any uncertainty so we never nudge a real
+    workload. Visibility-only; never gates execution."""
+    if not command or len(command) > 400:
+        return False
+    # Strip leading shell preamble (set -e, export FOO=bar, etc.) so we
+    # look at the actual work-shaped first token.
+    text = command.strip()
+    # Take everything up to the first separator (&&, ||, ;, |, newline)
+    # — the user's "real" command. Probes don't usually chain.
+    head = re.split(r"&&|\|\||;|\n|\|", text, maxsplit=1)[0].strip()
+    if not head:
+        return False
+    first_tok = head.split()[0] if head.split() else ""
+    return first_tok in _PROBE_TOKENS
+
+
 @dataclass
 class ToolResult:
     """Result from tool execution."""
@@ -130,49 +163,30 @@ class ComputeTool:
 
     name = "compute_run"
     description = """Run a compute job in a container. Background by default.
+Use EITHER `service` (from registry; see service_search) OR `image`.
 
-Use EITHER service (from registry) OR image (direct Docker image).
+Path contract (image-agnostic):
+  - Inputs: `workspace_source=` mounts a bucket/dir at /workspace/
+    (single string) or any path (list of {path, source}). Cloud-agnostic
+    (s3/gs/az/r2/oci).
+  - Outputs: write to $OUTPUTS_DIR (= /outputs/<job_id>/). Auto-fetched
+    by bg_wait on terminal status. Cross-job reads: /outputs/<other-job-id>/.
+  - Anything outside $OUTPUTS_DIR is scratch (vanishes at teardown).
+  - `workdir=<local>` rsyncs to ~/sky_workdir/ (don't reference that path).
 
-Path contract (image-agnostic, identical across every registry image):
-  - Inputs (read): pass workspace_source= to mount buckets/dirs.
-      Single source     -> "s3://bucket/prefix" (mounts at /workspace/)
-      Multi-source      -> [{"path": "/workspace", "source": "s3://q/"},
-                            {"path": "/data/nr",  "source": "gs://nr/"}]
-      Any cloud SkyPilot supports works (s3, gs, az, r2, oci) — the
-      agent never has to pick or hardcode.
-  - Outputs (write): write to $OUTPUTS_DIR (= /outputs/<job_id>/) — always
-      mounted, always isolated by job, auto-fetched by bg_wait on terminal
-      status. Cross-job reads in the same session: /outputs/<other-job-id>/.
-  - Local code: pass workdir=<path> to rsync a local dir to the cluster.
-      CWD becomes ~/sky_workdir/. Without this, no rsync — image's WORKDIR
-      is honored.
-  - Never reference ~/sky_workdir/ — it's internal SkyPilot.
+Modes (Sky's two execution surfaces):
+  - mode="job" (default): managed-jobs. Sky owns lifecycle. One-shot batch.
+  - mode="cluster": persistent cluster + autostop. Idempotent on
+    cluster_name. Iterate via compute_exec; manage via compute_cluster.
 
-CWD precedence: input mount > workdir= rsync target > image WORKDIR.
-The compute layer never invents a CWD.
+Honor user intent on backend: "on sky" → backend="skypilot"; "locally" →
+"local". Only use "auto" when unspecified.
 
-Honor user intent on backend: if the user named a target ("on sky", "on
-skypilot", "in the cloud", "on AWS"), pass backend="skypilot" explicitly —
-do NOT leave it as "auto" and hope the router picks cloud. Same the other
-way: "run locally" / "use Docker" → backend="local". Only fall back to
-"auto" when the user didn't specify.
+For sky work prefer delegating to the `compute` subagent — it carries the
+full path-contract guidance and bounds compute chatter to its own context.
 
-Examples:
-  compute_run(service="scipy-base", command="python3 -c 'print(1+1)'")
-  compute_run(service="openfoam", workspace_source="/local/case",
-              command="bash Allrun && cp -r postProcessing $OUTPUTS_DIR/")
-  compute_run(service="scipy-base",
-              workspace_source=[{"path":"/workspace","source":"s3://q/"},
-                                {"path":"/data/nr","source":"gs://nr/"}],
-              command="blastn -query query.fa -db /data/nr/nr -out $OUTPUTS_DIR/hits.txt",
-              backend="skypilot")
-
-Returns job_id. Check status with bg_status(job_id).
-For long jobs, use bg_wait(job_id) to block until complete.
-
-For skypilot jobs, bg_wait auto-pulls /outputs/<job_id>/ from the cloud
-to your local working dir on success — the file paths come back in
-bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
+Returns job_id. Check status with bg_status(job_id); bg_wait(job_id) blocks
+and auto-fetches /outputs/<job_id>/ to local on success."""
 
     parameters = {
         "type": "object",
@@ -279,6 +293,45 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                     "Opaque list of expected output paths recorded in the manifest. "
                     "Used by downstream verification; never validated here."
                 )
+            },
+            "mode": {
+                "type": "string",
+                "enum": ["job", "cluster"],
+                "description": (
+                    "Execution model. 'job' (default): managed-jobs — Sky "
+                    "owns lifecycle, fresh cluster per call. Best for "
+                    "one-shot batch / scale-out. 'cluster': persistent "
+                    "cluster + autostop — idempotent on cluster_name, "
+                    "follow-ups via compute_exec run on the warm cluster "
+                    "in seconds. Best for iteration."
+                ),
+                "default": "job",
+            },
+            "cluster_name": {
+                "type": "string",
+                "description": (
+                    "mode='cluster' only. Persistent cluster identifier; "
+                    "passing the same name in subsequent compute_run / "
+                    "compute_exec calls reuses the warm cluster. Defaults "
+                    "to sciagent-<session_id>-i if omitted."
+                ),
+            },
+            "autostop_minutes": {
+                "type": "integer",
+                "description": (
+                    "mode='cluster' only. Idle minutes before Sky auto-"
+                    "stops the cluster. Reset on each new job submit. "
+                    "Default 30."
+                ),
+                "default": 30,
+            },
+            "autostop_hook": {
+                "type": "string",
+                "description": (
+                    "mode='cluster' only. Optional shell snippet that "
+                    "runs on the cluster before autostop fires (e.g., to "
+                    "flush /scratch to S3 before teardown)."
+                ),
             },
         },
         "required": ["command"]
@@ -454,6 +507,10 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
         intent: Dict[str, Any] = None,
         expected_artifacts: list = None,
         timeout_sec: int = None,
+        mode: str = "job",
+        cluster_name: Optional[str] = None,
+        autostop_minutes: int = 30,
+        autostop_hook: Optional[str] = None,
     ) -> ToolResult:
         """Execute compute job.
 
@@ -721,14 +778,97 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                         output["gpu_note"] = f"Service '{service}' benefits from GPU (5-13x speedup). Add gpus=1 for better performance."
                 return ToolResult(success=True, output=output)
 
-            # Run the job. A LaunchError surfaced from the backend's fail-fast
-            # poll (B4) means Sky rejected the launch outright — return a
-            # structured failure now instead of letting the agent burn a
-            # 10-min status-poll loop. We call the selected backend directly
-            # (not router.run) so SkyPilotBackend's tuple return — which
-            # carries the integer managed_job_id when the controller
-            # acknowledged the launch inside the fail-fast budget — flows
-            # into the manifest write.
+            # Mode dispatch (Sky's two execution surfaces):
+            #   - "job"     → managed-jobs (sky.jobs.launch). Sky owns
+            #                 lifecycle, fresh cluster per call. Default.
+            #   - "cluster" → persistent cluster (sky.launch + autostop).
+            #                 Idempotent on cluster_name; second call with
+            #                 the same name reuses the warm cluster.
+            # Cluster mode requires SkyPilot backend; reject auto / local.
+            if mode == "cluster":
+                if selected_backend.name != "skypilot":
+                    return ToolResult(
+                        success=False,
+                        output={
+                            "mode": "cluster",
+                            "selected_backend": selected_backend.name,
+                            "failure_type": "mode_backend_mismatch",
+                        },
+                        error=(
+                            "mode='cluster' requires backend='skypilot'. "
+                            "Cluster mode is a SkyPilot concept and has no "
+                            "local-Docker analogue."
+                        ),
+                    )
+                resolved_cluster_name = (
+                    cluster_name
+                    or f"sciagent-{actual_session_id or 'session'}-i"
+                )
+                try:
+                    cluster, cluster_job_id = router.launch_cluster(
+                        job=job,
+                        cluster_name=resolved_cluster_name,
+                        autostop_minutes=autostop_minutes,
+                        autostop_hook=autostop_hook,
+                    )
+                except LaunchError as launch_exc:
+                    rejected_output = {
+                        "service": service,
+                        "image": resolved_image,
+                        "command": command[:100],
+                        "mode": "cluster",
+                        "cluster_name": resolved_cluster_name,
+                        "failure_type": "launch_rejected",
+                        "request_id": getattr(launch_exc, "request_id", None),
+                        "next_step": (
+                            f"Run `sky api logs {launch_exc.request_id}` via "
+                            f"bash to see the actual rejection reason "
+                            f"(image pull failure, capacity, auth, etc.)."
+                            if getattr(launch_exc, "request_id", None)
+                            else "Check `sky check` for cloud credentials."
+                        ),
+                    }
+                    return ToolResult(
+                        success=False,
+                        output=rejected_output,
+                        error=f"sky.launch rejected: {launch_exc}",
+                    )
+
+                output = {
+                    "cluster_name": cluster,
+                    "cluster_job_id": cluster_job_id,
+                    "status": "running",
+                    "backend": "skypilot",
+                    "mode": "cluster",
+                    "autostop_minutes": autostop_minutes,
+                    "routing_reason": routing_reason,
+                    "cost_estimate": cost_estimate,
+                    "image": resolved_image,
+                    "resources_used": {
+                        "cpus": cpus,
+                        "memory_gb": memory_gb,
+                        "gpus": gpus,
+                    },
+                    "message": (
+                        f"Cluster {cluster} launched (or reused if UP); "
+                        f"per-cluster job_id {cluster_job_id}. Subsequent "
+                        f"follow-ups: compute_exec(cluster_name='{cluster}', "
+                        f"command=...). Status: compute_cluster("
+                        f"action='status', cluster_name='{cluster}'). "
+                        f"Down: compute_cluster(action='down', "
+                        f"cluster_name='{cluster}')."
+                    ),
+                }
+                return ToolResult(success=True, output=output)
+
+            # Run the job (managed-jobs mode). A LaunchError surfaced from
+            # the backend's fail-fast poll (B4) means Sky rejected the
+            # launch outright — return a structured failure now instead of
+            # letting the agent burn a 10-min status-poll loop. We call
+            # the selected backend directly (not router.run) so
+            # SkyPilotBackend's tuple return — which carries the integer
+            # managed_job_id when the controller acknowledged the launch
+            # inside the fail-fast budget — flows into the manifest write.
             managed_job_id: Optional[int] = None
             try:
                 run_result = selected_backend.run(job, background=background)
@@ -737,12 +877,30 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                 # backend; propagate it so callers (and our paid AWS tests)
                 # can clean up a partially-provisioned cluster instead of
                 # leaving it billing on the cloud.
+                #
+                # request_id is the Sky-side handle for the rejected request.
+                # When the auto log-tail fetch in _await_launch_or_fail came
+                # back empty (sky api logs takes a moment to populate; or
+                # the CLI isn't on PATH from the python process), the agent
+                # can still recover the actual cause by running the
+                # next_step bash command. Surfacing both fields structurally
+                # — not just embedded in a truncated error string — means
+                # the agent doesn't have to parse a request_id out of the
+                # truncated display.
                 rejected_output = {
                     "service": service,
                     "image": resolved_image,
                     "command": command[:100],
                     "backend_attempted": backend,
                     "failure_type": "launch_rejected",
+                    "request_id": getattr(launch_exc, "request_id", None),
+                    "next_step": (
+                        f"Run `sky api logs {launch_exc.request_id}` via "
+                        f"bash to see the actual rejection reason "
+                        f"(image pull failure, capacity, auth, etc.)."
+                        if getattr(launch_exc, "request_id", None)
+                        else "Check `sky check` for cloud credentials."
+                    ),
                 }
                 if launch_exc.cluster_name:
                     rejected_output["job_id"] = launch_exc.cluster_name
@@ -808,6 +966,27 @@ bg_wait's result. Don't launch extra cloud jobs to `cat` files back."""
                     },
                     "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
                 }
+                # Probe-shape nudge: when the agent is using mode="job"
+                # (managed-jobs default) on a command that looks like a
+                # diagnostic probe (echo / which / ls / pwd / find / cat
+                # / head / tail / env / printenv / whoami), point at
+                # mode="cluster" — each probe via mode="job" burns a
+                # fresh 3-5 min cluster cycle that mode="cluster" + a
+                # warm cluster + compute_exec would have done in seconds.
+                # Visibility-only; no auto-switch.
+                if (
+                    selected_backend.name == "skypilot"
+                    and mode == "job"
+                    and _looks_like_probe(command)
+                ):
+                    output["mode_hint"] = (
+                        "This command looks like a diagnostic probe. "
+                        "mode='cluster' + compute_exec would have run "
+                        "this in seconds instead of 3–5 min provisioning. "
+                        "If you'll iterate (probe → fix → retry), "
+                        "compute_run(mode='cluster', cluster_name='...') "
+                        "first, then compute_exec for follow-ups."
+                    )
                 # Add GPU hint if applicable
                 if gpu_hint == "gpu_beneficial":
                     output["gpu_hint"] = f"Service '{service}' benefits from GPU. Consider adding gpus=1 for 5-13x speedup."

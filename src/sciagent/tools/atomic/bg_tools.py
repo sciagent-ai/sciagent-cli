@@ -69,10 +69,18 @@ class BgStatusTool:
         try:
             from sciagent.compute.router import ComputeRouter
             from sciagent.compute.task_index import join_status, read_task
+            from sciagent.tools.registry import BaseTool
 
             router = ComputeRouter()
             try:
-                sky_result = router.get_status(job_id)
+                # Pre-flight: a Ctrl+C just before the sky RPC should
+                # skip it and fall back to the local manifest only,
+                # so the user gets immediate control back instead of
+                # waiting for an RPC we'd then ignore anyway.
+                if BaseTool.is_interrupted():
+                    sky_result = None
+                else:
+                    sky_result = router.get_status(job_id)
             except Exception:
                 sky_result = None
 
@@ -326,6 +334,17 @@ class BgOutputTool:
 
     def _get_compute_output(self, job_id: str, tail_lines: int = None) -> ToolResult:
         """Get logs from a compute/SkyPilot job."""
+        # Pre-flight: a Ctrl+C just before this call should cancel before
+        # the sky RPC. Once the RPC is in flight we can't preempt it
+        # cleanly — it owns the thread — so the best we can do is bail
+        # before submitting.
+        from sciagent.tools.registry import BaseTool
+        if BaseTool.is_interrupted():
+            return ToolResult(
+                success=True,
+                output=f"bg_output on {job_id} cancelled by user before fetch.",
+                error=None,
+            )
         try:
             from sciagent.compute.backends.skypilot import SkyPilotBackend
             backend = SkyPilotBackend()
@@ -336,7 +355,23 @@ class BgOutputTool:
                 error=None
             )
         except Exception as e:
-            return ToolResult(success=False, output=None, error=str(e))
+            # Include exception type + location so opaque errors like
+            # "string indices must be integers, not 'str'" are debuggable
+            # without re-running. tb_pretty is bounded to the last 5 frames
+            # so we don't blow up the agent's context with a 50-line stack.
+            import traceback as _tb
+            tb_lines = _tb.format_exception(type(e), e, e.__traceback__)
+            tail = "".join(tb_lines[-6:])
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    f"bg_output failed for {job_id}: "
+                    f"{type(e).__name__}: {e}\n\n"
+                    f"Traceback (last frames):\n{tail}\n"
+                    f"Fallback: `sky jobs logs {job_id}` via bash."
+                ),
+            )
 
     def execute(
         self,
@@ -428,6 +463,13 @@ class BgWaitTool:
         "/workspace/_outputs/ from the bucket to local; the file list is "
         "in the result."
     )
+
+    # Interrupt awareness comes from the BaseTool shared event (set by
+    # AgentLoop at startup). When the user hits Ctrl+C, the polling loop
+    # in _wait_compute_job bails with a structured "interrupted" result
+    # instead of holding the agent loop captive for the full timeout.
+    # Standalone callers (no AgentLoop) leave the event unset and the
+    # tool falls back to plain time.sleep.
 
     parameters = {
         "type": "object",
@@ -550,10 +592,29 @@ class BgWaitTool:
             # We thread a small loop here rather than recurse so a long
             # wait emits a single tool result, not nested ones.
             if block:
+                from sciagent.tools.registry import BaseTool
+
                 effective_timeout = timeout if timeout and timeout > 0 else self._BLOCK_DEFAULT_TIMEOUT_SEC
                 deadline = time.monotonic() + effective_timeout
+                interrupt = BaseTool._shared_interrupt_event
 
                 while True:
+                    # Bail before the next sky RPC if Ctrl+C already fired.
+                    # Returns a structured "interrupted" result so the agent
+                    # knows the wait was cancelled (vs. completed or timed
+                    # out) and can decide whether to bg_kill or re-check.
+                    if interrupt is not None and interrupt.is_set():
+                        return ToolResult(
+                            success=True,
+                            output=(
+                                f"bg_wait on {job_id} interrupted by user. "
+                                f"The cloud job is still running on Sky — use "
+                                f"bg_status('{job_id}') to check, or "
+                                f"bg_kill('{job_id}') to cancel it."
+                            ),
+                            error=None,
+                        )
+
                     result = router.get_status(job_id)
                     if result.status in (JobStatus.COMPLETED, JobStatus.FAILED, JobStatus.CANCELLED):
                         # PR1 (consolidation): the long-poll path observed a
@@ -577,12 +638,39 @@ class BgWaitTool:
                             ),
                             error=None,
                         )
-                    # Sleep up to the next interval, but never past the deadline.
+                    # Sleep up to the next interval, but never past the
+                    # deadline. Use Event.wait() instead of time.sleep()
+                    # when the interrupt event is plumbed in: wait()
+                    # returns True if the event is set, so a Ctrl+C wakes
+                    # the wait immediately and the next loop iteration
+                    # exits via the interrupt-check branch above.
                     sleep_for = min(self._BLOCK_POLL_INTERVAL_SEC, max(0.0, deadline - time.monotonic()))
                     if sleep_for > 0:
-                        time.sleep(sleep_for)
+                        if interrupt is not None:
+                            if interrupt.wait(sleep_for):
+                                # Loop back; the interrupt-check branch
+                                # at the top of the while will return.
+                                continue
+                        else:
+                            time.sleep(sleep_for)
                 # Fall through with the terminal `result`.
             else:
+                # Snapshot path: also honor an already-set interrupt so a
+                # user who hit Ctrl+C just before bg_wait was called gets
+                # immediate control back instead of one more sky RPC.
+                from sciagent.tools.registry import BaseTool
+
+                interrupt = BaseTool._shared_interrupt_event
+                if interrupt is not None and interrupt.is_set():
+                    return ToolResult(
+                        success=True,
+                        output=(
+                            f"bg_wait on {job_id} interrupted before "
+                            f"status query. Use bg_status('{job_id}') to "
+                            f"check, or bg_kill('{job_id}') to cancel."
+                        ),
+                        error=None,
+                    )
                 result = router.get_status(job_id)
 
             if result.status == JobStatus.COMPLETED:
@@ -600,7 +688,7 @@ class BgWaitTool:
                         job_id=job_id,
                         working_dir=self.working_dir,
                     )
-                    if fetched.get("ok"):
+                    if fetched.get("ok") and fetched.get("file_count", 0) > 0:
                         fetch_lines = [
                             "",
                             f"Fetched {fetched['file_count']} file(s) "
@@ -616,6 +704,24 @@ class BgWaitTool:
                             fetch_lines.append(
                                 f"  ... and {fetched['file_count'] - 20} more"
                             )
+                    elif fetched.get("ok"):
+                        # Sync succeeded but the bucket was empty. The job
+                        # finished without writing anything to $OUTPUTS_DIR.
+                        # Most common cause: the run command wrote to
+                        # /workspace, /tmp, or relative paths instead of
+                        # /outputs/<job_id>/. Be explicit about the fix
+                        # so the agent doesn't blame mounting / S3 / sky.
+                        fetch_lines = [
+                            "",
+                            "(no files in /outputs/<job_id>/ — job ran but "
+                            "didn't write outputs. Cause: the run command "
+                            "must `cp` results into $OUTPUTS_DIR (= "
+                            f"/outputs/{job_id}/) to be auto-fetched. "
+                            f"Anything written elsewhere on the cluster is "
+                            f"scratch and gone at teardown.)",
+                            f"Diagnose: `sky jobs logs {job_id}` to see "
+                            f"what the command actually did.",
+                        ]
                     else:
                         # Surface the reason but don't dramatize it.
                         fetch_lines = [
@@ -632,7 +738,7 @@ class BgWaitTool:
                         f"Status: {result.status.value}\n"
                         f"Summary: {result.summary}"
                         + "\n".join(fetch_lines)
-                        + f"\n\nUse 'sky logs {job_id}' to view full logs.\n"
+                        + f"\n\nUse 'sky jobs logs {job_id}' to view full logs.\n"
                         f"Use 'sky jobs cancel {job_id}' if you need to stop a follow-up."
                     ),
                     error=None,

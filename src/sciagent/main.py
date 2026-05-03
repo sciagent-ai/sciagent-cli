@@ -374,7 +374,17 @@ def main():
         temperature=args.temperature
     )
 
-    agent = AgentLoop(config=config, tools=tools, system_prompt=final_system_prompt)
+    # Main agent gets a trimmed view: compute_* tools are reachable only
+    # via the `compute` subagent (which has them in its allowed_tools).
+    # Keeps cloud chatter (install logs, status polls, large bg_output) out
+    # of the main agent's context per the subagent.py:380-388 rationale.
+    # The orchestrator/subagents still see the full registry — they filter
+    # via allowed_tools at SubAgent construction time.
+    main_tools = tools.clone(
+        exclude={"compute_run", "compute_exec", "compute_cluster"}
+    )
+
+    agent = AgentLoop(config=config, tools=main_tools, system_prompt=final_system_prompt)
 
     # Connect parent's interrupt event to orchestrator for subagent cancellation
     orchestrator.parent_interrupt_event = agent._interrupt_event

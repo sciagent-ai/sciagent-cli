@@ -158,8 +158,16 @@ class AgentLoop:
         self._interrupt_event = threading.Event()  # Signals blocking ops to check
         self._menu_lock = threading.Lock()  # Prevents multiple menus
         self._menu_shown = False  # Track if menu is currently displayed
-        self._interrupt_count = 0  # Track rapid Ctrl+C presses
         self._parent_interrupt_event = None  # Set by parent for subagents
+
+        # Plumb the agent's interrupt event into all tools (BaseTool
+        # contract) so any tool that blocks on a poll loop, subprocess,
+        # or RPC can wake on Ctrl+C instead of holding the agent hostage
+        # until the next tick or RPC timeout. Without this, a single
+        # Ctrl+C wouldn't reach the user-facing pause menu until the
+        # blocking tool decided to return on its own.
+        from .tools.registry import BaseTool
+        BaseTool.set_shared_interrupt_event(self._interrupt_event)
 
     # =========================================================================
     # Interrupt Handling
@@ -168,20 +176,15 @@ class AgentLoop:
     def _handle_interrupt(self, signum, frame):
         """Handle Ctrl+C with immediate menu display.
 
-        Uses threading to show menu immediately without waiting for
-        blocking operations to complete. This provides responsive UX.
+        One press is enough now. The interrupt event is plumbed into all
+        blocking tools (bg_wait, task_wait, SkyPilot fail-fast budget),
+        so a Ctrl+C wakes them within milliseconds and the menu appears
+        right away. Pressing 's' (or Ctrl+C again inside the menu prompt)
+        stops cleanly. The previous 3x-Ctrl+C escape hatch was a
+        workaround for unresponsive blocking tools — no longer needed.
         """
-        self._interrupt_count += 1
         self._paused = True
         self._interrupt_event.set()  # Signal any blocking waits
-
-        # Force stop on 3 rapid interrupts (escape hatch)
-        if self._interrupt_count >= 3:
-            print("\n\n🛑 Force stopping...")
-            self._cancelled = True
-            # Restore original handler and re-raise to actually exit
-            self._restore_interrupt_handler()
-            raise KeyboardInterrupt("Force stopped by user (3x Ctrl+C)")
 
         # Show menu immediately in a thread (non-blocking)
         if not self._menu_shown:
@@ -201,7 +204,6 @@ class AgentLoop:
         finally:
             with self._menu_lock:
                 self._menu_shown = False
-                self._interrupt_count = 0  # Reset after menu handled
 
     def _handle_pause_menu(self):
         """Display pause menu and get user choice."""
@@ -377,7 +379,6 @@ class AgentLoop:
         """
         self._interrupt_event.clear()
         self._menu_shown = False
-        self._interrupt_count = 0
         # Only install signal handler if we're the top-level agent
         if self._parent_interrupt_event is None:
             signal.signal(signal.SIGINT, self._handle_interrupt)

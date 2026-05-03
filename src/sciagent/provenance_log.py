@@ -261,15 +261,41 @@ class ProvenanceLog:
         requirements: Dict[str, Any],
         intent: Optional[Dict[str, Any]],
         expected_artifacts: Optional[List[str]],
+        mode: str = "managed_jobs",
+        cluster_name: Optional[str] = None,
+        cluster_job_id: Optional[int] = None,
     ) -> str:
         """Emit a compute_job_launched event after a successful launch.
 
         intent and expected_artifacts are recorded verbatim per v4.2 §C6 —
         the writer never validates or normalizes their shape.
+
+        ``mode`` discriminates between Sky's two execution surfaces so a
+        verifier reading the log later can tell what kind of integer is
+        in ``managed_job_id``:
+          - "managed_jobs" (default): managed-jobs path. ``managed_job_id``
+            is Sky's controller-assigned int. ``job_id`` is the cluster
+            name (one cluster per job in this mode).
+          - "cluster_launch": cluster-mode initial provision via sky.launch.
+            ``job_id`` is the cluster_name; ``cluster_job_id`` is the
+            per-cluster int (1 for the first job).
+          - "cluster_exec": follow-up via sky.exec on a warm cluster.
+            ``job_id`` is the cluster_name; ``cluster_job_id`` is the
+            per-cluster int for THIS exec invocation.
+          - "cluster_refresh_mounts": sky.launch(no_setup=True) for mount
+            re-sync on a warm cluster.
+
+        ``managed_job_id`` is duplicated into ``cluster_job_id`` for the
+        cluster_* modes so existing readers keying off ``managed_job_id``
+        keep working; new readers should prefer ``cluster_job_id`` when
+        ``mode != "managed_jobs"``.
         """
         body = {
             "job_id": job_id,
             "managed_job_id": managed_job_id,
+            "mode": mode,
+            "cluster_name": cluster_name,
+            "cluster_job_id": cluster_job_id,
             "backend": backend,
             "service": service,
             "image": image,
@@ -283,6 +309,37 @@ class ProvenanceLog:
         }
         self._launched_at[job_id] = time.monotonic()
         return self._write_event("compute_job_launched", body)
+
+    def emit_compute_cluster_down(
+        self,
+        *,
+        cluster_name: str,
+        graceful: bool,
+        success: bool,
+        reason: Optional[str] = None,
+    ) -> str:
+        """Emit a compute_cluster_down event when a persistent cluster is
+        torn down via sky.down (or fails to tear down).
+
+        Lifecycle visibility for paid cloud work — without this, "when did
+        this cluster die" is unanswerable from the log alone. Recorded
+        whether the down call succeeded or not so an audit can see attempted
+        teardowns even if Sky rejected the call.
+
+        Args:
+            cluster_name: The cluster identifier passed to sky.down.
+            graceful: Whether sky.down was called with graceful=True.
+            success: True if sky.down returned normally, False on error.
+            reason: Optional one-line context (e.g., "user requested",
+                "session end", "error: <msg>"). Free-form, not validated.
+        """
+        body = {
+            "cluster_name": cluster_name,
+            "graceful": graceful,
+            "success": success,
+            "reason": reason,
+        }
+        return self._write_event("compute_cluster_down", body)
 
     def emit_compute_job_status_changed(
         self,

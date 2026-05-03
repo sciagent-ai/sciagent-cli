@@ -179,3 +179,111 @@ class ComputeRouter:
             return self._backends["skypilot"].cleanup(job_id)
         # Local jobs don't need cleanup (containers are --rm)
         return True
+
+    # ------------------------------------------------------------------
+    # Cluster-mode pass-throughs (sky.launch + sky.exec).
+    #
+    # These delegate to the SkyPilot backend; cluster mode is a SkyPilot
+    # concept and has no local-Docker analogue. Callers that try to use
+    # them without SkyPilot get a clear error rather than a silent fallback.
+    # ------------------------------------------------------------------
+
+    def _require_skypilot(self) -> Any:
+        if "skypilot" not in self._backends:
+            available = list(self._backends.keys())
+            raise RuntimeError(
+                f"Cluster-mode operations require SkyPilot. "
+                f"Available backends: {available}. "
+                f"Install with: pip install 'skypilot[aws]' and configure credentials."
+            )
+        return self._backends["skypilot"]
+
+    def launch_cluster(
+        self,
+        job: Job,
+        cluster_name: str,
+        autostop_minutes: int = 30,
+        autostop_hook: Optional[str] = None,
+        wait_for: str = "jobs",
+    ) -> Tuple[str, Optional[int]]:
+        """Provision (or reuse) a persistent cluster and run ``job``."""
+        return self._require_skypilot().launch_cluster(
+            cluster_name=cluster_name,
+            job=job,
+            autostop_minutes=autostop_minutes,
+            autostop_hook=autostop_hook,
+            wait_for=wait_for,
+        )
+
+    def exec_on_cluster(
+        self,
+        job: Job,
+        cluster_name: str,
+    ) -> Tuple[str, Optional[int]]:
+        """Run ``job`` as a follow-up on an existing UP cluster."""
+        return self._require_skypilot().exec_on_cluster(
+            cluster_name=cluster_name,
+            job=job,
+        )
+
+    def refresh_cluster_mounts(
+        self,
+        job: Job,
+        cluster_name: str,
+    ) -> Tuple[str, Optional[int]]:
+        """Re-sync file_mounts on an existing cluster (sky --no-setup)."""
+        return self._require_skypilot().refresh_cluster_mounts(
+            cluster_name=cluster_name,
+            job=job,
+        )
+
+    def cluster_status(self, cluster_name: str) -> Dict[str, Any]:
+        """Return Sky's cluster status enriched with sciagent's manifest."""
+        return self._require_skypilot().cluster_status(cluster_name)
+
+    def wait_cluster_up(
+        self,
+        cluster_name: str,
+        timeout: float = 300.0,
+        poll_interval: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Block until cluster reaches UP, terminal-bad, or timeout."""
+        return self._require_skypilot().wait_cluster_up(
+            cluster_name=cluster_name,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def wait_cluster_job(
+        self,
+        cluster_name: str,
+        cluster_job_id: int,
+        timeout: float = 1800.0,
+        poll_interval: float = 10.0,
+    ) -> Dict[str, Any]:
+        """Block until a per-cluster job reaches terminal state."""
+        return self._require_skypilot().wait_cluster_job(
+            cluster_name=cluster_name,
+            cluster_job_id=cluster_job_id,
+            timeout=timeout,
+            poll_interval=poll_interval,
+        )
+
+    def cluster_down(self, cluster_name: str, graceful: bool = True) -> bool:
+        """Tear down a cluster (graceful by default)."""
+        return self._require_skypilot().cluster_down(cluster_name, graceful=graceful)
+
+    def set_cluster_autostop(
+        self,
+        cluster_name: str,
+        idle_minutes: int,
+        wait_for: str = "jobs",
+        hook: Optional[str] = None,
+    ) -> bool:
+        """Apply autostop config (idle minutes, wait_for, hook) to a cluster."""
+        return self._require_skypilot()._set_cluster_autostop(
+            cluster_name=cluster_name,
+            idle_minutes=idle_minutes,
+            wait_for=wait_for,
+            hook=hook,
+        )

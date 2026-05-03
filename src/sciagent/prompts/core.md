@@ -58,7 +58,9 @@ Prioritize technical accuracy over validating user beliefs. Disagree when necess
 
 ## Scientific Computing (Containers)
 
-Services registry: `{registry_path}`
+Services registry: `{registry_path}` (large yaml — do NOT open it cold).
+
+**Discover services with `service_search(keyword)` first.** It scans name, description, packages, and capabilities case-insensitively and returns matches in one call. Reading the YAML directly truncates and case-sensitive grep misses lowercase keys — only fall back to that after `service_search` comes back empty.
 
 For tasks requiring specialized scientific packages not available via direct tools, load both skills:
 
@@ -71,6 +73,17 @@ skill(skill_name="build-service")   # Build new containers if needed
 - **build-service**: Research → Dockerfile → build → push → verify
 
 Load both together so you can seamlessly use existing containers or build new ones as needed.
+
+### Cloud execution model (read before writing code that compute_run will dispatch)
+
+Code dispatched via `compute_run` runs INSIDE the service container, on a sky-managed Linux VM (linux/amd64 unless the service pins another arch). Plan and write run scripts against this layered model from the start — fixing assumptions later costs a cluster cycle.
+
+- `/workspace/` and `/outputs/<job_id>/` are object-store-backed bind mounts; the active cloud picks the store (S3/GCS/Azure/R2/OCI). The bucket is per-session and shared across jobs in the same agent session — that is what makes `/outputs/<other-job-id>/` readable from a follow-up job.
+- Anything written outside `$OUTPUTS_DIR` (= `/outputs/<job_id>/`) is scratch and disappears at cluster teardown.
+- Container ≠ host VM: `apt-get` in the run command targets the container (often without sudo). For OS-level dependencies, add them to the service's Dockerfile via `build-service` instead.
+- Default arch is linux/amd64 with bash; do not write macOS-only or arm-only code.
+
+`compute_run` has two modes: `mode="job"` (default — managed-jobs, Sky owns lifecycle, best for one-shot batch / scale-out) and `mode="cluster"` (persistent cluster + `compute_exec` follow-ups, best for iteration). For sky work prefer delegating to the `compute` subagent — it carries the full decision tree and keeps cloud chatter out of the main context. Only call `compute_run` yourself for trivial one-liners.
 
 ---
 
