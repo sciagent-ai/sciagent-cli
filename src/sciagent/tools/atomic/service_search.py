@@ -175,3 +175,96 @@ class ServiceSearchTool(BaseTool):
                 "registry_path": self._registry_path,
             },
         )
+
+
+class ServiceDetailTool(BaseTool):
+    name = "service_detail"
+    description = (
+        "Return the full registry entry for ONE service by name. Use this "
+        "after `service_search` has identified the right service and you "
+        "need fields it doesn't surface — full capabilities list, examples, "
+        "outputs/post_processing contracts, resources, dockerfile reference. "
+        "Avoids reading registry.yaml directly (which file_ops truncates "
+        "past 200 lines)."
+    )
+
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {
+                "type": "string",
+                "description": "Exact service name (case-sensitive registry key).",
+            },
+        },
+        "required": ["name"],
+    }
+
+    _NAME_ALIASES = ("name", "service", "service_name")
+
+    def __init__(self, registry_path: Optional[str] = None):
+        if registry_path is None:
+            registry_path = str(
+                Path(__file__).parent.parent.parent / "services" / "registry.yaml"
+            )
+        self._registry_path = registry_path
+
+    def _load(self) -> Dict[str, Any]:
+        path = Path(self._registry_path)
+        if not path.exists():
+            return {}
+        try:
+            with open(path) as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            return {}
+
+    def execute(self, name: str = "", **kwargs) -> ToolResult:
+        if not name:
+            for alias in self._NAME_ALIASES[1:]:
+                value = kwargs.get(alias)
+                if isinstance(value, str) and value.strip():
+                    name = value
+                    break
+        if not isinstance(name, str) or not name.strip():
+            return ToolResult(
+                success=False,
+                output=None,
+                error="name (service name) is required.",
+            )
+        name = name.strip()
+
+        registry = self._load()
+        services = registry.get("services") or {}
+        if not services:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=f"No services found in registry at {self._registry_path}.",
+            )
+
+        entry = services.get(name)
+        if entry is None:
+            close = [
+                n for n in services.keys()
+                if isinstance(n, str) and name.lower() in n.lower()
+            ]
+            return ToolResult(
+                success=False,
+                output={"name": name, "did_you_mean": close[:5]},
+                error=(
+                    f"Service '{name}' not found in registry. "
+                    f"Try service_search for fuzzy lookup."
+                ),
+            )
+
+        # Surface the full entry. Fields are passed through as-is so any
+        # registry additions (outputs, post_processing, etc.) flow without
+        # tool changes.
+        return ToolResult(
+            success=True,
+            output={
+                "name": name,
+                "entry": entry,
+                "registry_path": self._registry_path,
+            },
+        )

@@ -324,7 +324,8 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.compute import ComputeTool
     from .atomic.compute_exec import ComputeExecTool
     from .atomic.compute_cluster import ComputeClusterTool
-    from .atomic.service_search import ServiceSearchTool
+    from .atomic.materialize import MaterializeTool
+    from .atomic.service_search import ServiceSearchTool, ServiceDetailTool
     from .atomic.monitor import MonitorTool, MonitorStopTool
 
     registry = ToolRegistry()
@@ -361,11 +362,13 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     # iteration.
     registry.register(ComputeExecTool(working_dir))
     registry.register(ComputeClusterTool(working_dir))
+    registry.register(MaterializeTool(working_dir))
 
     # Service registry discovery — keyword search across name, description,
     # packages, and capabilities. Cheaper than reading registry.yaml (which
     # file_ops truncates) and tolerant of case mismatch.
     registry.register(ServiceSearchTool())
+    registry.register(ServiceDetailTool())
 
     # Background monitors — push-style stdout-line events. Pairs with the
     # wait_until tools (Phase 1): wait_* blocks on ONE thing in one tool

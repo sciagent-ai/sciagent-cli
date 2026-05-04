@@ -1785,6 +1785,66 @@ class SkyPilotBackend:
             delete_cluster(cluster_name)
         return success
 
+    def cluster_stop(self, cluster_name: str) -> bool:
+        """Non-destructive stop: preserves cluster definition + disk so the
+        next ``cluster_start`` is fast and the data tier (mounted storage)
+        survives untouched. Prefer this over ``cluster_down`` as the
+        end-of-task default. ``cluster_down`` actually destroys the
+        cluster and should be reserved for explicit cleanup.
+
+        Best-effort. Returns True on success, False on error.
+        """
+        from ..cluster_manifest import read_cluster
+
+        manifest = read_cluster(cluster_name)
+        session_id = (manifest or {}).get("session_id")
+
+        sky = self._get_sky()
+        success = True
+        reason: Optional[str] = None
+        try:
+            request_id = sky.stop(cluster_name)
+            sky.stream_and_get(request_id)
+        except Exception as exc:
+            success = False
+            reason = f"{type(exc).__name__}: {exc}"
+
+        # Provenance: stop is observable lifecycle just like down. The
+        # provenance log is the audit trail for "where did the cluster go,
+        # and was anything lost?"; both transitions belong there.
+        if session_id:
+            try:
+                log = get_provenance_log(session_id)
+                # Reuses the cluster_down emitter shape; verifiers branch
+                # on the kind field which is set by the emitter.
+                log.emit_compute_cluster_down(
+                    cluster_name=cluster_name,
+                    graceful=True,
+                    success=success,
+                    reason=reason or ("stopped (non-destructive)" if success else None),
+                )
+            except Exception:
+                pass
+
+        # Manifest is preserved on stop — the cluster can be restarted, and
+        # the manifest still describes it correctly.
+        return success
+
+    def cluster_start(self, cluster_name: str) -> bool:
+        """Restart a stopped cluster, reusing its disk and identity. Use
+        when a follow-up task can take advantage of the cached image, the
+        already-syncd inputs, or a previously-mounted scratch disk.
+
+        Best-effort. Returns True on success, False on error.
+        """
+        sky = self._get_sky()
+        try:
+            request_id = sky.start(cluster_name)
+            sky.stream_and_get(request_id)
+            return True
+        except Exception:
+            return False
+
     def _set_cluster_autostop(
         self,
         cluster_name: str,

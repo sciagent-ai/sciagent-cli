@@ -457,11 +457,14 @@ a <system-reminder> event on a subsequent turn, no LLM round-trip per
 event. Two patterns:
 
   - **Solo job + log tail (very common, do this for any cluster-mode
-    exec >30s).** Launch `monitor` on `sky logs -f <cluster> <job_id>`
-    BEFORE `wait_for_job`. If wait returns FAILED, the FATAL line is
-    already in your context — no race against autostop, no
-    `ClusterNotUpError` from a post-hoc `sky logs` call. Worked example:
-      monitor(command="sky logs -f my-cluster 2 2>&1 | grep --line-buffered -E 'End$|FATAL|ERROR|Killed|completed|failed'",
+    exec >30s).** Launch `monitor` on `sky logs <cluster> <job_id>`
+    BEFORE `wait_for_job`. (`sky logs` follows by default until the job
+    reaches a terminal state — do NOT pass `-f`; that flag does not
+    exist and the command exits immediately.) If wait returns FAILED,
+    the FATAL line is already in your context — no race against
+    autostop, no `ClusterNotUpError` from a post-hoc `sky logs` call.
+    Worked example:
+      monitor(command="sky logs my-cluster 2 2>&1 | grep --line-buffered -E 'End$|FATAL|ERROR|Killed|completed|failed'",
               description="exec 2 milestones")
       compute_cluster(action="wait_for_job", cluster_name="my-cluster", cluster_job_id=2, timeout=1800)
       # If FAILED → the matched lines are already streamed.
@@ -584,7 +587,7 @@ The most common failure modes and their first-look commands:
     tail_lines=200)` — it does the live fetch and falls back to an
     on-disk cache that `wait_cluster_job` populated at terminal status,
     so forensics works even after autostop. If you also launched a
-    `monitor` on `sky logs -f` before `wait_for_job` (see the monitor
+    `monitor` on `sky logs` before `wait_for_job` (see the monitor
     section above), the FATAL line is already in context.
   - **Repeat environmental failure with no clear cause:** stop retrying.
     Use `ask_user` (see "Asking the user" below). One question is
@@ -626,8 +629,14 @@ The iteration loop:
   3. compute_cluster(action="refresh_mounts", cluster_name,
                      workspace_source=...) to point a warm cluster at
        new input data without re-running setup.
-  4. compute_cluster(action="down", cluster_name) when done — or rely
-       on autostop (30 min idle by default).
+  4. compute_cluster(action="stop", cluster_name) when done — or rely
+       on autostop (30 min idle by default). `stop` preserves the
+       cluster + disk for fast restart; the persistent S3 mount keeps
+       outputs durable regardless. **Never use action="down" as the
+       end-of-task default** — `down` destroys the cluster and is for
+       explicit cleanup only (user asked you to clean up, or you've
+       been told quota policy demands it). `stop` is fast, cheap, and
+       the right end-of-task action 99% of the time.
 
 Hard rules for cluster mode:
   - Resources (instance type, GPUs, num_nodes, disk_size) are immutable
@@ -673,7 +682,8 @@ You have these primitives — pick the smallest set that solves the task:
   - `file_ops` — stage local files / case dirs the run will need.
   - `compute_run` — launch (`mode="cluster"` for iterative work, `mode="job"` for one-shot batch).
   - `compute_exec` — follow-ups on a warm cluster.
-  - `compute_cluster` — cluster lifecycle: `wait_until_up`, `wait_for_job`, `status`, `logs`, `refresh_mounts`, `autostop`, `down`.
+  - `compute_cluster` — cluster lifecycle: `wait_until_up`, `wait_for_job`, `status`, `logs`, `refresh_mounts`, `autostop`, `stop`/`start` (default end-of-task), `down` (destroy — explicit cleanup only).
+  - `materialize` — fetch a remote artifact (URI like `s3://bucket/path/` or a managed-jobs `job_id`) onto the local filesystem. Cloud-agnostic; replaces ad-hoc `aws s3 cp` / `gsutil` / `az storage` invocations. Use whenever you need to read or plot a file that lives in the data tier.
   - `bg_wait` — managed-jobs to terminal (auto-fetches `/outputs/<job_id>/`).
   - `monitor` / `monitor_stop` — live log tailing while a job runs.
   - `bash` + sky CLI — diagnosis and anything the wrappers don't cover.
@@ -683,7 +693,7 @@ You have these primitives — pick the smallest set that solves the task:
 Two common shapes:
 
   - **One-shot job.** `compute_run(..., backend="skypilot")` → `bg_wait(job_id, block=True)`. The wait auto-fetches `/outputs/<job_id>/` to local on terminal.
-  - **Iterate on a workspace** (case-file reproductions, multi-step pipelines, anything you'll probe before the real run). `compute_run(mode="cluster", cluster_name=..., backend="skypilot")` → `compute_exec(cluster_name, command)` for follow-ups → `compute_cluster(action="wait_for_job", ...)` for each → `compute_cluster(action="down", cluster_name=...)` (or rely on autostop) when done. `compute_cluster(action="refresh_mounts", ...)` re-syncs inputs without re-running setup.
+  - **Iterate on a workspace** (case-file reproductions, multi-step pipelines, anything you'll probe before the real run). `compute_run(mode="cluster", cluster_name=..., backend="skypilot")` → `compute_exec(cluster_name, command)` for follow-ups → `compute_cluster(action="wait_for_job", ...)` for each → `compute_cluster(action="stop", cluster_name=...)` (or rely on autostop) when done. `compute_cluster(action="refresh_mounts", ...)` re-syncs inputs without re-running setup. Reserve `action="down"` for explicit cleanup; `stop` is the default.
 
 Variations:
 
@@ -808,7 +818,7 @@ task.
 A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.
 
 If you bailed out due to environmental failure (sky misbehavior, image pull, auth, quota), include the diagnosis output (last 20 lines of `sky api logs <request_id>` or equivalent) and the request_id in the summary. The parent can decide whether to retry with different params, change region, or escalate to the user — but only with the actual error in hand. "(Stopped due to error)" with no specifics gives the parent zero signal and forces another round of debugging.""",
-            allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "service_search", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
+            allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             # 120 (matches main agent's default) — compute work routinely
             # involves probe → setup → mesh/data prep → run → post-process
             # → analyze, with debug iterations at each stage. 60 was a

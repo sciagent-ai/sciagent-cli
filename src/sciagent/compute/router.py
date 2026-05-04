@@ -289,8 +289,19 @@ class ComputeRouter:
         )
 
     def cluster_down(self, cluster_name: str, graceful: bool = True) -> bool:
-        """Tear down a cluster (graceful by default)."""
+        """Tear down a cluster (graceful by default). Destructive — for
+        end-of-task cleanup prefer ``cluster_stop`` so the disk and data
+        tier survive."""
         return self._require_skypilot().cluster_down(cluster_name, graceful=graceful)
+
+    def cluster_stop(self, cluster_name: str) -> bool:
+        """Non-destructive stop — preserves disk and identity for fast
+        restart. The default end-of-task action."""
+        return self._require_skypilot().cluster_stop(cluster_name)
+
+    def cluster_start(self, cluster_name: str) -> bool:
+        """Restart a previously stopped cluster, reusing its disk."""
+        return self._require_skypilot().cluster_start(cluster_name)
 
     def set_cluster_autostop(
         self,

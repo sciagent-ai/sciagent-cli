@@ -127,6 +127,18 @@ class AgentLoop:
         # gates can find the right log without taking session_id as a
         # constructor arg. Cleared on session change via load_session().
         set_active_session(self.state.session_id)
+
+        # Project snapshot: lets a verifier later distinguish "the agent
+        # produced this file" from "this file was here when the session
+        # started". Best-effort, never blocks session start.
+        try:
+            from .project_snapshot import write_session_snapshot
+            write_session_snapshot(
+                session_id=self.state.session_id,
+                project_dir=os.path.abspath(self.config.working_dir),
+            )
+        except Exception:
+            pass
         
         # Callbacks
         self._on_tool_start: Optional[Callable] = None

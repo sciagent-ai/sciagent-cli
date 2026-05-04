@@ -279,52 +279,97 @@ class LLMClient:
 
     def _call_with_retry(self, call_kwargs: Dict[str, Any], is_stream: bool = False):
         """
-        Execute LLM completion with retry logic for rate limit errors.
+        Execute LLM completion with retry logic for transient errors.
 
-        Uses exponential backoff: delay = base_delay * (2 ^ attempt)
+        Retries (with exponential backoff: ``base_delay * 2 ** attempt``):
+          - **Rate limits** — RateLimitError / 429 (provider-agnostic).
+          - **Transient server / connection failures** — InternalServerError
+            (5xx), APIConnectionError, ServiceUnavailableError, Timeout, and
+            "server disconnected" / "connection reset" patterns. These are
+            provider-side hiccups that frequently succeed on a single retry.
+
+        Provider-specific branching is avoided: we identify retryable errors
+        by litellm's exception class names (which are vendor-neutral) and
+        common substrings, never by which provider was called.
         """
         import re
 
+        # Independent budgets: rate-limit retries (configurable) +
+        # transient-error retries (capped at 1 — a hard outage should fail
+        # fast). Each error class only consumes its own budget.
+        transient_max_retries = 1
+        transient_attempts = 0
+        rate_limit_attempts = 0
+
         last_error = None
-        for attempt in range(self.max_retries + 1):
+        while True:
             try:
                 return completion(**call_kwargs)
             except Exception as e:
                 error_str = str(e)
                 error_type = type(e).__name__
+                error_lc = error_str.lower()
 
-                # Check if it's a rate limit error (works with litellm's RateLimitError)
                 is_rate_limit = (
-                    "RateLimitError" in error_type or
-                    "rate_limit" in error_str.lower() or
-                    "rate limit" in error_str.lower() or
-                    "429" in error_str
+                    "RateLimitError" in error_type
+                    or "rate_limit" in error_lc
+                    or "rate limit" in error_lc
+                    or "429" in error_str
                 )
 
-                if not is_rate_limit:
-                    # Not a rate limit error - don't retry
+                # Transient server/connection failures. litellm normalizes
+                # these across providers via its exception hierarchy:
+                #   InternalServerError, APIConnectionError, Timeout,
+                #   ServiceUnavailableError. Falling back to substring
+                #   matching covers wrappers/adapters that don't surface the
+                #   class cleanly (e.g., "AnthropicException - Server
+                #   disconnected without sending a response").
+                is_transient = (
+                    "InternalServerError" in error_type
+                    or "APIConnectionError" in error_type
+                    or "ServiceUnavailableError" in error_type
+                    or "Timeout" in error_type
+                    or "server disconnected" in error_lc
+                    or "connection reset" in error_lc
+                    or "connection aborted" in error_lc
+                    or " 502" in error_str or " 503" in error_str
+                    or " 504" in error_str or " 520" in error_str
+                )
+
+                if not is_rate_limit and not is_transient:
                     raise
 
                 last_error = e
 
-                if attempt >= self.max_retries:
-                    # Exhausted retries
+                if is_transient and not is_rate_limit:
+                    if transient_attempts >= transient_max_retries:
+                        raise
+                    transient_attempts += 1
+                    wait_time = self.retry_base_delay * (2 ** (transient_attempts - 1))
+                    print(
+                        f"⚠️  Transient LLM error ({error_type}). Retrying "
+                        f"in {wait_time:.1f}s ({transient_attempts}/"
+                        f"{transient_max_retries})..."
+                    )
+                    time.sleep(wait_time)
+                    continue
+
+                # Rate-limit branch.
+                if rate_limit_attempts >= self.max_retries:
                     raise
 
-                # Parse suggested wait time from error message if available
-                # e.g., "Please try again in 7.38s"
-                wait_time = self.retry_base_delay * (2 ** attempt)
+                wait_time = self.retry_base_delay * (2 ** rate_limit_attempts)
                 match = re.search(r"try again in ([\d.]+)s", error_str)
                 if match:
                     suggested_wait = float(match.group(1))
-                    wait_time = max(wait_time, suggested_wait + 0.5)  # Add buffer
+                    wait_time = max(wait_time, suggested_wait + 0.5)
 
-                print(f"⏳ Rate limit hit. Waiting {wait_time:.1f}s before retry ({attempt + 1}/{self.max_retries})...")
+                rate_limit_attempts += 1
+                print(
+                    f"⏳ Rate limit hit. Waiting {wait_time:.1f}s before "
+                    f"retry ({rate_limit_attempts}/{self.max_retries})..."
+                )
                 time.sleep(wait_time)
-
-        # Should not reach here, but just in case
-        if last_error:
-            raise last_error
 
     def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
         """

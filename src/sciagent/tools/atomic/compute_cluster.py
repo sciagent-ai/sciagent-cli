@@ -1,10 +1,16 @@
 """compute_cluster — lifecycle surface for persistent SkyPilot clusters.
 
-One tool, four actions, mapping 1-to-1 onto Sky's cluster-mode primitives:
+One tool, action-dispatched onto Sky's cluster-mode primitives:
 
   - ``action="status"``       → ``sky.status(cluster_names=[...])`` enriched
                                 with sciagent's local cluster manifest.
+  - ``action="stop"``         → ``sky.stop(cluster_name)``. Non-destructive:
+                                preserves disk + identity for fast restart.
+                                The default end-of-task action.
+  - ``action="start"``        → ``sky.start(cluster_name)``. Restart a
+                                previously stopped cluster, reusing its disk.
   - ``action="down"``         → ``sky.down(cluster_name, graceful=...)``.
+                                Destructive — for explicit cleanup only.
   - ``action="autostop"``     → ``sky.autostop(cluster_name, idle_minutes,
                                 wait_for, hook)``. Updates the autostop
                                 config on a running cluster.
@@ -14,10 +20,18 @@ One tool, four actions, mapping 1-to-1 onto Sky's cluster-mode primitives:
                                 Sky's canonical "iterate on data while
                                 reusing a cluster" pattern.
 
-Why a single tool with action-dispatch instead of four separate tools:
-the agent's tool-count budget matters more than the per-action surface,
-and these four are conceptually one surface (cluster lifecycle). Keeps
-the toolset compact.
+Why a single tool with action-dispatch instead of separate tools: the
+agent's tool-count budget matters more than the per-action surface, and
+these are conceptually one surface (cluster lifecycle). Keeps the
+toolset compact.
+
+Stop vs. down — choosing the right primitive: ``stop`` preserves the
+cluster's attached disk and the cluster name; you can ``start`` it again
+in seconds with the same identity, which is the right default when
+follow-up work might want to re-use the warm container. ``down``
+destroys the cluster (the persistent storage mount survives because it's
+S3-backed, but on-cluster scratch is gone). Use ``down`` only when the
+user explicitly asks for cleanup or a quota policy demands it.
 """
 
 from __future__ import annotations
@@ -40,7 +54,11 @@ class ComputeClusterTool(BaseTool):
         "reaches terminal state — cluster-mode equivalent of bg_wait. "
         "action='logs' returns the tail of a cluster-mode job's stdout, "
         "with on-disk cache fallback for post-autostop forensics. "
-        "action='down' tears the cluster down (graceful by default). "
+        "action='stop' preserves the cluster (non-destructive) so it can "
+        "be restarted; this is the DEFAULT end-of-task action. "
+        "action='start' restarts a stopped cluster reusing its disk. "
+        "action='down' DESTROYS the cluster — use only for explicit "
+        "cleanup, never as a default end-of-task. "
         "action='autostop' updates idle threshold / wait_for / hook. "
         "action='refresh_mounts' re-syncs file_mounts via sky launch "
         "--no-setup — Sky's canonical way to point a warm cluster at new "
@@ -54,8 +72,9 @@ class ComputeClusterTool(BaseTool):
             "action": {
                 "type": "string",
                 "enum": [
-                    "status", "down", "autostop", "refresh_mounts",
-                    "wait_until_up", "wait_for_job", "logs",
+                    "status", "stop", "start", "down", "autostop",
+                    "refresh_mounts", "wait_until_up", "wait_for_job",
+                    "logs",
                 ],
                 "description": "Lifecycle action to perform on the cluster.",
             },
@@ -187,17 +206,37 @@ class ComputeClusterTool(BaseTool):
                     cluster_name = value
                     break
 
-        if not action:
+        valid_actions = (
+            "status", "wait_until_up", "wait_for_job", "logs",
+            "stop", "start", "down", "autostop", "refresh_mounts",
+        )
+        if not isinstance(action, str) or not action:
             return ToolResult(
                 success=False,
                 output=None,
-                error="action is required (status, down, autostop, refresh_mounts).",
+                error=(
+                    f"action must be a non-empty string. Valid: "
+                    f"{', '.join(valid_actions)}. Got: {action!r}."
+                ),
             )
-        if not cluster_name:
+        if not isinstance(cluster_name, str) or not cluster_name:
             return ToolResult(
                 success=False,
                 output=None,
-                error="cluster_name is required.",
+                error=(
+                    f"cluster_name must be a non-empty string identifying "
+                    f"the cluster (e.g. 'datacenter-cfd'). Got: "
+                    f"{cluster_name!r}."
+                ),
+            )
+        if action not in valid_actions:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    f"Unknown action '{action}'. Valid: "
+                    f"{', '.join(valid_actions)}."
+                ),
             )
 
         try:
@@ -211,6 +250,10 @@ class ComputeClusterTool(BaseTool):
 
         if action == "status":
             return self._do_status(router, cluster_name)
+        if action == "stop":
+            return self._do_stop(router, cluster_name)
+        if action == "start":
+            return self._do_start(router, cluster_name)
         if action == "down":
             return self._do_down(router, cluster_name, graceful=graceful)
         if action == "autostop":
@@ -249,13 +292,11 @@ class ComputeClusterTool(BaseTool):
                 tail_lines=tail_lines,
             )
 
+        # Unreachable: action is validated against valid_actions above.
         return ToolResult(
             success=False,
             output=None,
-            error=(
-                f"Unknown action '{action}'. Valid: status, wait_until_up, "
-                f"wait_for_job, down, autostop, refresh_mounts, logs."
-            ),
+            error=f"Action '{action}' is not implemented.",
         )
 
     def _do_status(self, router, cluster_name: str) -> ToolResult:
@@ -274,6 +315,35 @@ class ComputeClusterTool(BaseTool):
             success=ok,
             output={"cluster_name": cluster_name, "down": ok, "graceful": graceful},
             error=None if ok else f"sky.down failed for {cluster_name}",
+        )
+
+    def _do_stop(self, router, cluster_name: str) -> ToolResult:
+        try:
+            ok = router.cluster_stop(cluster_name)
+        except RuntimeError as exc:
+            return ToolResult(success=False, output=None, error=str(exc))
+        return ToolResult(
+            success=ok,
+            output={
+                "cluster_name": cluster_name,
+                "stopped": ok,
+                "note": (
+                    "Cluster preserved; data tier (S3 mount) intact. Use "
+                    "action='start' to resume."
+                ),
+            },
+            error=None if ok else f"sky.stop failed for {cluster_name}",
+        )
+
+    def _do_start(self, router, cluster_name: str) -> ToolResult:
+        try:
+            ok = router.cluster_start(cluster_name)
+        except RuntimeError as exc:
+            return ToolResult(success=False, output=None, error=str(exc))
+        return ToolResult(
+            success=ok,
+            output={"cluster_name": cluster_name, "started": ok},
+            error=None if ok else f"sky.start failed for {cluster_name}",
         )
 
     def _do_autostop(
@@ -326,7 +396,9 @@ class ComputeClusterTool(BaseTool):
                 error=(
                     "action='refresh_mounts' requires command (the run "
                     "command after mounts re-sync). To just refresh mounts "
-                    "with no run, pass command='true'."
+                    "with no work payload, pass command='true'. To run an "
+                    "ad-hoc command on an already-mounted cluster without "
+                    "re-syncing inputs, use compute_exec instead."
                 ),
             )
         if service and image:
