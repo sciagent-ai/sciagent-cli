@@ -19,6 +19,7 @@ Load both sci-compute and build-service together for scientific work - this lets
 | Error investigation | debug | Stuck on an error, need root cause |
 | External documentation | research | Need info NOT in provided files |
 | Cloud compute jobs | compute | ANY "run on sky / on AWS / in the cloud" task — including the WRITING of run scripts, not just execution (see below) |
+| Analysis of compute outputs | analyze | Plotting, statistics, comparisons, surrogate fitting, design-space exploration. ANY "make X plot / fit Y surrogate / compare A vs B" against simulation outputs. Reads from the data tier, writes artifacts back with provenance. |
 | Complex planning | plan | Before implementing non-trivial features |
 
 ### Pattern
@@ -31,7 +32,21 @@ task(agent_name="explore", task="Map the authentication flow in this codebase")
 task(agent_name="compute", task="Visualize sine waves on sky and download results to project folder")
 -> Returns: status, job_id, list of local files, cost. The 100-line install
    chatter and intermediate status polls stay in the subagent's context.
+
+# User asks for analysis derived from a prior compute job
+task(agent_name="analyze", task="Reproduce Figure 3 (volume-density vs temperature KDE) from the buoyantBoussinesqSimpleFoam run on cluster `datacenter-cfd`. Outputs are in s3://...; manuscript is in CaseFiles/.")
+-> Returns: artifact manifest with derived_from URIs, lane chosen,
+   key numerical results. The analyze subagent decides whether to run
+   locally, on the warm compute cluster (start it if stopped), or on
+   a separate analysis cluster.
 ```
+
+### compute vs analyze — which subagent
+
+- **compute** produces primary data (runs the solver / model / scan).
+- **analyze** consumes data → result (plots, fits, stats, comparisons, surrogates).
+
+If the user's ask requires re-running the simulation, that's `compute`. If it's "do something with what we already produced," that's `analyze`. If both — ordinarily delegate compute first, then analyze; the data tier is shared, so analyze picks up where compute left off without re-fetching.
 
 ### Don't pre-write cloud-bound code in the main agent
 

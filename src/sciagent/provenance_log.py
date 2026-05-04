@@ -384,12 +384,26 @@ class ProvenanceLog:
         sha256: Optional[str] = None,
         content_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        derived_from: Optional[List[str]] = None,
+        generator: Optional[str] = None,
     ) -> str:
         """Emit an artifact_produced event.
 
         ``path`` is absolute (cluster-side for cluster artifacts, local
         otherwise). When ``mount_path`` is set, ``path_relative_to_mount``
         is derived for verifier convenience.
+
+        ``derived_from`` is the list of input URIs (s3://..., local paths,
+        cluster:// URIs) this artifact was derived from. When non-empty,
+        a verifier can confirm the artifact's claim is grounded in real
+        data the agent actually read; an empty/missing ``derived_from``
+        on a generated artifact (e.g., a .png) is the "fake plot"
+        signature — surface as UNVERIFIED in end-of-task summaries.
+
+        ``generator`` is a free-form description of what produced the
+        artifact (tool name, script path, a short identifier). Helps an
+        auditor trace the provenance chain back to a code surface, not
+        just an input list.
         """
         path_relative_to_mount: Optional[str] = None
         if mount_path and path.startswith(mount_path):
@@ -405,6 +419,8 @@ class ProvenanceLog:
             "sha256": sha256,
             "content_type": content_type,
             "metadata": metadata,
+            "derived_from": list(derived_from) if derived_from else [],
+            "generator": generator,
         }
         return self._write_event("artifact_produced", body)
 
@@ -548,3 +564,69 @@ def reset_provenance_logs() -> None:
     with _logs_lock:
         _logs_by_session.clear()
     _active_session_id = None
+
+
+def scan_unverified_artifacts(
+    session_id: str,
+    *,
+    base_dir: Optional[Path] = None,
+    extensions: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Return the artifacts in ``session_id``'s log that have no
+    ``derived_from`` inputs — the "fake plot" signature.
+
+    A generated artifact (PNG, CSV, JSON summary, model file) without
+    real input URIs in its provenance is suspicious: either the agent
+    forgot to record what produced it, or the artifact was synthesized
+    rather than computed from data. End-of-task summaries should surface
+    these as UNVERIFIED so the user can decide whether to trust them.
+
+    ``extensions`` defaults to common output formats — narrow or widen
+    by passing a custom list (e.g., ``[".png", ".pdf"]`` to focus on
+    plots).
+    """
+    if extensions is None:
+        extensions = [
+            ".png", ".jpg", ".jpeg", ".pdf", ".svg", ".html",
+            ".csv", ".json", ".npz", ".npy",
+            ".pkl", ".pt", ".joblib",
+        ]
+    ext_set = {e.lower().lstrip(".") for e in extensions}
+
+    log_path = (
+        Path(base_dir) if base_dir else Path.home() / ".sciagent" / "sessions"
+    ) / session_id / "provenance.jsonl"
+    if not log_path.exists():
+        return []
+
+    unverified: List[Dict[str, Any]] = []
+    try:
+        with open(log_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("event_kind") != "artifact_produced":
+                    continue
+                path = event.get("path") or ""
+                ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+                if ext not in ext_set:
+                    continue
+                derived = event.get("derived_from") or []
+                if not derived:
+                    unverified.append(
+                        {
+                            "event_id": event.get("event_id"),
+                            "ts": event.get("ts"),
+                            "path": path,
+                            "size_bytes": event.get("size_bytes"),
+                            "generator": event.get("generator"),
+                        }
+                    )
+    except OSError:
+        return []
+    return unverified
