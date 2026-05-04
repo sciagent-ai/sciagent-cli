@@ -14,8 +14,10 @@ from pathlib import Path
 import pytest
 
 from sciagent.compute.cluster_manifest import (
+    cache_job_log,
     delete_cluster,
     list_clusters,
+    read_cached_job_log,
     read_cluster,
     write_cluster,
 )
@@ -113,3 +115,49 @@ def test_write_failure_swallowed_silently(isolated_home, monkeypatch):
     monkeypatch.setattr("pathlib.Path.write_text", _boom)
     # Must not raise
     write_cluster("cl", session_id="s")
+
+
+# ---------- log cache ----------
+
+
+def test_cache_job_log_roundtrip(isolated_home):
+    """A cached log can be read back verbatim while shorter than max_lines."""
+    log = "line a\nline b\nline c"
+    assert cache_job_log("cl", 7, log) is True
+    cached = read_cached_job_log("cl", 7)
+    assert cached == log
+
+
+def test_cache_job_log_truncates_to_max_lines(isolated_home):
+    """Logs longer than max_lines keep only the trailing N lines —
+    forensics cares about what happened LAST, not the boilerplate prologue."""
+    lines = [f"line {i}" for i in range(50)]
+    big = "\n".join(lines)
+    assert cache_job_log("cl", 1, big, max_lines=10) is True
+    cached = read_cached_job_log("cl", 1)
+    assert cached is not None
+    assert cached.splitlines() == lines[-10:]
+
+
+def test_read_cached_job_log_missing_returns_none(isolated_home):
+    """No cache for the (cluster, job_id) pair → None, not raises."""
+    assert read_cached_job_log("never-cached", 99) is None
+
+
+def test_cache_job_log_per_cluster_per_job_id(isolated_home):
+    """Two different cluster_job_ids on the same cluster are independent —
+    forensics on job 1 must not be clobbered by a later cache of job 2."""
+    cache_job_log("cl", 1, "log for job 1")
+    cache_job_log("cl", 2, "log for job 2")
+    assert read_cached_job_log("cl", 1) == "log for job 1"
+    assert read_cached_job_log("cl", 2) == "log for job 2"
+
+
+def test_cache_job_log_failure_swallowed(isolated_home, monkeypatch):
+    """The cache is best-effort like the manifest — disk-full / unwriteable
+    must not raise, just return False."""
+    def _boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("pathlib.Path.write_text", _boom)
+    assert cache_job_log("cl", 1, "anything") is False

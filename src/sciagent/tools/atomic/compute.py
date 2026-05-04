@@ -856,7 +856,9 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                         f"command=...). Status: compute_cluster("
                         f"action='status', cluster_name='{cluster}'). "
                         f"Down: compute_cluster(action='down', "
-                        f"cluster_name='{cluster}')."
+                        f"cluster_name='{cluster}'). "
+                        f"NOTE: cluster_name is NOT a job_id — do not pass "
+                        f"it to bg_status / bg_output / bg_wait."
                     ),
                 }
                 return ToolResult(success=True, output=output)

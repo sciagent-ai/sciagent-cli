@@ -325,6 +325,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.compute_exec import ComputeExecTool
     from .atomic.compute_cluster import ComputeClusterTool
     from .atomic.service_search import ServiceSearchTool
+    from .atomic.monitor import MonitorTool, MonitorStopTool
 
     registry = ToolRegistry()
 
@@ -365,6 +366,14 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     # packages, and capabilities. Cheaper than reading registry.yaml (which
     # file_ops truncates) and tolerant of case mismatch.
     registry.register(ServiceSearchTool())
+
+    # Background monitors — push-style stdout-line events. Pairs with the
+    # wait_until tools (Phase 1): wait_* blocks on ONE thing in one tool
+    # call; monitor reacts to whichever happens first across MANY. Drain
+    # hook in agent.py turns each line into a <system-reminder> on the
+    # next turn — no LLM round-trip per event.
+    registry.register(MonitorTool())
+    registry.register(MonitorStopTool())
 
     # Add skill tool if skills exist
     try:

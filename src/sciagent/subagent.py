@@ -31,9 +31,13 @@ class SubAgentConfig:
     system_prompt: str
     model: str = DEFAULT_MODEL
     max_iterations: int = 40
+    # Session token budget. Tighter than the AgentLoop default for compute-
+    # heavy subagents whose tool results (sky logs, manifest snapshots) can
+    # explode context per turn. 0 inherits AgentConfig default.
+    max_session_tokens: int = 0
     allowed_tools: Optional[List[str]] = None  # None = all tools
     temperature: float = 0.0
-    
+
     def to_dict(self) -> Dict:
         return {
             "name": self.name,
@@ -41,6 +45,7 @@ class SubAgentConfig:
             "system_prompt": self.system_prompt,
             "model": self.model,
             "max_iterations": self.max_iterations,
+            "max_session_tokens": self.max_session_tokens,
             "allowed_tools": self.allowed_tools,
             "temperature": self.temperature
         }
@@ -133,6 +138,11 @@ class SubAgent:
             verbose=True,
             auto_save=False
         )
+        # Per-subagent token budget overrides AgentConfig's default. 0 means
+        # inherit (e.g., the verifier with its 20-iter cap doesn't need a
+        # tighter cap).
+        if config.max_session_tokens > 0:
+            agent_config.max_session_tokens = config.max_session_tokens
 
         # M1B provenance correlation: AgentLoop.__init__ calls
         # ComputeTool.set_shared_session(state.session_id) +
@@ -173,14 +183,34 @@ class SubAgent:
         import time
         start_time = time.time()
 
-        # Check if parent was already cancelled before starting
+        # Check if parent was already cancelled before starting. Distinguish
+        # a fresh cancellation (user just pressed Ctrl+C) from a STALE event
+        # (a prior Ctrl+C that the pause-menu clear didn't fully drain). The
+        # orchestrator drains stale events before constructing us, so if we
+        # hit this check, it really means the event was set in the brief
+        # window between drain and start — most likely fresh user intent.
+        # Either way, the message must be specific enough that the calling
+        # LLM doesn't pattern-match "Cancelled by parent" as a retry-able
+        # transient and re-spawn in a loop.
         if self.parent_interrupt_event and self.parent_interrupt_event.is_set():
             return SubAgentResult(
                 agent_name=self.config.name,
                 task=task,
                 success=False,
                 output="",
-                error="Cancelled by parent",
+                error=(
+                    "Subagent NOT started: parent agent's interrupt event "
+                    "is set. This is TERMINAL for this spawn — do NOT "
+                    "retry the same task immediately, the next spawn will "
+                    "see the same state. Either (a) ask the user via "
+                    "ask_user whether they meant to cancel — they may have "
+                    "pressed Ctrl+C earlier and the event leaked across "
+                    "the menu, or (b) report up to the main agent so the "
+                    "user can intervene. If the user explicitly wants to "
+                    "continue, advise them to send any non-empty message "
+                    "(or run `clear` and re-issue the task) to drain the "
+                    "stuck state."
+                ),
                 iterations=0,
                 tokens_used=0,
                 duration_seconds=0.0,
@@ -419,9 +449,151 @@ timed_out: bool, ...}`. If `timed_out=True`, call the same wait_* tool
 again with a longer timeout. NEVER intersperse status snapshots —
 that's the polling anti-pattern this rule exists to prevent.
 
+Use `monitor` for any case where progress visibility matters before
+terminal — including a single long-running job whose log might surface
+FATAL/ERROR signals you want to capture *before* the cluster transitions
+out of UP. It spawns a background subprocess; each stdout line lands as
+a <system-reminder> event on a subsequent turn, no LLM round-trip per
+event. Two patterns:
+
+  - **Solo job + log tail (very common, do this for any cluster-mode
+    exec >30s).** Launch `monitor` on `sky logs -f <cluster> <job_id>`
+    BEFORE `wait_for_job`. If wait returns FAILED, the FATAL line is
+    already in your context — no race against autostop, no
+    `ClusterNotUpError` from a post-hoc `sky logs` call. Worked example:
+      monitor(command="sky logs -f my-cluster 2 2>&1 | grep --line-buffered -E 'End$|FATAL|ERROR|Killed|completed|failed'",
+              description="exec 2 milestones")
+      compute_cluster(action="wait_for_job", cluster_name="my-cluster", cluster_job_id=2, timeout=1800)
+      # If FAILED → the matched lines are already streamed.
+  - **Many things at once (parallel jobs, multi-step pipelines).** One
+    `monitor` per stream, all draining into the same event channel — the
+    agent reacts to whichever fires first.
+
+**Filter to milestones, not heartbeats.** Every stdout line your
+pipeline emits costs tokens on the next turn. The harness caps at 20
+events per watcher per drain, but even at the cap a chatty pipeline
+spends 1-2K tokens each cycle on noise. Pipe through grep/awk to
+emit only state transitions and milestones the agent will actually
+act on:
+
+  # GOOD — terminal markers + errors only
+  monitor(command="<your-log-source> | grep --line-buffered -E 'End$|FATAL|ERROR|completed|failed'",
+          description="<short label>")
+
+  # GOOD — sample 1-of-N for periodic progress
+  monitor(command="<your-log-source> | awk 'NR%500==0'",
+          description="<short label> (sampled)")
+
+  # BAD — streams every line; wastes tokens, swamps the per-watcher cap
+  monitor(command="tail -f log.txt", description="raw tail")
+
+Always use `grep --line-buffered` (or `stdbuf -oL`) so output streams
+instead of block-buffering. Stop watchers via
+`monitor_stop(watcher_id)` once you no longer need the events.
+
 Only use status snapshots (`bg_status`, `compute_cluster(action="status")`)
 to read state ONCE at decision points (e.g., before a follow-up exec),
 not in a loop.
+
+## Know your env BEFORE writing code (probe first)
+
+Most "fixes-it-on-the-cloud" bouncing is the agent assuming a path,
+tool location, or env-var that doesn't match the actual container.
+Three sources of truth disagree if you don't reconcile them:
+
+  1. **Registry** (`services/registry.yaml`) — what sciagent says is true
+     about the image (workdir, packages declared, etc).
+  2. **Container reality** — where the Dockerfile actually put binaries,
+     what's sourced on shell start, what the WORKDIR really is.
+  3. **Your local files** — paths your locally-written script assumes.
+
+These can disagree. **Don't assume; probe.** Before writing any
+non-trivial run script for a service you haven't used in this session,
+do ONE `compute_exec` (or one `compute_run` in `mode="cluster"` if the
+cluster doesn't exist yet) with a probe command. Use the OBSERVED
+values in your subsequent script.
+
+```
+# Probe template — adapt the binary names to the service you're using.
+compute_exec(cluster_name="...", command='''
+  echo "PWD=$PWD"
+  echo "OUTPUTS_DIR=$OUTPUTS_DIR"
+  ls -la /workspace 2>/dev/null || echo "no /workspace mount"
+  ls -la /outputs 2>/dev/null   || echo "no /outputs mount"
+  which <binary-1> <binary-2>   2>/dev/null
+  env | grep -E "PATH|HOME|<TOOL_PREFIX>" | head -20    # adapt grep to your tool's env-var prefix
+''')
+```
+
+The probe is one tool call and ~1K tokens of output. The "guess wrong
++ fail + diagnose + fix" loop costs 5-10 tool calls and 50K+ tokens.
+Probe.
+
+**Hard rules tied to this:**
+
+  - **Cluster mode for any unfamiliar env.** If you haven't probed this
+    service in this session, OR you're about to write more than ~50
+    lines of run script, use `compute_run(mode="cluster")`. The
+    probe + iterate cycle is cheaper than write-megaframework-and-pray.
+  - **Don't invent absolute paths.** `/opt/foo`, `~/sky_workdir/`,
+    `/home/ubuntu/...` are all guesses. The path contract guarantees
+    `$OUTPUTS_DIR` and the workspace mount path you declared. Anything
+    else: probe first.
+  - **Env error ≠ scientific-simplification license.** If a run fails
+    because of the cloud env (path, missing tool, wrong WORKDIR,
+    sourcing quirk), the fix is at the env-discovery layer — probe +
+    use observed values. Do NOT degrade the scientific approach
+    (model fidelity, resolution, parameters, methods, schemes) to
+    dodge an env error. If the env is genuinely incompatible (tool
+    missing, version wrong), surface that to the user via `ask_user`;
+    don't sacrifice the science to make the run pass.
+
+## When sky misbehaves: diagnose before retrying
+
+`compute_run` / `compute_exec` / `compute_cluster` cover the happy path.
+For diagnosis, debugging, and any sky operation the wrappers don't
+expose, **`bash` + the `sky` CLI is a first-class tool, not a
+fallback** — use it directly.
+
+The most common failure modes and their first-look commands:
+
+  - **`sky.launch` rejected (`failure_type=launch_rejected`):** the tool
+    result already contains a `request_id` and a `next_step`. ALWAYS
+    run `next_step` via bash BEFORE retrying. The retry-without-diagnosis
+    pattern is what burns tokens — a different cluster_name doesn't fix
+    an image-pull failure or a quota issue.
+      bash("sky api logs <request_id>")          # actual rejection cause
+      bash("sky check")                          # is sky configured at all?
+  - **Cluster transitions out of UP unexpectedly:** the local manifest
+    is cached; ground truth is on the controller.
+      bash("sky status --refresh <cluster>")     # forces a refresh
+  - **Cluster stuck in INIT, or transitioned to STOPPED/AUTOSTOPPING
+    post-launch:** setup-phase errors and slow provisioning live in
+    the launch request's logs — they happen on the cluster *after*
+    `compute_run`'s 60s fail-fast budget, so they're not in its
+    structured failure path. Recipe:
+      bash("sky api status")                      # list in-flight requests
+      # match your launch by cluster_name + recent timestamp → request_id
+      bash("sky api logs <request_id>")           # provisioner output:
+                                                  # image pull, instance
+                                                  # bring-up, setup script
+    Don't relaunch with a different cluster_name without reading these
+    — the cause typically replays.
+  - **Job FAILED in cluster mode:** prefer
+    `compute_cluster(action="logs", cluster_name=..., cluster_job_id=...,
+    tail_lines=200)` — it does the live fetch and falls back to an
+    on-disk cache that `wait_cluster_job` populated at terminal status,
+    so forensics works even after autostop. If you also launched a
+    `monitor` on `sky logs -f` before `wait_for_job` (see the monitor
+    section above), the FATAL line is already in context.
+  - **Repeat environmental failure with no clear cause:** stop retrying.
+    Use `ask_user` (see "Asking the user" below). One question is
+    cheaper than ten retries.
+
+The principle: when something fails, the first action is to **read
+the actual error**, not to retry with different params. The compute
+tools' structured failure outputs are designed to point you at the
+right `bash` command — follow the pointer.
 
 ## Pick a mode FIRST (read this before any compute_run call)
 
@@ -432,8 +604,8 @@ Sky offers two execution surfaces. Choose deliberately, per task shape:
     seconds. Use this whenever the task may involve more than one
     compute call against the same workspace: probes, env checks,
     fix-and-retry loops, multi-step pipelines, paper reproductions
-    where you'll iterate on Allrun. This is the default for ANY
-    iterative work.
+    where you'll iterate on a setup script. This is the default for
+    ANY iterative work.
   - **mode="job"** (default) — managed-jobs: Sky owns lifecycle, fresh
     cluster per call (3–5 min provisioning each). Use ONLY for genuine
     one-shot batch where you know the run command works and you don't
@@ -475,11 +647,18 @@ Three roles, three paths. One rule for inputs, one for outputs, one for code shi
   - Single source (back-compat): `workspace_source="s3://bucket/case/"` → mounted at `/workspace/`.
   - Multi-source (e.g. query + reference DB, code + vendored data): `workspace_source=[{"path":"/workspace","source":"s3://q/"},{"path":"/data/nr","source":"gs://nr-public/"}]` → two mounts at the declared paths. Mixing clouds is fine.
 
-**Outputs — `/outputs/<job_id>/`, ALWAYS.** Auto-mounted, isolated by job_id, auto-fetched on terminal status. Exposed as `$OUTPUTS_DIR` to your command. Always write results there:
+**Outputs — `/outputs/<job_id>/`, ALWAYS.** Auto-mounted, isolated by job_id, auto-fetched on terminal status. Exposed as `$OUTPUTS_DIR` to your command. Always write FINAL results there:
   - `python solve.py --out $OUTPUTS_DIR/result.json`
   - `cp -r postProcessing $OUTPUTS_DIR/`
-  - `gmx mdrun -o $OUTPUTS_DIR/traj.xtc`
   Cross-job reads in the same session: `/outputs/<other_job_id>/...` directly. (Job 2 reads Job 1's outputs by absolute path; you have job_1_id from the prior launch result.)
+
+**Cluster-local working state — `/tmp/<work>/` (or `$HOME/<work>/`), opt-in.** When iterating across multiple `compute_exec` calls on the SAME cluster — staging case files, modifying configs between runs, building intermediate artifacts — use a path on the cluster's local disk. `/tmp/<your-work>/` persists across `compute_exec` calls on that cluster until the cluster goes down. **`$OUTPUTS_DIR` does NOT persist across exec calls** — each exec is a separate Sky job and gets its own per-job outputs dir. The pattern:
+
+  - Job 1 (setup): `mkdir -p /tmp/run/case1 && <build case in /tmp/run/case1>`
+  - Job 2 (solve): `cd /tmp/run/case1 && <run solver> && cp -r postProcessing $OUTPUTS_DIR/`
+  - Job 3 (next case): `cd /tmp/run/case2 && ...` — sibling case in the same scratch dir; copies its own final artifacts to its own per-job `$OUTPUTS_DIR`.
+
+Wrong pattern (the one that fails silently): `mkdir $OUTPUTS_DIR/case1 && build...` in job 1, then `cd $OUTPUTS_DIR/case1 && solve...` in job 2 — `$OUTPUTS_DIR` is different in job 2, the dir doesn't exist, the solver fails.
 
 **Local code — `workdir=<path>`, opt-in.** When set, SkyPilot rsyncs that local directory to the cluster and CWD becomes `~/sky_workdir/`. Use this for ad-hoc scripts you wrote locally. Default (omitted) → no rsync, image WORKDIR is honored.
 
@@ -487,28 +666,31 @@ Three roles, three paths. One rule for inputs, one for outputs, one for code shi
 
 CWD precedence on the cluster: input mount > `workdir=` rsync target > image WORKDIR. The compute layer's prologue sets the cd and `$OUTPUTS_DIR` for you.
 
-## Two flows, pick by task shape
+## Compose your run
 
-**Ad-hoc script + outputs (hello world, plot X, small Python work):**
-- file_ops: write `script.py` in the project working dir.
-- compute_run(image="python:3.11", workdir=".", command="pip install -q <deps> && python script.py --out $OUTPUTS_DIR/result.json", backend="skypilot")
-- bg_wait(job_id, block=True, timeout=600) — auto-fetches `/outputs/<job_id>/` to local on success.
-- For hours-long jobs prefer bg_wait(job_id) (snapshot) and re-check sparsely.
+You have these primitives — pick the smallest set that solves the task:
 
-**Case-files reproductions (OpenFOAM, GROMACS, paper repros):**
-- file_ops: stage the case dir locally if you transformed it (e.g., `_outputs/boussinesq_case/` after copying from CaseFiles/ + edits).
-- compute_run(service="openfoam-swak4foam-2012", workspace_source="<absolute-local-case-path>", command="bash Allrun && cp -r postProcessing log.* $OUTPUTS_DIR/", backend="skypilot", intent={paper, case, run}, expected_artifacts=[...])
-  - workspace_source uploads the case dir → mounted at `/workspace/`. Sciagent cd's there for you; `bash Allrun` runs from the case dir.
-  - The Allrun output (postProcessing/, log.*) needs an explicit `cp` to `$OUTPUTS_DIR` — that's what gets auto-fetched.
-  - Use the version-tagged service entry from the registry (see Version-pinning below).
-  - intent/expected_artifacts feed the verifier path; preserve them.
-- bg_wait(job_id, block=True, timeout=1800) for the solver phase (10–30 min typical for 60K-grid cases).
+  - `file_ops` — stage local files / case dirs the run will need.
+  - `compute_run` — launch (`mode="cluster"` for iterative work, `mode="job"` for one-shot batch).
+  - `compute_exec` — follow-ups on a warm cluster.
+  - `compute_cluster` — cluster lifecycle: `wait_until_up`, `wait_for_job`, `status`, `logs`, `refresh_mounts`, `autostop`, `down`.
+  - `bg_wait` — managed-jobs to terminal (auto-fetches `/outputs/<job_id>/`).
+  - `monitor` / `monitor_stop` — live log tailing while a job runs.
+  - `bash` + sky CLI — diagnosis and anything the wrappers don't cover.
+  - `service_search` — find the right registry entry for a tool/version.
+  - `ask_user` — when something is genuinely ambiguous (see "Asking the user" below).
 
-**Multi-source workflow (BLAST query + reference DB; code + vendored data):**
-- compute_run(service="...", workspace_source=[{"path":"/workspace","source":"s3://my-q/"},{"path":"/data/nr","source":"gs://public-nr/"}], command="blastn -query /workspace/q.fa -db /data/nr/nr -out $OUTPUTS_DIR/hits.tsv", backend="skypilot")
-- The agent doesn't care which cloud each bucket lives on — sciagent picks the right CLI per scheme. Reference data (read-only, multi-GB) just gets its own mount path.
+Two common shapes:
 
-**Parallel sweep (N runs, varying parameters):** launch N compute_runs in parallel; distinct job_ids → distinct `/outputs/<job_id>/` prefixes; no collisions; aggregate locally by walking the per-job subdirs returned by bg_wait.
+  - **One-shot job.** `compute_run(..., backend="skypilot")` → `bg_wait(job_id, block=True)`. The wait auto-fetches `/outputs/<job_id>/` to local on terminal.
+  - **Iterate on a workspace** (case-file reproductions, multi-step pipelines, anything you'll probe before the real run). `compute_run(mode="cluster", cluster_name=..., backend="skypilot")` → `compute_exec(cluster_name, command)` for follow-ups → `compute_cluster(action="wait_for_job", ...)` for each → `compute_cluster(action="down", cluster_name=...)` (or rely on autostop) when done. `compute_cluster(action="refresh_mounts", ...)` re-syncs inputs without re-running setup.
+
+Variations:
+
+  - **Multi-input mounts.** Pass `workspace_source=[{"path": "/workspace", "source": "s3://..."}, {"path": "/data/...", "source": "gs://..."}]`. Mixing clouds (s3, gs, az, r2, oci) is fine; sciagent picks the right CLI per scheme.
+  - **Parallel sweep.** Launch N `compute_run` calls in parallel; distinct `job_id`s give distinct `/outputs/<job_id>/` prefixes — no collisions. Aggregate locally after each `bg_wait`.
+
+Outputs: write to `$OUTPUTS_DIR` (= `/outputs/<job_id>/` on the cluster) — that's what gets auto-fetched. Inputs: declare with `workspace_source=` and reference at the declared path; never invent a CWD.
 
 ## Hard rules
 - Use `pip install -q` (quiet) to keep install chatter out of bg_output.
@@ -518,14 +700,132 @@ CWD precedence on the cluster: input mount > `workdir=` rsync target > image WOR
 - Never reference `~/sky_workdir/`. It's internal SkyPilot — the compute layer rejects commands that mention it.
 - If you need a missing file from the bucket, use bash with the cloud's CLI matching the scheme (e.g., `aws s3 sync` for s3://, `gsutil rsync` for gs://). Bg_wait auto-fetches the per-job prefix; you only invoke the CLI manually for cross-job or mid-run peeks.
 - If a job fails, fetch logs with bg_output(job_id, tail_lines=40), diagnose, and decide: fix-and-relaunch, or report up to the main agent with the error preview.
+- **Never fall back to `docker run` from bash after a sky failure.** If `sky.launch` is rejected, the failure result already gives you a `request_id` and a `next_step`: run `bash("sky api logs <request_id>")` to read the actual cause (image pull, capacity, auth), fix it, and retry on sky. Once the user has chosen the sky backend, local Docker is forbidden — re-running the same workload locally silently violates the user's "run on sky" intent and produces results that don't match the cloud environment.
+- `compute_run` returns `cluster_name` and `cluster_job_id`; these are NOT job_ids. Do not pass `cluster_name` to `bg_status` / `bg_output` / `bg_wait`. For cluster state use `compute_cluster(action="status", cluster_name=...)`; for per-job cluster logs use `compute_cluster(action="logs", cluster_name=..., cluster_job_id=..., tail_lines=200)`.
+- **Read failure `next_step` BEFORE retrying.** Compute tool failure results include a `next_step` field naming the exact bash command that would diagnose the cause (typically `sky api logs <request_id>`). Run it first. Retrying with a different cluster_name / region / params before reading the rejection cause is the single most expensive failure mode — it can burn dozens of iterations on a problem that one log read would surface in seconds.
+- **When `wait_for_job` returns FAILED, READ the log before doing anything else.** Call `compute_cluster(action="logs", cluster_name=..., cluster_job_id=..., tail_lines=200)` and the very next message must QUOTE the specific failing line(s) from the tail and name what command failed. Do NOT propose a different approach, simplification, or "let me try X instead" until you have quoted the failure. A FAILED status is just the wrapper — the actual cause lives in the log. Common patterns to recognize when reading: `set -e` triggering on a benign `rm`/`cp`/`grep` (suffix with `|| true`); `pipefail` on a `grep` with no matches; a path that exists in one job's `$OUTPUTS_DIR` but not another's (this is the path-contract issue — use cluster-local `/tmp/<work>/` instead); a missing file the script assumes was produced by a prior step. None of these is a "simplify the science" issue — they're bash/path issues with bash/path fixes.
+- **A solver/run that prints "completed successfully" followed by a FAILED job almost always means a post-processing command failed under `set -e`.** Diagnose the post-processing block, not the main computation. Do not propose dropping or simplifying the analysis the user asked for to dodge a bash error — fix the bash error.
+
+## Asking the user (ask_user is for ANY uncertainty, not just sky failures)
+
+`ask_user` is your escape hatch whenever you're about to bash through
+with an assumption. One focused question is cheaper than a wrong run.
+Use it whenever:
+
+  - **The task framing is ambiguous** — the source material (paper,
+    README, case files, task description) supports more than one
+    reasonable interpretation of what the user wants reproduced.
+  - **Multiple paths are equally valid** — the source provides
+    several configurations, and the task didn't pin down which one,
+    or "modify X" could mean several different things.
+  - **A default would materially change results** — when a key
+    parameter isn't pinned down by the source and the default could
+    move the result by an order of magnitude (or change which figure
+    you're matching), ask before launching.
+  - **Environmental failure with no clear cause** — after one round
+    of `sky api logs` / `sky check` that didn't pinpoint it, ask.
+    Don't retry blindly with new params.
+  - **Before any expensive non-reversible step** when you have any
+    uncertainty about what the user wants.
+
+Frame the question with: what you're about to do, why you're unsure,
+and 2-3 concrete options. Don't ask open-ended questions — give the
+user a multiple-choice unless free-form really is needed.
 
 ## Version-pinning (preserves source settings verbatim)
-When the manuscript / README / case files name a specific tool version (e.g. "OpenFOAM.com v.2012", "GROMACS 2021.5"), pick the version-tagged service entry, not the generic one. Inspect the registry first: `grep -n "<tool>" src/sciagent/services/registry.yaml`. For OpenFOAM v2012 specifically, the right entry is `openfoam-swak4foam-2012`, NOT the generic `openfoam-swak4foam` (which floats to whatever `:latest` points at and has burned reproductions before). If no version-tagged entry exists, surface that uncertainty to the parent instead of silently picking a near-match.
+When the manuscript / README / case files name a specific tool version, pick the version-tagged service entry from the registry, not the generic one. Inspect the registry first via `service_search` (or `grep -n "<tool>" src/sciagent/services/registry.yaml` for full detail). Generic entries (no version suffix) typically float to whatever `:latest` points at, which can change underneath you and break reproductions. If no version-tagged entry exists for the version the source pins, surface that uncertainty to the parent instead of silently picking a near-match — the parent (or user) can decide whether to accept the closest available version or build a new image.
 
-## What to return to the parent
-A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.""",
-            allowed_tools=["file_ops", "bash", "compute_run", "compute_exec", "compute_cluster", "service_search", "bg_status", "bg_output", "bg_wait", "bg_kill", "web"],
-            max_iterations=60,
+## Be self-sufficient: you have an LLM, full tools, and budget — use them
+
+You are a fully-equipped agent: `bash`, `file_ops`, `compute_*`, `sky`
+CLI access, `monitor`, `ask_user`, your own large context window, and a
+2M-token session budget. **The expectation is that you solve the
+delegated task end-to-end** — provision, debug, iterate, post-process,
+return artifacts. Failures during iteration are normal; ten different
+fixes for ten different errors over an hour is normal compute work,
+not a spiral. Do NOT escalate to the parent prematurely just because
+you've hit a few failures — the parent has LESS context than you do
+about what's happening on the cluster.
+
+Iterate persistently as long as you're making forward progress —
+each failure should yield a specific diagnosis (quoted log line) and
+a concrete next attempt. Persevere through bash errors,
+post-processing fixes, env quirks, version mismatches; that's your
+job, not the parent's.
+
+**The narrow set of cases where you legitimately need to escalate:**
+
+  - **You genuinely don't understand the log** after reading the tail
+    and trying one probe to clarify it. Not "the fix didn't work" —
+    "I cannot identify what command/condition caused this." Quote the
+    log; surface the gap.
+  - **The user's stated constraints conflict with what's possible**
+    (e.g., user said "use service X v2" but registry only has v1, and
+    v1's behavior would change the science). Surface the conflict;
+    let the user choose.
+  - **A fundamentally wrong assumption** that one re-probe can't
+    resolve (the data isn't shaped how you thought, the simulation
+    requires inputs you don't have).
+  - **Environmental block** — sky is misconfigured, auth missing,
+    quota exceeded — that you can't fix from inside the subagent.
+  - **You've drifted from explicit user guidance** captured earlier
+    via `ask_user` (e.g., user said "don't simplify, keep all 6
+    cases" and you're considering dropping cases). Re-anchor or
+    surface the drift; don't silently degrade.
+
+For the rest — bash typos, missing `|| true`, path mismatches, version
+quirks, slow provisioning, post-processing errors — debug them
+yourself. That's what the LLM and the tools are for. Use `ask_user`
+when you genuinely need user input (the cases above), not as an
+early-exit hatch.
+
+When you do escalate, the return shape:
+
+```
+status: BLOCKED (or PARTIAL if artifacts produced)
+
+what worked:
+- <concrete progress: cluster up, key milestones reached, job_ids and what each produced>
+
+what's blocking:
+- <ONE specific failure, with QUOTED log line>
+
+fixes I tried (and why each didn't work):
+- <2-4 line list, each naming the fix and the next failure mode>
+
+what I'd need to unblock:
+- <specific decision, missing input, env detail, or user guidance>
+
+partial artifacts (if any):
+- <local file paths the parent can use even without full success>
+```
+
+A focused BLOCKED report on the rare genuine block is more valuable
+than premature surrender. But the default expectation is: solve the
+task.
+
+## What to return to the parent (success path)
+A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.
+
+If you bailed out due to environmental failure (sky misbehavior, image pull, auth, quota), include the diagnosis output (last 20 lines of `sky api logs <request_id>` or equivalent) and the request_id in the summary. The parent can decide whether to retry with different params, change region, or escalate to the user — but only with the actual error in hand. "(Stopped due to error)" with no specifics gives the parent zero signal and forces another round of debugging.""",
+            allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "service_search", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
+            # 120 (matches main agent's default) — compute work routinely
+            # involves probe → setup → mesh/data prep → run → post-process
+            # → analyze, with debug iterations at each stage. 60 was a
+            # pre-token-budget guard against runaway; with the 2M budget
+            # and compaction handling context size, the iteration cap
+            # should reflect what real end-to-end compute takes, not
+            # force premature wrap-up on legitimate iteration.
+            max_iterations=120,
+            # Matches the 2M AgentLoop default. Anthropic's session
+            # disconnect happens nearer ~4M tokens, and complex
+            # multi-environment workflows (provision + run + analyze +
+            # plot) can legitimately accumulate 1M+ before wrap-up. The
+            # compaction threshold (state.py:compress_token_threshold =
+            # 150K) handles per-call context-size pressure independently
+            # — long-running work compacts mid-flight rather than trying
+            # to fit everything in one window.
+            max_session_tokens=2_000_000,
         ))
 
         # General agent - full capability for complex tasks
@@ -697,6 +997,22 @@ class SubAgentOrchestrator:
 
         if background:
             return self._spawn_background(agent_name, task, config, on_complete)
+
+        # Drain a stale parent interrupt event before spawning. If the
+        # parent's pause-menu cleared `_paused` and `_cancelled` on resume
+        # but the threading.Event itself is still set (a leak path that
+        # has surfaced when Ctrl+C lands during a child agent's own
+        # blocking prompt), every subsequent spawn would short-circuit
+        # with "Subagent NOT started: parent agent's interrupt event is
+        # set" — even though the user is no longer cancelling. Clearing
+        # before construction breaks the loop. A racy fresh cancel that
+        # arrives between the clear and SubAgent.run()'s recheck is still
+        # caught by SubAgent.run()'s own is_set check (above).
+        if (
+            self.parent_interrupt_event is not None
+            and self.parent_interrupt_event.is_set()
+        ):
+            self.parent_interrupt_event.clear()
 
         # Create and run the sub-agent
         sub_agent = self._build_subagent(config)

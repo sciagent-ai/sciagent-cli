@@ -23,6 +23,28 @@ class ToolResult:
     error: Optional[str] = None
 
 
+def _cluster_name_hint(job_id: str) -> str:
+    """Return a hint suffix when job_id is actually a known cluster name.
+
+    Empty string when the id isn't a known cluster — keeps existing error
+    messages intact for the common case. The agent's most common confusion
+    is feeding compute_run's `cluster_name` into bg_*; this nudges it to
+    compute_cluster instead.
+    """
+    try:
+        from sciagent.compute.cluster_manifest import read_cluster
+        if read_cluster(job_id) is not None:
+            return (
+                f" '{job_id}' looks like a cluster_name, not a job_id. "
+                f"Try compute_cluster(action='status', cluster_name='{job_id}') "
+                f"for cluster state, or compute_cluster(action='logs', "
+                f"cluster_name='{job_id}', cluster_job_id=<N>) for per-job logs."
+            )
+    except Exception:
+        pass
+    return ""
+
+
 class BgStatusTool:
     """Check status of background jobs."""
 
@@ -113,7 +135,10 @@ class BgStatusTool:
                         return ToolResult(
                             success=False,
                             output=None,
-                            error=f"Compute job '{job_id}' not found or SkyPilot not available."
+                            error=(
+                                f"Compute job '{job_id}' not found or SkyPilot not available."
+                                + _cluster_name_hint(job_id)
+                            )
                         )
                     output = self._format_compute_status(status)
                     return ToolResult(success=True, output=output, error=None)
@@ -124,7 +149,10 @@ class BgStatusTool:
                     return ToolResult(
                         success=False,
                         output=None,
-                        error=f"Job '{job_id}' not found. Use bg_status() to list all jobs."
+                        error=(
+                            f"Job '{job_id}' not found. Use bg_status() to list all jobs."
+                            + _cluster_name_hint(job_id)
+                        )
                     )
 
                 output = self._format_job_status(status)
@@ -402,7 +430,7 @@ class BgOutputTool:
                 return ToolResult(
                     success=False,
                     output=None,
-                    error=f"Job '{job_id}' not found."
+                    error=f"Job '{job_id}' not found." + _cluster_name_hint(job_id)
                 )
 
             # Get output
@@ -816,7 +844,7 @@ class BgWaitTool:
                 return ToolResult(
                     success=False,
                     output=None,
-                    error=f"Job '{job_id}' not found."
+                    error=f"Job '{job_id}' not found." + _cluster_name_hint(job_id)
                 )
 
             # If already completed, return immediately
@@ -963,7 +991,7 @@ class BgKillTool:
                 return ToolResult(
                     success=False,
                     output=None,
-                    error=f"Job '{job_id}' not found."
+                    error=f"Job '{job_id}' not found." + _cluster_name_hint(job_id)
                 )
 
             if status['status'] != 'running':

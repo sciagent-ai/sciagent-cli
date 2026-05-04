@@ -269,6 +269,25 @@ class ComputeRouter:
             poll_interval=poll_interval,
         )
 
+    def tail_cluster_job_logs(
+        self,
+        cluster_name: str,
+        cluster_job_id: int,
+        tail_lines: int = 200,
+    ) -> Dict[str, Any]:
+        """Return the tail of a cluster-mode job's stdout, with cache fallback.
+
+        Falls back to the cluster manifest's on-disk cache when the
+        cluster has transitioned out of UP (autostop, manual down). See
+        ``SkyPilotBackend.tail_cluster_job_logs`` for the source-selection
+        contract and return shape.
+        """
+        return self._require_skypilot().tail_cluster_job_logs(
+            cluster_name=cluster_name,
+            cluster_job_id=int(cluster_job_id),
+            tail_lines=int(tail_lines),
+        )
+
     def cluster_down(self, cluster_name: str, graceful: bool = True) -> bool:
         """Tear down a cluster (graceful by default)."""
         return self._require_skypilot().cluster_down(cluster_name, graceful=graceful)

@@ -96,6 +96,18 @@ import io as _io
 import logging as _logging
 
 
+def _tail_n_lines(text: str, n: int) -> str:
+    """Return the last ``n`` lines of ``text``. ``n<=0`` returns the full text."""
+    if not text:
+        return ""
+    if n is None or n <= 0:
+        return text
+    lines = text.splitlines()
+    if len(lines) <= n:
+        return text
+    return "\n".join(lines[-n:])
+
+
 @_contextlib.contextmanager
 def _silence_sky_chatter():
     """Suppress sky's rich-payload stdout AND its INFO-level logger output
@@ -1451,8 +1463,13 @@ class SkyPilotBackend:
                     "timed_out": False,
                     "manifest": info.get("manifest"),
                     "reason": (
-                        f"cluster reached {last_status} (not UP); relaunch "
-                        f"with launch_cluster or pick a new cluster_name."
+                        f"cluster reached {last_status} (not UP). Diagnose "
+                        f"BEFORE relaunching — the cause typically replays. "
+                        f"Run `bash sky api status` to find this launch's "
+                        f"request_id (match by cluster_name + recent timestamp), "
+                        f"then `bash sky api logs <request_id>` to read the "
+                        f"provisioner's output (image pull, instance bring-up, "
+                        f"setup script). This is where setup-phase errors live."
                     ),
                 }
 
@@ -1475,8 +1492,13 @@ class SkyPilotBackend:
             "timed_out": True,
             "reason": (
                 f"cluster {cluster_name} still {last_status} after "
-                f"{timeout}s; call wait_until_up again with a longer "
-                f"timeout, or check sky api logs."
+                f"{timeout}s. If still progressing, call wait_until_up "
+                f"again with a longer timeout. If suspiciously slow (>5 "
+                f"min in INIT), inspect the provisioner: "
+                f"`bash sky api status` to find this launch's request_id "
+                f"(match by cluster_name + recent timestamp), then "
+                f"`bash sky api logs <request_id>` to see image pull / "
+                f"instance bring-up / setup script progress."
             ),
         }
 
@@ -1546,6 +1568,28 @@ class SkyPilotBackend:
                 )
                 if last_status_name in terminal_names:
                     summary = f"Job {cluster_job_id} on {cluster_name}: {last_status_name}"
+                    # Cache the tail of the job's log to disk before
+                    # returning. The cluster can autostop within minutes of
+                    # a FAILED status, after which sky.tail_logs raises
+                    # ClusterNotUpError and post-hoc forensics is
+                    # impossible. Best-effort: a cache failure must not
+                    # break the wait return.
+                    try:
+                        log_text = self._fetch_cluster_job_log_text(
+                            cluster_name=cluster_name,
+                            cluster_job_id=int(cluster_job_id),
+                            tail_lines=1000,
+                        )
+                        if log_text:
+                            from ..cluster_manifest import cache_job_log
+                            cache_job_log(
+                                cluster_name=cluster_name,
+                                cluster_job_id=int(cluster_job_id),
+                                log_text=log_text,
+                                max_lines=1000,
+                            )
+                    except Exception:
+                        pass
                     return {
                         "terminal": True,
                         "status": last_status_name,
@@ -1575,6 +1619,121 @@ class SkyPilotBackend:
                 f"call wait_for_job again with a longer timeout."
             ),
         }
+
+    def _fetch_cluster_job_log_text(
+        self,
+        cluster_name: str,
+        cluster_job_id: int,
+        tail_lines: int = 200,
+    ) -> str:
+        """Live fetch of a cluster-mode job's stdout via sky.tail_logs.
+
+        Wraps ``sky.tail_logs(cluster_name, job_id, follow=False, tail=N,
+        output_stream=buf)`` so the buffered tail flows back as a string
+        rather than printing to console. ``follow=False`` is mandatory
+        (a follow=True call blocks until end-of-job).
+
+        Raises sky.exceptions.* (ClusterNotUpError, ClusterDoesNotExist)
+        directly — callers decide whether to fall back to the on-disk
+        cache. Other exceptions are swallowed and surface as the partial
+        buffer + a bracketed error marker (matching ``get_logs``).
+        """
+        sky = self._get_sky()
+        import io
+
+        buf = io.StringIO()
+        try:
+            sky.tail_logs(
+                cluster_name=cluster_name,
+                job_id=int(cluster_job_id),
+                follow=False,
+                tail=tail_lines,
+                output_stream=buf,
+            )
+        except Exception as exc:
+            # Re-raise the cluster-state exceptions so the caller can
+            # fall back to cache. Everything else is wrapped so a
+            # transient SDK glitch doesn't crash the agent.
+            module = type(exc).__module__ or ""
+            if module.startswith("sky."):
+                raise
+            partial = buf.getvalue()
+            err_line = f"[tail_logs error: {type(exc).__name__}: {exc}]"
+            return f"{partial}\n{err_line}" if partial else err_line
+        return buf.getvalue()
+
+    def tail_cluster_job_logs(
+        self,
+        cluster_name: str,
+        cluster_job_id: int,
+        tail_lines: int = 200,
+    ) -> Dict[str, Any]:
+        """Get the tail of a cluster-mode job's stdout, with cache fallback.
+
+        Strategy:
+          1. Try ``sky.tail_logs`` (live). If the cluster is UP, this is
+             the freshest source and it's also written through to the
+             on-disk cache so a subsequent call after autostop still works.
+          2. On ``ClusterNotUpError`` / ``ClusterDoesNotExist`` /
+             ``RuntimeError``, fall back to the cluster manifest's cached
+             log (populated at terminal status by ``wait_cluster_job``).
+
+        Returns ``{cluster_name, cluster_job_id, tail_lines, source,
+        log_tail}`` where ``source`` is one of ``"live"``, ``"cached"``,
+        or ``"missing"``. ``log_tail`` is empty string when source is
+        ``"missing"``.
+        """
+        from ..cluster_manifest import cache_job_log, read_cached_job_log
+
+        try:
+            text = self._fetch_cluster_job_log_text(
+                cluster_name=cluster_name,
+                cluster_job_id=int(cluster_job_id),
+                tail_lines=tail_lines,
+            )
+            # Refresh cache so a later call after autostop still works.
+            cache_job_log(
+                cluster_name=cluster_name,
+                cluster_job_id=int(cluster_job_id),
+                log_text=text,
+                max_lines=1000,
+            )
+            return {
+                "cluster_name": cluster_name,
+                "cluster_job_id": int(cluster_job_id),
+                "tail_lines": tail_lines,
+                "source": "live",
+                "log_tail": _tail_n_lines(text, tail_lines),
+            }
+        except Exception as live_exc:
+            cached = read_cached_job_log(
+                cluster_name=cluster_name,
+                cluster_job_id=int(cluster_job_id),
+            )
+            if cached is None:
+                return {
+                    "cluster_name": cluster_name,
+                    "cluster_job_id": int(cluster_job_id),
+                    "tail_lines": tail_lines,
+                    "source": "missing",
+                    "log_tail": "",
+                    "live_error": f"{type(live_exc).__name__}: {live_exc}",
+                    "hint": (
+                        "Cluster is not UP and no cached log exists. "
+                        "Call compute_cluster(action='wait_for_job', ...) "
+                        "BEFORE the cluster autostops to populate the "
+                        "cache, or launch a `monitor` on `sky logs -f` "
+                        "alongside the exec to capture logs in real time."
+                    ),
+                }
+            return {
+                "cluster_name": cluster_name,
+                "cluster_job_id": int(cluster_job_id),
+                "tail_lines": tail_lines,
+                "source": "cached",
+                "log_tail": _tail_n_lines(cached, tail_lines),
+                "live_error": f"{type(live_exc).__name__}: {live_exc}",
+            }
 
     def cluster_down(self, cluster_name: str, graceful: bool = True) -> bool:
         """Tear down a cluster. Returns True on success, False on error.

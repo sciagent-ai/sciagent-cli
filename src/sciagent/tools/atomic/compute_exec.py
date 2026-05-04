@@ -145,6 +145,25 @@ class ComputeExecTool(BaseTool):
                 error="command is required.",
             )
 
+        # Reject commands that reference ~/sky_workdir/. The compute prompt
+        # forbids this and compute_run validates it; compute_exec was the
+        # gap where agents could still slip through (and have — the path
+        # contract claim "the compute layer rejects commands that mention
+        # it" must be true at every entry point, not just compute_run).
+        from sciagent.tools.atomic.compute import _FORBIDDEN_PATTERN
+        if _FORBIDDEN_PATTERN.search(command):
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    "Command references ~/sky_workdir/ but that's internal "
+                    "SkyPilot — you cannot cd there or read from it. The "
+                    "registry's `workdir` field tells you where your code "
+                    "actually lands; use $OUTPUTS_DIR for outputs, the "
+                    "declared workspace mount path for inputs."
+                ),
+            )
+
         from sciagent.compute.job import (
             ComputeRequirements,
             Job,

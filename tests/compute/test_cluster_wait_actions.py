@@ -249,3 +249,163 @@ def test_compute_cluster_wait_for_job_action_dispatches():
     assert out.output["terminal"] is True
     assert out.output["status"] == "SUCCEEDED"
     fake_router.wait_cluster_job.assert_called_once()
+
+
+# ---- compute_cluster(action="logs") --------------------------------
+
+
+def test_compute_cluster_logs_requires_cluster_job_id():
+    from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+    tool = ComputeClusterTool()
+    tool._router = MagicMock()
+    out = tool.execute(action="logs", cluster_name="c1")
+    assert out.success is False
+    assert "cluster_job_id" in (out.error or "")
+
+
+def test_compute_cluster_logs_action_dispatches_live():
+    """Happy path: cluster is UP, live fetch succeeds, success=True with
+    source='live'."""
+    from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+
+    tool = ComputeClusterTool()
+    fake_router = MagicMock()
+    fake_router.tail_cluster_job_logs.return_value = {
+        "cluster_name": "c1",
+        "cluster_job_id": 2,
+        "tail_lines": 200,
+        "source": "live",
+        "log_tail": "FATAL: oom\nKilled\n",
+    }
+    tool._router = fake_router
+
+    out = tool.execute(
+        action="logs", cluster_name="c1", cluster_job_id=2, tail_lines=200,
+    )
+    assert out.success is True
+    assert out.output["source"] == "live"
+    assert "FATAL" in out.output["log_tail"]
+    fake_router.tail_cluster_job_logs.assert_called_once_with(
+        cluster_name="c1", cluster_job_id=2, tail_lines=200,
+    )
+
+
+def test_compute_cluster_logs_default_tail_lines_200():
+    """Omitting tail_lines uses the documented default of 200."""
+    from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+
+    tool = ComputeClusterTool()
+    fake_router = MagicMock()
+    fake_router.tail_cluster_job_logs.return_value = {
+        "cluster_name": "c1", "cluster_job_id": 1, "tail_lines": 200,
+        "source": "live", "log_tail": "",
+    }
+    tool._router = fake_router
+
+    tool.execute(action="logs", cluster_name="c1", cluster_job_id=1)
+    fake_router.tail_cluster_job_logs.assert_called_once_with(
+        cluster_name="c1", cluster_job_id=1, tail_lines=200,
+    )
+
+
+def test_compute_cluster_logs_cache_fallback_when_cluster_down():
+    """Cluster is no longer UP but a cache exists from wait_for_job:
+    success=True, source='cached', live_error preserved for context."""
+    from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+
+    tool = ComputeClusterTool()
+    fake_router = MagicMock()
+    fake_router.tail_cluster_job_logs.return_value = {
+        "cluster_name": "c1",
+        "cluster_job_id": 2,
+        "tail_lines": 200,
+        "source": "cached",
+        "log_tail": "FATAL: oom\nKilled\n",
+        "live_error": "ClusterNotUpError: cluster c1 is STOPPED",
+    }
+    tool._router = fake_router
+
+    out = tool.execute(action="logs", cluster_name="c1", cluster_job_id=2)
+    assert out.success is True
+    assert out.output["source"] == "cached"
+    assert "ClusterNotUpError" in out.output["live_error"]
+
+
+def test_compute_cluster_logs_missing_returns_failure_with_hint():
+    """No live fetch, no cache → success=False with a hint pointing the
+    agent at the right preventive workflow."""
+    from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+
+    tool = ComputeClusterTool()
+    fake_router = MagicMock()
+    fake_router.tail_cluster_job_logs.return_value = {
+        "cluster_name": "c1",
+        "cluster_job_id": 99,
+        "tail_lines": 200,
+        "source": "missing",
+        "log_tail": "",
+        "live_error": "ClusterDoesNotExist",
+        "hint": "Cluster is not UP and no cached log exists. ...",
+    }
+    tool._router = fake_router
+
+    out = tool.execute(action="logs", cluster_name="c1", cluster_job_id=99)
+    assert out.success is False
+    assert "No logs available" in (out.error or "")
+    # The structured info still rides through so the agent can introspect.
+    assert out.output["source"] == "missing"
+
+
+def test_tail_cluster_job_logs_falls_back_to_cache_on_cluster_not_up(
+    tmp_path, monkeypatch
+):
+    """Backend integration: when sky.tail_logs raises ClusterNotUpError but
+    a cached log exists, return source='cached' with the cached content."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    from sciagent.compute.cluster_manifest import cache_job_log
+    cache_job_log("c1", 2, "cached FATAL line\n")
+
+    # Mock the backend: live fetch raises a sky.* exception
+    mock_sky = MagicMock()
+    class FakeClusterNotUp(RuntimeError):
+        pass
+    FakeClusterNotUp.__module__ = "sky.exceptions"  # mimic real exception's module
+
+    def _raise_not_up(*a, **kw):
+        raise FakeClusterNotUp("cluster c1 is STOPPED")
+
+    mock_sky.tail_logs.side_effect = _raise_not_up
+
+    b = _backend(mock_sky)
+    info = b.tail_cluster_job_logs("c1", 2, tail_lines=200)
+    assert info["source"] == "cached"
+    assert "FATAL" in info["log_tail"]
+    assert "FakeClusterNotUp" in info["live_error"]
+
+
+def test_tail_cluster_job_logs_live_fetch_writes_through_to_cache(
+    tmp_path, monkeypatch
+):
+    """A successful live fetch must populate the cache so a follow-up
+    after autostop still works. This is the load-bearing invariant for
+    the post-autostop forensics workflow."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    mock_sky = MagicMock()
+
+    def _write_to_buf(cluster_name, job_id, follow, tail, output_stream):
+        output_stream.write("live log line 1\nlive log line 2\n")
+        return 0  # exit code
+
+    mock_sky.tail_logs.side_effect = _write_to_buf
+
+    b = _backend(mock_sky)
+    info = b.tail_cluster_job_logs("c1", 5, tail_lines=200)
+    assert info["source"] == "live"
+    assert "live log line 1" in info["log_tail"]
+
+    from sciagent.compute.cluster_manifest import read_cached_job_log
+    cached = read_cached_job_log("c1", 5)
+    assert cached is not None
+    assert "live log line 1" in cached

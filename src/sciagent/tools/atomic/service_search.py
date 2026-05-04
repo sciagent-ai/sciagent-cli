@@ -30,12 +30,15 @@ class ServiceSearchTool(BaseTool):
     description = (
         "Search the sciagent service registry for a keyword (case-insensitive). "
         "Scans each service's name, description, packages, and capabilities. "
-        "Use this BEFORE assuming a package/tool is missing from the registry — "
-        "the YAML is large and case-sensitive grep / truncated reads miss "
-        "services. Returns matching service names with description, packages, "
-        "and a short capability blurb so you can pick one and move on to writing "
-        "the run script. Empty result means it really isn't there; only then "
-        "consider build-service."
+        "Call this BEFORE writing any cloud-bound code, not just to find a "
+        "service — the returned entry includes the container's `workdir`, "
+        "`runtime`, and (when declared) `env_setup` / `tool_paths` / "
+        "`probe_command`. Use those values in your run script so paths "
+        "reflect container reality, not local guesses. If the env_setup / "
+        "tool_paths fields are absent for a service, that's the signal to "
+        "probe (one compute_exec) before writing the run script — don't "
+        "invent paths. Empty result means it really isn't in the registry; "
+        "only then consider build-service."
     )
 
     parameters = {
@@ -149,6 +152,17 @@ class ServiceSearchTool(BaseTool):
                         # Cap capabilities to keep the result token-light;
                         # full entry is one Read away if the agent wants more.
                         "capabilities": list((entry.get("capabilities") or [])[:6]),
+                        # Env contract — surface the registry's promise about
+                        # the container's runtime layout so the agent can
+                        # write code against observed paths instead of
+                        # locally-imagined ones. Missing fields fall through
+                        # as null; the agent knows to probe rather than
+                        # assume in that case.
+                        "workdir": entry.get("workdir"),
+                        "runtime": entry.get("runtime"),
+                        "env_setup": entry.get("env_setup"),
+                        "tool_paths": entry.get("tool_paths"),
+                        "probe_command": entry.get("probe_command"),
                     }
                 )
 

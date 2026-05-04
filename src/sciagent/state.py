@@ -142,7 +142,16 @@ class ContextWindow:
     """
     system_prompt: str
     messages: List[Message] = field(default_factory=list)
-    max_messages: int = 100  # Before compression
+    max_messages: int = 100  # Before compression (message-count gate)
+    # Token-count gate: compress when total context tokens exceed this,
+    # even if message count is below max_messages. Some workflows have
+    # few messages but huge tool results (log dumps, status snapshots,
+    # large file reads) — message count alone misses that case.
+    # Default 150K targets Anthropic 200K-context models with ~75%
+    # headroom (avoids compaction-thrash while leaving margin against
+    # the per-call ceiling). Long-context models (Gemini 1M, Claude
+    # long-context tier) can raise this; small-context models lower it.
+    compress_token_threshold: int = 150_000
     
     def add_user_message(self, content: Union[str, List[Dict[str, Any]]]) -> Message:
         """Add a user message. Content can be string or multimodal content blocks."""
@@ -186,12 +195,21 @@ class ContextWindow:
     
     def compress_if_needed(self, summarizer=None):
         """
-        Compress context if too many messages
+        Compress context when EITHER too many messages OR too many tokens.
 
-        Strategy: Keep first message, summarize middle, keep recent
-        CRITICAL: Never break tool_use/tool_result pairs (Anthropic API requirement)
+        Two gates because workflows hit them differently:
+          - Many short turns (long chatty conversations) hit the
+            message-count gate first.
+          - Few turns with large tool results hit the token gate first —
+            a single tool result can be tens of thousands of tokens on
+            its own, blowing context size before message count climbs.
+
+        Strategy: Keep first message, summarize middle, keep recent.
+        CRITICAL: Never break tool_use/tool_result pairs (Anthropic API requirement).
         """
-        if len(self.messages) <= self.max_messages:
+        too_many_msgs = len(self.messages) > self.max_messages
+        too_many_tokens = self.token_estimate() > self.compress_token_threshold
+        if not (too_many_msgs or too_many_tokens):
             return
 
         # Keep first 5 and last 20 messages, but adjust to preserve tool pairs

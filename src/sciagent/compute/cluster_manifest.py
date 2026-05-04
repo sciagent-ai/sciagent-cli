@@ -138,6 +138,59 @@ def delete_cluster(cluster_name: str) -> bool:
         return False
 
 
+def _log_cache_dir() -> Path:
+    """Sibling dir to manifests for cached per-job logs."""
+    return _manifest_dir() / "logs"
+
+
+def _log_cache_path(cluster_name: str, cluster_job_id: int) -> Path:
+    safe = cluster_name.replace("/", "_")
+    return _log_cache_dir() / f"{safe}__{int(cluster_job_id)}.log"
+
+
+def cache_job_log(
+    cluster_name: str,
+    cluster_job_id: int,
+    log_text: str,
+    *,
+    max_lines: int = 1000,
+) -> bool:
+    """Cache the last ``max_lines`` of a per-cluster job's stdout to disk.
+
+    Solves the autostop race: ``sky logs`` raises ``ClusterNotUpError`` once
+    the cluster transitions out of UP, which can happen within minutes of a
+    FAILED job. Caching at terminal status (or on the first successful
+    fetch) means failure forensics still works after the cluster is gone.
+
+    Returns True on success, False on any I/O failure. Best-effort —
+    callers must not rely on it for correctness.
+    """
+    try:
+        d = _log_cache_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        lines = (log_text or "").splitlines()
+        if len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        _log_cache_path(cluster_name, cluster_job_id).write_text("\n".join(lines))
+        return True
+    except Exception:
+        return False
+
+
+def read_cached_job_log(
+    cluster_name: str,
+    cluster_job_id: int,
+) -> Optional[str]:
+    """Read a cached per-job log. Returns None when no cache exists."""
+    try:
+        path = _log_cache_path(cluster_name, cluster_job_id)
+        if not path.exists():
+            return None
+        return path.read_text()
+    except Exception:
+        return None
+
+
 def list_clusters(session_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """List all cluster manifests, optionally filtered by session_id.
 

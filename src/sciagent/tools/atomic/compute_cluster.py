@@ -38,6 +38,8 @@ class ComputeClusterTool(BaseTool):
         "status across multiple LLM turns. action='wait_for_job' blocks "
         "until a per-cluster job (compute_exec returned cluster_job_id) "
         "reaches terminal state — cluster-mode equivalent of bg_wait. "
+        "action='logs' returns the tail of a cluster-mode job's stdout, "
+        "with on-disk cache fallback for post-autostop forensics. "
         "action='down' tears the cluster down (graceful by default). "
         "action='autostop' updates idle threshold / wait_for / hook. "
         "action='refresh_mounts' re-syncs file_mounts via sky launch "
@@ -53,7 +55,7 @@ class ComputeClusterTool(BaseTool):
                 "type": "string",
                 "enum": [
                     "status", "down", "autostop", "refresh_mounts",
-                    "wait_until_up", "wait_for_job",
+                    "wait_until_up", "wait_for_job", "logs",
                 ],
                 "description": "Lifecycle action to perform on the cluster.",
             },
@@ -133,9 +135,16 @@ class ComputeClusterTool(BaseTool):
             "cluster_job_id": {
                 "type": "integer",
                 "description": (
-                    "action='wait_for_job' only. The per-cluster int "
-                    "job_id returned by compute_run(mode='cluster') / "
+                    "action='wait_for_job' / 'logs' only. The per-cluster "
+                    "int job_id returned by compute_run(mode='cluster') / "
                     "compute_exec / refresh_mounts."
+                ),
+            },
+            "tail_lines": {
+                "type": "integer",
+                "description": (
+                    "action='logs' only. Number of trailing log lines to "
+                    "return. Default 200."
                 ),
             },
         },
@@ -168,6 +177,7 @@ class ComputeClusterTool(BaseTool):
         workspace_source: Optional[Any] = None,
         timeout: Optional[float] = None,
         cluster_job_id: Optional[int] = None,
+        tail_lines: Optional[int] = None,
         **kwargs,
     ) -> ToolResult:
         if not cluster_name:
@@ -231,13 +241,20 @@ class ComputeClusterTool(BaseTool):
                 cluster_job_id=cluster_job_id,
                 timeout=timeout,
             )
+        if action == "logs":
+            return self._do_logs(
+                router,
+                cluster_name,
+                cluster_job_id=cluster_job_id,
+                tail_lines=tail_lines,
+            )
 
         return ToolResult(
             success=False,
             output=None,
             error=(
                 f"Unknown action '{action}'. Valid: status, wait_until_up, "
-                f"wait_for_job, down, autostop, refresh_mounts."
+                f"wait_for_job, down, autostop, refresh_mounts, logs."
             ),
         )
 
@@ -457,4 +474,52 @@ class ComputeClusterTool(BaseTool):
             )
         except RuntimeError as exc:
             return ToolResult(success=False, output=None, error=str(exc))
+        return ToolResult(success=True, output=info)
+
+    def _do_logs(
+        self,
+        router,
+        cluster_name: str,
+        cluster_job_id: Optional[int],
+        tail_lines: Optional[int],
+    ) -> ToolResult:
+        """Tail of a cluster-mode job's stdout, with cache fallback.
+
+        Live path uses ``sky.tail_logs``; falls back to the cluster
+        manifest's on-disk cache when the cluster has transitioned out of
+        UP (autostop, manual down). The cache is populated by
+        ``wait_cluster_job`` at terminal status, and refreshed on every
+        successful live fetch — so a `logs` call BEFORE autostop is
+        what unlocks post-autostop forensics.
+        """
+        if cluster_job_id is None:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    "action='logs' requires cluster_job_id (the int "
+                    "returned by compute_run(mode='cluster') / compute_exec)."
+                ),
+            )
+        try:
+            info = router.tail_cluster_job_logs(
+                cluster_name=cluster_name,
+                cluster_job_id=int(cluster_job_id),
+                tail_lines=int(tail_lines) if tail_lines else 200,
+            )
+        except RuntimeError as exc:
+            return ToolResult(success=False, output=None, error=str(exc))
+        # source="missing" is a soft failure: the cluster is gone and no
+        # cache exists. Surface as success=False so the agent doesn't
+        # treat an empty log_tail as "the job emitted nothing".
+        if info.get("source") == "missing":
+            return ToolResult(
+                success=False,
+                output=info,
+                error=(
+                    f"No logs available for {cluster_name} job "
+                    f"{cluster_job_id}: cluster is not UP and no cached "
+                    f"log exists. {info.get('hint', '')}"
+                ),
+            )
         return ToolResult(success=True, output=info)

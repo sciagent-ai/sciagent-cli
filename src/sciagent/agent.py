@@ -39,6 +39,13 @@ class AgentConfig:
     temperature: float = 0.0
     max_tokens: int =  16384 # 32768  # Large limit for thorough code generation
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
+    # Cumulative prompt+completion tokens before the loop forces a wrap-up.
+    # Anthropic appears to disconnect somewhere near ~4M cumulative tokens
+    # in a single session; we cap at 2M to leave headroom while letting
+    # complex multi-environment workflows actually finish. The compaction
+    # threshold (state.compress_token_threshold = 150K) handles per-call
+    # context-size pressure independently. 0 disables the check.
+    max_session_tokens: int = 2_000_000
     working_dir: str = "."
     verbose: bool = True
     auto_save: bool = True
@@ -1362,6 +1369,58 @@ Provide a concise summary (max 500 words):"""
             print("\nWrapping up...")
             return 'wrap_up'
 
+    def _check_token_limit(self) -> Optional[str]:
+        """Check if approaching session token budget.
+
+        Mirrors _check_iteration_limit: warns once at 85% consumed and lets
+        the user wrap_up / continue / extend. Returns None to keep going,
+        or an action string ('wrap_up', 'continue', or new budget as string).
+        """
+        budget = self.config.max_session_tokens
+        if budget <= 0:
+            return None  # Disabled
+
+        if self.total_tokens < int(0.85 * budget):
+            return None
+
+        print(
+            f"\n⚠️  Approaching token budget "
+            f"({self.total_tokens:,} / {budget:,} tokens used)"
+        )
+        print("   Anthropic's per-session ceiling is near; further turns may disconnect.")
+        print("\nWhat would you like to do?")
+        print("  [w] Wrap up - ask agent to summarize current progress")
+        print("  [c] Continue - keep going (may hit limit)")
+        print("  [+] or [+200000] Raise budget — bare '+' adds 400K, '+N' adds N tokens")
+
+        # Re-prompt up to 3 times on unrecognized input rather than wrapping
+        # up immediately. The previous behavior turned a typo or a literal-
+        # placeholder mistake (typing "+N" instead of a number) into an
+        # immediate wrap-up — frustrating mid-task and not recoverable.
+        for attempt in range(3):
+            try:
+                choice = pt_prompt(
+                    "\nChoice [w / c / + / +N]: " if attempt == 0
+                    else "\nDidn't recognize that. [w / c / + / +N]: "
+                ).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print("\nWrapping up...")
+                return 'wrap_up'
+
+            if choice == 'w' or choice == 'wrap':
+                return 'wrap_up'
+            if choice == 'c' or choice == 'continue':
+                return 'continue'
+            if choice == '+':
+                # Bare '+' = generous default raise. Same scale as
+                # the typed example so the agent has clear runway.
+                return str(budget + 400_000)
+            if choice.startswith('+') and choice[1:].isdigit():
+                return str(budget + int(choice[1:]))
+            # else: re-prompt
+        print("Three unrecognized attempts; wrapping up.")
+        return 'wrap_up'
+
     def _generate_wrap_up_result(self) -> str:
         """Generate a summary result when wrapping up early."""
         # Inject wrap-up instruction
@@ -1415,6 +1474,7 @@ Provide a concise summary (max 500 words):"""
 
         max_iter = max_iterations or self.config.max_iterations
         self._iteration_limit_checked = False  # Track if we've already asked user
+        self._token_limit_checked = False  # Same, for session token budget
 
         # Auto-inject matching skill workflow before the task
         skill_content = self._get_matching_skill_content(task)
@@ -1455,10 +1515,46 @@ Provide a concise summary (max 500 words):"""
                             self._iteration_limit_checked = False  # Reset so check triggers again
                             print(f"   Increased max iterations to {max_iter}")
 
+                # Same flow for session token budget. Anthropic hard-disconnects
+                # when a session crosses its ceiling — far worse than wrapping up
+                # cleanly here.
+                if not self._token_limit_checked:
+                    action = self._check_token_limit()
+                    if action:
+                        self._token_limit_checked = True
+                        if action == 'wrap_up':
+                            final_response = self._generate_wrap_up_result()
+                            break
+                        elif action == 'continue':
+                            pass
+                        elif action.isdigit():
+                            self.config.max_session_tokens = int(action)
+                            self._token_limit_checked = False
+                            print(f"   Raised token budget to {self.config.max_session_tokens:,}")
+
                 # Inject user feedback if provided
                 if self._user_feedback:
                     self.state.context.add_user_message(f"[User feedback]: {self._user_feedback}")
                     self._user_feedback = None
+
+                # Drain background monitor events (push-style notifications
+                # from the `monitor` tool). Each pending stdout line lands
+                # on the next turn as a single <system-reminder> block —
+                # no LLM round-trip per event. Best-effort: a drain failure
+                # never breaks the agent loop.
+                try:
+                    from .monitoring import (
+                        MonitorRegistry,
+                        format_events_as_system_reminder,
+                    )
+
+                    monitor_events = MonitorRegistry.instance().drain()
+                    if monitor_events:
+                        reminder = format_events_as_system_reminder(monitor_events)
+                        if reminder:
+                            self.state.context.add_user_message(reminder)
+                except Exception:
+                    pass
 
                 self.iteration_count += 1
 
