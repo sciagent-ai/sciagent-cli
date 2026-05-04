@@ -12,12 +12,25 @@ from typing import Dict, Any, List, Optional, Union, Callable
 
 
 class ToolResult:
-    """Result from tool execution."""
+    """Result from tool execution.
 
-    def __init__(self, success: bool, output: Any, error: Optional[str] = None):
+    ``metadata`` is an optional side-channel for non-LLM-facing data
+    (e.g., a TaskTool subagent run's ``tokens_used`` so the parent agent
+    can roll it into its cumulative meter without exposing it to the
+    model in ``output``). Default empty.
+    """
+
+    def __init__(
+        self,
+        success: bool,
+        output: Any,
+        error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
         self.success = success
         self.output = output
         self.error = error
+        self.metadata: Dict[str, Any] = metadata or {}
 
     def to_message(self) -> str:
         """Format for LLM consumption."""

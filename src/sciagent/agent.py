@@ -40,11 +40,12 @@ class AgentConfig:
     max_tokens: int =  16384 # 32768  # Large limit for thorough code generation
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
     # Cumulative prompt+completion tokens before the loop forces a wrap-up.
-    # Anthropic appears to disconnect somewhere near ~4M cumulative tokens
-    # in a single session; we cap at 2M to leave headroom while letting
-    # complex multi-environment workflows actually finish. The compaction
-    # threshold (state.compress_token_threshold = 150K) handles per-call
-    # context-size pressure independently. 0 disables the check.
+    # This is a sciagent-internal soft budget — not a provider hard limit.
+    # 0 disables the check entirely. The active model's profile
+    # (`session_soft_budget`) overrides this when set via the
+    # ``SCIAGENT_SESSION_SOFT_BUDGET`` env var. Per-call context-size
+    # pressure is handled independently by ``state.compress_token_threshold``,
+    # which is itself derived from the model's context window.
     max_session_tokens: int = 2_000_000
     working_dir: str = "."
     verbose: bool = True
@@ -108,9 +109,27 @@ class AgentLoop:
             working_dir=os.path.abspath(self.config.working_dir),
             registry_path=self._registry_path
         )
+        # Resolve the active model's profile (litellm registry + sciagent
+        # overlay) so compaction threshold and budget gates track the
+        # actual context window — 600K for 1M-context models, 77K for
+        # 128K GPT-4o, 5K for an 8K Ollama default. Stays current as the
+        # litellm community updates its model registry.
+        from .llm_profiles import profile_for
+        self.profile = profile_for(self.config.model)
+
+        # Optional per-deployment override of the cumulative session budget.
+        # The static AgentConfig default (2_000_000) is kept as a final
+        # fallback, but if SCIAGENT_SESSION_SOFT_BUDGET is set in env, the
+        # profile carries it and we honor it here.
+        if self.profile.session_soft_budget is not None:
+            self.config.max_session_tokens = self.profile.session_soft_budget
+
         self.state = AgentState(
             session_id=generate_session_id(),
-            context=ContextWindow(system_prompt=prompt),
+            context=ContextWindow(
+                system_prompt=prompt,
+                compress_token_threshold=self.profile.compact_threshold_tokens,
+            ),
             todos=TodoList(),
             working_dir=self.config.working_dir,
             model=self.config.model,
@@ -148,7 +167,10 @@ class AgentLoop:
         
         # Iteration tracking
         self.iteration_count = 0
-        self.total_tokens = 0
+        self.total_tokens = 0           # cumulative input + output across the session
+        self.total_cache_reads = 0      # sum of prompt_tokens served from cache
+        self.total_cache_writes = 0     # sum of new tokens written into cache
+        self.total_subagent_tokens = 0  # rolled up from completed subagent runs
 
         # Spiral detection - track repeated errors
         self._error_counts: Dict[str, int] = {}
@@ -701,48 +723,116 @@ class AgentLoop:
         """
         Use LLM to summarize a section of conversation context.
 
-        This preserves important information when compressing context,
-        rather than simply truncating and losing information.
+        Three layers of cost discipline, smallest first:
+
+        1. **Per-message head+tail preservation** — a single huge message
+           (long error trace, big paste) is shrunk to ``head + tail`` with
+           an elision marker. Errors usually live at the tail; commands /
+           context at the head. Keeps both, drops the middle.
+        2. **Per-call input ceiling** — cap total summarizer input at
+           ~25% of the model's context window. If the formatted message
+           list overflows, drop OLDEST first with a marker.
+        3. **Recovery-friendly placeholders** — never produce a phantom
+           summary that hides what was lost. Markers tell the model what
+           to re-fetch (provenance event_id) if it needs the original.
+
+        Why not the old fixed 500/300/200-char chops: those clipped
+        recent dense facts (numerics, error strings, exact filenames)
+        — the AMA-Bench finding for what matters most. The new approach
+        clips *oldest* and clips *middles*, never recent dense content.
+
+        Tool-result clearing (``ContextWindow.clear_old_tool_results``)
+        runs *before* this in the agent loop, so most bulk tool output
+        is already a short placeholder by the time we get here. The LLM
+        summarizer call typically only fires when assistant/user content
+        alone has crossed the threshold — which is much rarer.
         """
-        # Format messages for summarization
+        from .llm_profiles import CHARS_PER_TOKEN
+
+        # Per-message cap: 8000 chars (~2K tokens) before head+tail
+        # truncation kicks in. Below this, content stays verbatim.
+        per_message_cap = 8_000
+        per_message_head = 4_000
+        per_message_tail = 4_000
+
+        # Per-summary input ceiling: 25% of the model's context window.
+        try:
+            input_char_budget = int(
+                self.profile.context_window * 0.25 * CHARS_PER_TOKEN
+            )
+        except AttributeError:
+            input_char_budget = 200_000  # ~50K tokens
+
+        def _shrink(text: str) -> str:
+            if len(text) <= per_message_cap:
+                return text
+            head = text[:per_message_head]
+            tail = text[-per_message_tail:]
+            elided = len(text) - per_message_head - per_message_tail
+            return (
+                f"{head}\n\n"
+                f"[... {elided:,} chars elided to bound summarizer input ...]\n\n"
+                f"{tail}"
+            )
+
+        # Format messages for summarization. Content goes in verbatim;
+        # only the labels are mechanical.
         formatted = []
+        running_chars = 0
+        truncation_marker = "\n\n[... earlier messages omitted to fit summarizer input budget ...]\n\n"
+
         for msg in messages:
             role = msg.role if hasattr(msg, 'role') else msg.get('role', 'unknown')
             content = msg.content if hasattr(msg, 'content') else msg.get('content', '')
 
+            if not isinstance(content, str):
+                # Multimodal or structured content — flatten to a string
+                # representation for summary purposes.
+                content = str(content)
+
             if role == "tool":
                 name = msg.name if hasattr(msg, 'name') else msg.get('name', 'tool')
-                # Truncate long tool outputs for summary
-                if len(content) > 500:
-                    content = content[:500] + "... [truncated]"
-                formatted.append(f"[Tool: {name}] {content}")
+                block = f"[Tool: {name}]\n{_shrink(content)}"
             elif role == "assistant":
-                # Check for tool calls
                 tool_calls = msg.tool_calls if hasattr(msg, 'tool_calls') else msg.get('tool_calls')
+                lines = []
                 if tool_calls:
-                    tools_used = [tc.get('function', {}).get('name', 'unknown')
-                                  if isinstance(tc, dict) else getattr(tc, 'name', 'unknown')
-                                  for tc in tool_calls]
-                    formatted.append(f"[Assistant used tools: {', '.join(tools_used)}]")
+                    tools_used = [
+                        tc.get('function', {}).get('name', 'unknown')
+                        if isinstance(tc, dict) else getattr(tc, 'name', 'unknown')
+                        for tc in tool_calls
+                    ]
+                    lines.append(f"[Assistant used tools: {', '.join(tools_used)}]")
                 if content:
-                    formatted.append(f"[Assistant] {content[:300]}..." if len(content) > 300 else f"[Assistant] {content}")
+                    lines.append(f"[Assistant] {_shrink(content)}")
+                block = "\n".join(lines) if lines else ""
             elif role == "user":
-                formatted.append(f"[User] {content[:200]}..." if len(content) > 200 else f"[User] {content}")
+                block = f"[User] {_shrink(content)}"
+            else:
+                block = f"[{role}] {_shrink(content)}"
 
-        context_text = "\n".join(formatted)
+            if not block:
+                continue
 
-        # Use the LLM to summarize
-        summary_prompt = f"""Summarize the following conversation context concisely.
-Focus on:
-1. Key decisions made
-2. Important findings/results
-3. Files created or modified
-4. Current state of the task
+            # Honor the input budget: if appending this block would push
+            # us over, mark a single ellipsis and stop. Older messages
+            # (earlier in the list) lose first — recent context is more
+            # valuable than ancient context.
+            if running_chars + len(block) > input_char_budget:
+                if not formatted or formatted[-1] != truncation_marker.strip():
+                    formatted.insert(0, truncation_marker.strip())
+                break
+            formatted.append(block)
+            running_chars += len(block)
+
+        context_text = "\n\n".join(formatted)
+
+        summary_prompt = f"""Summarize the following conversation context concisely. Preserve dense facts that the agent will need later — exact filenames and paths, numerical results, parameter values, error strings, decisions made, files created or modified, and the current state of the task. Drop pleasantries, intermediate exploration that didn't pan out, and chatter.
 
 Context to summarize:
 {context_text}
 
-Provide a concise summary (max 500 words):"""
+Provide a focused summary (target ~600 words; longer is fine if dense facts demand it):"""
 
         try:
             from .llm import Message as LLMMessage
@@ -751,8 +841,7 @@ Provide a concise summary (max 500 words):"""
             ])
             return summary_response.content
         except Exception as e:
-            # Fallback: return a simple truncated version
-            return f"[Context summary failed: {str(e)}]\n\nRecent activity included: {context_text[:1000]}..."
+            return f"[Context summary failed: {str(e)}]\n\nRecent activity (raw):\n{context_text[:4000]}"
 
     # =========================================================================
     # Callback Registration
@@ -1218,6 +1307,17 @@ Provide a concise summary (max 500 words):"""
                     )
                     self.display.tool_end(tc.name, success=False, error=str(e))
 
+            # Roll subagent token costs into the parent's cumulative
+            # meter so the budget gate accounts for delegated work.
+            # The TaskTool stuffs this into ToolResult.metadata after a
+            # subagent run completes; never surfaced to the model.
+            sub_tokens = (
+                getattr(result, "metadata", None) or {}
+            ).get("subagent_tokens_used")
+            if isinstance(sub_tokens, int) and sub_tokens > 0:
+                self.total_tokens += sub_tokens
+                self.total_subagent_tokens += sub_tokens
+
             # Check if this is an image result from file_ops
             is_image_result = (
                 result.success and
@@ -1323,9 +1423,24 @@ Provide a concise summary (max 500 words):"""
         with Spinner("Thinking", quiet=self.display.quiet, delay=0.5, interrupt_event=self._interrupt_event):
             response = self._interruptible_llm_call(messages, tools=tool_schemas)
 
-        # Track usage
+        # Track usage. ``total_tokens`` is the cumulative session meter
+        # (billing accumulator). We also track cache hits separately so the
+        # budget warning can show the user how much they actually paid for
+        # vs. what was served from cache. Anthropic cache reads cost 10% of
+        # base input; OpenAI auto-cache gives ~50% off cached portion.
         self.total_tokens += response.usage.get("prompt_tokens", 0)
         self.total_tokens += response.usage.get("completion_tokens", 0)
+
+        # Cache metrics — extracted but previously dropped on the floor.
+        # Sum cache reads across the session; the budget UI displays the
+        # ratio so the user knows their effective cost.
+        if hasattr(response, "cache_info") and isinstance(response.cache_info, dict):
+            self.total_cache_reads += int(
+                response.cache_info.get("cache_read_input_tokens") or 0
+            )
+            self.total_cache_writes += int(
+                response.cache_info.get("cache_creation_input_tokens") or 0
+            )
 
         return response
     
@@ -1396,10 +1511,30 @@ Provide a concise summary (max 500 words):"""
             return None
 
         print(
-            f"\n⚠️  Approaching token budget "
+            f"\n⚠️  Approaching cumulative session budget "
             f"({self.total_tokens:,} / {budget:,} tokens used)"
         )
-        print("   Anthropic's per-session ceiling is near; further turns may disconnect.")
+        # Cache hit ratio + subagent contribution help the user judge
+        # actual cost. Cached reads typically cost 10% (Anthropic) or
+        # ~50% (OpenAI) of base input, so a high cache ratio means the
+        # raw token count substantially overstates real cost.
+        cache_pct = (
+            (self.total_cache_reads * 100 / self.total_tokens)
+            if self.total_tokens else 0
+        )
+        if self.total_cache_reads or self.total_subagent_tokens:
+            sub_part = (
+                f", subagents {self.total_subagent_tokens:,}"
+                if self.total_subagent_tokens else ""
+            )
+            print(
+                f"   Cache: {self.total_cache_reads:,} reads ({cache_pct:.0f}% "
+                f"of total){sub_part}"
+            )
+        print(
+            "   This is sciagent's soft cap on cumulative tokens this session "
+            "(separate from the per-call context window, which compaction handles)."
+        )
         print("\nWhat would you like to do?")
         print("  [w] Wrap up - ask agent to summarize current progress")
         print("  [c] Continue - keep going (may hit limit)")
@@ -1527,9 +1662,10 @@ Provide a concise summary (max 500 words):"""
                             self._iteration_limit_checked = False  # Reset so check triggers again
                             print(f"   Increased max iterations to {max_iter}")
 
-                # Same flow for session token budget. Anthropic hard-disconnects
-                # when a session crosses its ceiling — far worse than wrapping up
-                # cleanly here.
+                # Same flow for session token budget. The cap is a sciagent
+                # soft budget (configurable via SCIAGENT_SESSION_SOFT_BUDGET);
+                # wrapping up cleanly here is friendlier than hitting any
+                # provider-side rate or session limit mid-iteration.
                 if not self._token_limit_checked:
                     action = self._check_token_limit()
                     if action:
@@ -1570,10 +1706,25 @@ Provide a concise summary (max 500 words):"""
 
                 self.iteration_count += 1
 
-                # Compress context if getting too large (don't stop, compress)
-                if self.state.context.token_estimate() > 120000:
-                    print("  📦 Compressing context...")
-                    self.state.context.compress_if_needed(summarizer=self._summarize_context)
+                # Compress context if getting too large (don't stop, compress).
+                # Single source of truth: ContextWindow.compress_token_threshold,
+                # set at construction from the model's profile (60% of context
+                # window by default; SCIAGENT_COMPACT_AT_PCT overrides).
+                #
+                # Two-phase compaction: first try the cheap mechanical lever —
+                # replace older tool_result payloads with placeholders (no LLM
+                # call, preserves tool_use/tool_result pairing). Often the
+                # context blew up because of one or two huge tool dumps; this
+                # clears them and avoids paying for a full LLM summarize. If
+                # the context is still over threshold afterwards, fall through
+                # to the LLM-based middle-summarize pass.
+                if self.state.context.token_estimate() > self.state.context.compress_token_threshold:
+                    cleared = self.state.context.clear_old_tool_results(keep_last=8)
+                    if cleared:
+                        print(f"  🧹 Cleared {cleared} old tool result(s)")
+                    if self.state.context.token_estimate() > self.state.context.compress_token_threshold:
+                        print("  📦 Compressing context...")
+                        self.state.context.compress_if_needed(summarizer=self._summarize_context)
 
                 try:
                     response = self._single_step()

@@ -827,14 +827,14 @@ If you bailed out due to environmental failure (sky misbehavior, image pull, aut
             # should reflect what real end-to-end compute takes, not
             # force premature wrap-up on legitimate iteration.
             max_iterations=120,
-            # Matches the 2M AgentLoop default. Anthropic's session
-            # disconnect happens nearer ~4M tokens, and complex
+            # Matches the AgentLoop default — sciagent's soft cap on
+            # cumulative tokens for this subagent's life. Complex
             # multi-environment workflows (provision + run + analyze +
-            # plot) can legitimately accumulate 1M+ before wrap-up. The
-            # compaction threshold (state.py:compress_token_threshold =
-            # 150K) handles per-call context-size pressure independently
-            # — long-running work compacts mid-flight rather than trying
-            # to fit everything in one window.
+            # plot) can legitimately accumulate 1M+ before wrap-up.
+            # Per-call context-size pressure is handled independently by
+            # the model profile's compaction threshold (60% of context
+            # window by default) — long-running work compacts mid-flight
+            # rather than trying to fit everything in one window.
             max_session_tokens=2_000_000,
         ))
 
@@ -1559,13 +1559,27 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
                 )
             return ToolResult(
                 success=True,
-                output=f"[Sub-agent '{agent_name}' completed in {result.iterations} iterations]\n\n{output}"
+                output=f"[Sub-agent '{agent_name}' completed in {result.iterations} iterations]\n\n{output}",
+                # Subagent token cost rolls into the parent's cumulative
+                # meter via this side-channel — never visible to the LLM
+                # (only ``output`` reaches the model), but the parent's
+                # AgentLoop reads metadata after each tool call.
+                metadata={
+                    "subagent_tokens_used": result.tokens_used,
+                    "subagent_name": agent_name,
+                    "subagent_iterations": result.iterations,
+                },
             )
         else:
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Sub-agent failed: {result.error}"
+                error=f"Sub-agent failed: {result.error}",
+                metadata={
+                    "subagent_tokens_used": result.tokens_used,
+                    "subagent_name": agent_name,
+                    "subagent_iterations": result.iterations,
+                },
             )
 
 

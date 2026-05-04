@@ -147,11 +147,20 @@ class ContextWindow:
     # even if message count is below max_messages. Some workflows have
     # few messages but huge tool results (log dumps, status snapshots,
     # large file reads) — message count alone misses that case.
-    # Default 150K targets Anthropic 200K-context models with ~75%
-    # headroom (avoids compaction-thrash while leaving margin against
-    # the per-call ceiling). Long-context models (Gemini 1M, Claude
-    # long-context tier) can raise this; small-context models lower it.
-    compress_token_threshold: int = 150_000
+    #
+    # Computed from the active model's profile (`compact_threshold_tokens`)
+    # at construction time so it tracks the model's actual context window
+    # — 600K for a 1M-context Claude/Gemini, 77K for 128K GPT-4o, 5K for
+    # an 8K Ollama default. Override via env ``SCIAGENT_COMPACT_AT_PCT``.
+    # Falls back to 60% of 32K when called pre-profile.
+    compress_token_threshold: int = 19_660
+    # Long-lived summary block, prepended to the system prompt at message
+    # build time. Compaction rewrites this in place rather than inserting
+    # a message into the middle of the conversation — keeping the byte
+    # layout of the message list stable preserves prompt caching across
+    # compaction events. Only the system prefix changes, and only when
+    # compaction actually fires (rare).
+    summary_block: str = ""
     
     def add_user_message(self, content: Union[str, List[Dict[str, Any]]]) -> Message:
         """Add a user message. Content can be string or multimodal content blocks."""
@@ -190,8 +199,31 @@ class ContextWindow:
         return msg
     
     def get_messages(self) -> List[Message]:
-        """Get all messages including system prompt"""
-        return [Message(role="system", content=self.system_prompt)] + self.messages
+        """Get all messages including system prompt + any long-lived summary.
+
+        The summary block (if any) is appended to the system prompt as part
+        of the cached prefix — not inserted into the middle of the message
+        list — so prompt caching survives compaction events. Format is
+        deterministic: a clearly delimited section the model recognizes
+        across providers.
+        """
+        return [
+            Message(
+                role="system",
+                content=self._build_system_content()
+            )
+        ] + self.messages
+
+    def _build_system_content(self) -> str:
+        """Combine the static system prompt with any long-lived summary."""
+        if not self.summary_block:
+            return self.system_prompt
+        return (
+            f"{self.system_prompt}"
+            f"\n\n## Long-lived context summary\n\n"
+            f"{self.summary_block}"
+            f"\n\n## End long-lived context summary\n"
+        )
     
     def compress_if_needed(self, summarizer=None):
         """
@@ -221,17 +253,36 @@ class ContextWindow:
         end_idx = len(self.messages) - self._find_safe_cut_point(keep_end, forward=False, from_end=True)
 
         if summarizer:
-            # Use LLM to summarize middle section
+            # Use LLM to summarize the middle section. Write the result
+            # into ``summary_block`` (which lives in the cached prefix at
+            # message build time) instead of inserting a fresh assistant
+            # message mid-conversation. Mid-message insertion would change
+            # the byte layout of the message list and invalidate prompt
+            # caching from that point onward; rewriting the prefix in
+            # place keeps the *suffix* (recent messages) byte-identical.
+            #
+            # Successive compactions accumulate by prepending the new
+            # summary onto the previous one (then re-summarizing on the
+            # next pass) rather than overwriting — so older context isn't
+            # erased outright on the second compaction event.
             middle = self.messages[start_idx:end_idx]
             if middle:
                 summary_text = summarizer(middle)
-                summary_msg = Message(
-                    role="assistant",
-                    content=f"[Context Summary]\n{summary_text}"
-                )
+                if self.summary_block:
+                    # On second+ compaction, fold the prior summary into
+                    # the new one as additional context for the summarizer
+                    # to subsume. Cheap; the summarizer call has already
+                    # been paid for at this point.
+                    self.summary_block = (
+                        f"### Earlier session summary (rolling)\n"
+                        f"{self.summary_block}\n\n"
+                        f"### Newer activity summary\n"
+                        f"{summary_text}"
+                    )
+                else:
+                    self.summary_block = summary_text
                 self.messages = (
                     self.messages[:start_idx] +
-                    [summary_msg] +
                     self.messages[end_idx:]
                 )
         else:
@@ -313,6 +364,59 @@ class ContextWindow:
         """Clear all messages but keep system prompt"""
         self.messages = []
 
+    def clear_old_tool_results(self, keep_last: int = 8) -> int:
+        """Replace older tool-result payloads with a placeholder, in place.
+
+        Cheaper than full summarization: zero LLM calls, preserves the
+        ``tool_use`` records (so causal chains stay legible to the model)
+        and the ``tool_call_id`` linkage (so the API doesn't reject the
+        message list as having orphaned tool_use blocks). Just rewrites
+        the *content* of stale ``tool`` messages to a short placeholder
+        the model can recognize and act on if it needs the data back.
+
+        Use this BEFORE full LLM summarization. It handles the common
+        scientific-computing failure mode — one bulky tool call (a 10K-
+        line solver log, a `compute_cluster(action="logs")` dump, a
+        `bash` exec output) blowing the context budget — at near-zero
+        cost. If after clearing the context still exceeds the threshold,
+        ``compress_if_needed`` does its full LLM-summarize pass.
+
+        ``keep_last`` is the number of most-recent ``tool`` messages
+        whose payloads stay verbatim. Default 8 covers the typical
+        "current train of thought" while clearing the long tail.
+
+        Returns the number of tool messages whose payloads were replaced.
+        Idempotent — already-cleared messages aren't double-counted.
+        """
+        # Find indices of tool messages, in order.
+        tool_indices = [
+            i for i, m in enumerate(self.messages) if m.role == "tool"
+        ]
+        if len(tool_indices) <= keep_last:
+            return 0
+
+        cleared_count = 0
+        cutoff = len(tool_indices) - keep_last
+        for tool_idx in tool_indices[:cutoff]:
+            msg = self.messages[tool_idx]
+            # Skip ones we've already cleared.
+            if isinstance(msg.content, str) and msg.content.startswith(
+                "[cleared:"
+            ):
+                continue
+
+            tool_name = msg.name or "tool"
+            call_id = msg.tool_call_id or "unknown"
+            placeholder = (
+                f"[cleared: tool={tool_name} call_id={call_id} — "
+                f"payload elided to free context. Re-run the tool with "
+                f"the same arguments if you need this data back, or "
+                f"check the provenance log for the original.]"
+            )
+            msg.content = placeholder
+            cleared_count += 1
+        return cleared_count
+
     def validate_and_repair(self) -> List[str]:
         """
         Validate message structure and repair if needed.
@@ -375,7 +479,7 @@ class ContextWindow:
         For multimodal content with images, estimates based on image size
         (images are roughly 85 tokens per tile, ~765 tokens for small images).
         """
-        total_chars = len(self.system_prompt)
+        total_chars = len(self.system_prompt) + len(self.summary_block)
         for msg in self.messages:
             content = msg.content
             if isinstance(content, str):
@@ -419,6 +523,7 @@ class AgentState:
             "session_id": self.session_id,
             "system_prompt": self.context.system_prompt,
             "messages": [m.to_dict() for m in self.context.messages],
+            "summary_block": self.context.summary_block,
             "todos": self.todos.to_dict(),
             "working_dir": self.working_dir,
             "model": self.model,
@@ -428,12 +533,13 @@ class AgentState:
             "created_at": self.created_at,
             "updated_at": self.updated_at
         }
-    
+
     @classmethod
     def from_dict(cls, data: Dict) -> "AgentState":
         context = ContextWindow(
             system_prompt=data.get("system_prompt", ""),
-            messages=[Message.from_dict(m) for m in data.get("messages", [])]
+            messages=[Message.from_dict(m) for m in data.get("messages", [])],
+            summary_block=data.get("summary_block", "")
         )
         todos = TodoList.from_dict(data.get("todos", {}))
 
