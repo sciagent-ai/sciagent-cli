@@ -49,9 +49,19 @@ from .job import JobResult, JobStatus
 
 KNOWN_KINDS = ("compute_job", "subagent")
 
-VALID_STATES = ("pending", "running", "completed", "failed", "cancelled")
+VALID_STATES = (
+    "pending", "running", "completed", "failed", "cancelled",
+    # Subagent-only terminal: subagent claimed success but its declared
+    # produces_uris pattern(s) didn't resolve to a non-trivial artifact.
+    # Distinct from "failed" so the parent / a verifier can tell a
+    # contract gap apart from a real subagent failure (LLM crash, tool
+    # error, etc.) without parsing result_summary.
+    "blocked_produce_missing",
+)
 
-TERMINAL_STATES = ("completed", "failed", "cancelled")
+TERMINAL_STATES = (
+    "completed", "failed", "cancelled", "blocked_produce_missing",
+)
 
 DEFAULT_KIND = "compute_job"
 DEFAULT_STATE = "running"

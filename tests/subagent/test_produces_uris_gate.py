@@ -141,11 +141,16 @@ def test_sync_glob_pattern_matches(tmp_manifest_dir: Path, tmp_path: Path):
 # ---- background path -----------------------------------------------------
 
 
-def test_background_local_pattern_missing_lands_in_failed_state(
+def test_background_local_pattern_missing_lands_in_blocked_state(
     tmp_manifest_dir: Path, tmp_path: Path
 ):
     """A backgrounded subagent that claims success but hasn't written its
-    declared artifact lands in terminal state 'failed', not 'completed'."""
+    declared artifact lands in terminal state 'blocked_produce_missing'.
+
+    Distinct from 'failed' so a verifier can tell a contract gap apart
+    from a real subagent failure (LLM crash, tool error). Both are
+    terminal; only the discriminator differs.
+    """
     orch = _make_orchestrator_with_fake(
         lambda name: _FakeSubAgent(name, output="ok claimed")
     )
@@ -157,10 +162,39 @@ def test_background_local_pattern_missing_lands_in_failed_state(
     )
     assert placeholder.task_id is not None
     record = _wait_for_terminal(placeholder.task_id)
-    assert record["state"] == "failed", record
+    assert record["state"] == "blocked_produce_missing", record
     body_result = record["body"]["result"]
     assert body_result["success"] is False
     assert "./never_written.txt" in body_result["error"]
+    # Manifest body carries the declared contract so a later reader knows
+    # what the gate was asked to check, not just the verdict.
+    assert record["body"]["produces_uris"] == ["./never_written.txt"]
+    assert record["body"]["produces_min_bytes"] == 256
+
+
+def test_background_real_subagent_failure_still_lands_in_failed_state(
+    tmp_manifest_dir: Path, tmp_path: Path
+):
+    """A real subagent failure (LLM crash, tool error) with produces_uris
+    declared still terminates as 'failed', NOT 'blocked_produce_missing'.
+
+    Guard against the gate widening past its scope — only contract gaps
+    should land in the blocked state.
+    """
+    orch = _make_orchestrator_with_fake(
+        lambda name: _FakeSubAgent(
+            name, success=False, output="", error="LLM refused"
+        )
+    )
+    orch.working_dir = str(tmp_path)
+    placeholder = orch.spawn(
+        "explore", "ignored",
+        background=True,
+        produces_uris=["./missing.txt"],
+    )
+    record = _wait_for_terminal(placeholder.task_id)
+    assert record["state"] == "failed", record
+    assert "LLM refused" in record["body"]["result"]["error"]
 
 
 def test_background_local_pattern_present_lands_in_completed_state(

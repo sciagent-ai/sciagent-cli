@@ -424,6 +424,63 @@ class ProvenanceLog:
         }
         return self._write_event("artifact_produced", body)
 
+    def emit_produces_validation_passed(
+        self,
+        *,
+        subagent_name: str,
+        patterns: List[str],
+        resolved: List[Dict[str, Any]],
+    ) -> str:
+        """Emit a produces_validation_passed event.
+
+        Fired by SubAgentOrchestrator after a subagent claims success and
+        every pattern in its declared ``produces_uris`` resolves to ≥1 file
+        ≥ ``produces_min_bytes``. ``resolved`` carries per-pattern URIs +
+        sizes so a lineage reader can answer "what artifact actually backed
+        this claim?" without re-listing later.
+
+        Shape mirrors ``emit_artifact_produced`` (URIs + sizes + actor)
+        rather than the ad-hoc _write_event used pre-promotion.
+        """
+        body = {
+            "subagent_name": subagent_name,
+            "patterns": list(patterns) if patterns else [],
+            "resolved": list(resolved) if resolved else [],
+            "verdict": "passed",
+        }
+        return self._write_event(
+            "produces_validation_passed",
+            body,
+            actor=f"subagent:{subagent_name}",
+        )
+
+    def emit_produces_validation_failed(
+        self,
+        *,
+        subagent_name: str,
+        patterns: List[str],
+        missing: List[Dict[str, Any]],
+    ) -> str:
+        """Emit a produces_validation_failed event.
+
+        Fired when at least one pattern in ``produces_uris`` failed to
+        resolve. ``missing`` is a list of ``{pattern, reason}`` entries
+        the gate built — the same shape passed to the failed
+        ``SubAgentResult.error`` so a verifier reading the log can match
+        verdict to user-visible error verbatim.
+        """
+        body = {
+            "subagent_name": subagent_name,
+            "patterns": list(patterns) if patterns else [],
+            "missing": list(missing) if missing else [],
+            "verdict": "failed",
+        }
+        return self._write_event(
+            "produces_validation_failed",
+            body,
+            actor=f"subagent:{subagent_name}",
+        )
+
     def emit_verification_result(
         self,
         *,

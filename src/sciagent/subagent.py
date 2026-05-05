@@ -767,6 +767,10 @@ Wrong pattern (the one that fails silently): `mkdir $OUTPUTS_DIR/case1 && build.
 
 CWD precedence on the cluster: input mount > `workdir=` rsync target > image WORKDIR. The compute layer's prologue sets the cd and `$OUTPUTS_DIR` for you.
 
+## Artifact contract — write to the parent's declared `produces_uris`
+
+When the parent dispatched you with `produces_uris` (URI patterns or local globs), the orchestrator validates each pattern after you return: each must resolve to ≥1 file ≥ `produces_min_bytes`. Land your final artifacts at exactly those URIs / paths — under `$OUTPUTS_DIR/...` for cluster-side outputs that auto-fetch, or pushed to the declared `s3://` / `gs://` / `r2://` URI directly. A success claim with nothing at the declared pattern lands as `blocked_produce_missing` and the parent re-spawns; a 0-byte placeholder fails the byte floor and gates the same way. If you can't satisfy the declared pattern (env mismatch, derivation belongs in the wrong peer, missing input), return BLOCKED with the gap named — never write a stub to make the gate pass.
+
 ## Compose your run
 
 You have these primitives — pick the smallest set that solves the task:
@@ -1264,12 +1268,13 @@ class SubAgentOrchestrator:
         # attribution. The underlying subagent's own failure path is left
         # alone — the gate only runs on successful claims.
         if result.success and produces_uris:
-            missing = self._validate_produces_uris(
+            verdict = self._validate_produces_uris(
                 produces_uris, produces_min_bytes
             )
             self._emit_produces_validation(
-                agent_name, not missing, produces_uris, missing
+                agent_name, produces_uris, verdict
             )
+            missing = verdict["missing"]
             if missing:
                 result = SubAgentResult(
                     agent_name=agent_name,
@@ -1359,6 +1364,13 @@ class SubAgentOrchestrator:
                 "child_session_id": sub_agent.session_id,
                 "output_log_path": str(output_log_path),
                 "result": None,
+                # Declared artifact contract — empty list when the parent
+                # didn't declare any produces_uris (read-only tasks). Stored
+                # alongside the rest of the manifest body so a later reader
+                # (lineage, verifier, post-mortem) sees what the gate was
+                # asked to check, not just whether it passed.
+                "produces_uris": list(produces_uris) if produces_uris else [],
+                "produces_min_bytes": produces_min_bytes,
             },
         }
         try:
@@ -1495,18 +1507,23 @@ class SubAgentOrchestrator:
         body = dict(record.get("body") or {})
 
         # produces_uris gate: same logic as the sync path. Runs BEFORE the
-        # terminal state is decided so the manifest lands in "failed" rather
-        # than "completed" when artifacts are missing. Provenance event is
-        # emitted either way.
+        # terminal state is decided so the manifest lands in
+        # "blocked_produce_missing" rather than "completed" when artifacts
+        # are missing. Provenance event is emitted either way. The new
+        # state is distinct from "failed" so a verifier can tell a
+        # contract gap apart from a real subagent failure.
+        produce_blocked = False
         if result.success and produces_uris:
-            missing = self._validate_produces_uris(
+            verdict = self._validate_produces_uris(
                 produces_uris, produces_min_bytes
             )
             self._emit_produces_validation(
                 agent_name or body.get("name") or "unknown",
-                not missing, produces_uris, missing,
+                produces_uris, verdict,
             )
+            missing = verdict["missing"]
             if missing:
+                produce_blocked = True
                 result = SubAgentResult(
                     agent_name=result.agent_name,
                     task=result.task,
@@ -1543,7 +1560,12 @@ class SubAgentOrchestrator:
         }
         record["body"] = body
 
-        terminal_state = "completed" if result.success else "failed"
+        if result.success:
+            terminal_state = "completed"
+        elif produce_blocked:
+            terminal_state = "blocked_produce_missing"
+        else:
+            terminal_state = "failed"
         record["state"] = terminal_state
         record["completed_at"] = datetime.now(timezone.utc).isoformat()
         # Top-level result_summary is what task_list shows per-row — keep it
@@ -1573,13 +1595,15 @@ class SubAgentOrchestrator:
         self,
         patterns: List[str],
         min_bytes: int,
-    ) -> List[Dict[str, str]]:
+    ) -> Dict[str, List[Dict[str, Any]]]:
         """List each pattern; confirm at least one file ≥ min_bytes resolves.
 
-        Returns a list of {pattern, reason} entries for patterns that failed
-        to resolve. An empty return means every pattern passed. The check is
-        mechanical (one cloud listing or one glob per pattern, no LLM call) —
-        cheap relative to the subagent work just done.
+        Returns ``{"missing": [...], "resolved": [...]}``. Each entry in
+        ``missing`` is ``{pattern, reason}``; each entry in ``resolved`` is
+        ``{pattern, scheme, files: [{path, bytes}, ...]}``. An empty
+        ``missing`` means every pattern passed. The check is mechanical
+        (one cloud listing or one glob per pattern, no LLM call) — cheap
+        relative to the subagent work just done.
 
         Cloud URIs (s3/gs/r2) go through MaterializeTool(list_only=True);
         az/oci pass through unvalidated for v1 (tooling gap, not policy).
@@ -1591,7 +1615,13 @@ class SubAgentOrchestrator:
         from .tools.atomic.materialize import MaterializeTool
 
         materialize: Optional[MaterializeTool] = None
-        missing: List[Dict[str, str]] = []
+        missing: List[Dict[str, Any]] = []
+        resolved: List[Dict[str, Any]] = []
+        # Cap how many files-per-pattern we record on the pass event.
+        # Bounded so a 10K-object prefix doesn't bloat one provenance line
+        # past MAX_LINE_BYTES; the gate's verdict only needs evidence, not
+        # an exhaustive listing.
+        max_files_per_pattern = 16
 
         for pat in patterns:
             scheme = urlparse(pat).scheme
@@ -1614,8 +1644,28 @@ class SubAgentOrchestrator:
                             f"{len(files)} files listed, none ≥ {min_bytes} bytes"
                         ),
                     })
+                else:
+                    resolved.append({
+                        "pattern": pat,
+                        "scheme": scheme,
+                        "files": [
+                            {
+                                "path": f.get("path"),
+                                "bytes": f.get("bytes"),
+                            }
+                            for f in files[:max_files_per_pattern]
+                        ],
+                        "file_count": len(files),
+                    })
             elif scheme in self._SKIPPABLE_CLOUD_SCHEMES:
                 # v1: cloud schemes without cheap listing pass through.
+                resolved.append({
+                    "pattern": pat,
+                    "scheme": scheme,
+                    "files": [],
+                    "file_count": None,
+                    "note": "skipped: scheme has no cheap listing in v1",
+                })
                 continue
             elif scheme and scheme != "file":
                 missing.append({
@@ -1640,33 +1690,49 @@ class SubAgentOrchestrator:
                             f"none ≥ {min_bytes} bytes"
                         ),
                     })
-        return missing
+                else:
+                    resolved.append({
+                        "pattern": pat,
+                        "scheme": "file",
+                        "files": [
+                            {"path": p, "bytes": sz}
+                            for p, sz in sized[:max_files_per_pattern]
+                        ],
+                        "file_count": len(sized),
+                    })
+        return {"missing": missing, "resolved": resolved}
 
     @staticmethod
     def _emit_produces_validation(
         agent_name: str,
-        passed: bool,
         patterns: List[str],
-        missing: List[Dict[str, str]],
+        verdict: Dict[str, List[Dict[str, Any]]],
     ) -> None:
-        """Best-effort provenance event. Matches TaskTool's _emit_spawned/
-        _emit_completed idiom — _write_event directly, no formal emit_*
-        method on ProvenanceLog yet. Promote when the event shape stabilizes.
+        """Best-effort provenance event. Routes to the formal emit_*
+        methods on ProvenanceLog so verifiers can match on event_kind +
+        load-bearing fields without tolerating the ad-hoc shape used
+        before promotion. ``verdict`` is the dict returned by
+        ``_validate_produces_uris``.
         """
         from .provenance_log import get_active_session_log
         plog = get_active_session_log()
         if plog is None:
             return
+        missing = verdict.get("missing") or []
+        resolved = verdict.get("resolved") or []
         try:
-            plog._write_event(
-                "produces_validation_passed" if passed else "produces_validation_failed",
-                {
-                    "subagent_name": agent_name,
-                    "patterns": list(patterns),
-                    "missing": missing,
-                },
-                actor=f"subagent:{agent_name}",
-            )
+            if missing:
+                plog.emit_produces_validation_failed(
+                    subagent_name=agent_name,
+                    patterns=list(patterns),
+                    missing=missing,
+                )
+            else:
+                plog.emit_produces_validation_passed(
+                    subagent_name=agent_name,
+                    patterns=list(patterns),
+                    resolved=resolved,
+                )
         except Exception:
             pass
 
