@@ -57,11 +57,29 @@ VALID_STATES = (
     # contract gap apart from a real subagent failure (LLM crash, tool
     # error, etc.) without parsing result_summary.
     "blocked_produce_missing",
+    # Subagent-only resumable: the run raised an exception (server
+    # disconnect, network drop, transient LLM error) BEFORE reaching a
+    # natural terminal. Distinct from "failed" because a failed run has
+    # produced its verdict; a crashed run hasn't and may still be
+    # finishable from its last checkpoint. Not in TERMINAL_STATES — a
+    # later spawn can match this entry by task description hash and
+    # offer the parent a 3-way resume decision.
+    "crashed",
+    # Subagent-only resumable: the agent itself decided the work can't
+    # complete in the current process and asked to be picked up later
+    # (e.g., parent budget hit, explicit pause). Sibling of "crashed";
+    # both are matched by the resume detector.
+    "blocked_resume",
 )
 
 TERMINAL_STATES = (
     "completed", "failed", "cancelled", "blocked_produce_missing",
 )
+
+# States from which a subagent can be resumed by a fresh spawn whose task
+# description hash matches an existing entry. Distinct from TERMINAL_STATES
+# because resumable entries are NOT done — they paused and can finish.
+RESUMABLE_STATES = ("crashed", "blocked_resume")
 
 DEFAULT_KIND = "compute_job"
 DEFAULT_STATE = "running"

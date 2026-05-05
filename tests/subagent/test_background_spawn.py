@@ -107,6 +107,19 @@ def _wait_for_terminal(task_id: str, timeout: float = 5.0) -> dict:
     )
 
 
+def _wait_for_state(task_id: str, states: tuple, timeout: float = 5.0) -> dict:
+    """Poll the manifest until state ∈ ``states`` or timeout."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        rec = task_index.read_task(task_id)
+        if rec and rec.get("state") in states:
+            return rec
+        time.sleep(0.02)
+    raise AssertionError(
+        f"task {task_id} did not reach one of {states} in {timeout}s"
+    )
+
+
 # ---- background=False keeps today's behavior --------------------------------
 
 
@@ -216,17 +229,23 @@ def test_background_spawn_failed_run_marks_state_failed(tmp_manifest_dir: Path):
     assert "LLM refused" in record["result_summary"]
 
 
-def test_background_spawn_unhandled_exception_still_finalizes(
+def test_background_spawn_unhandled_exception_marks_crashed(
     tmp_manifest_dir: Path,
 ):
-    """Even if SubAgent.run leaks an exception, the worker thread closes the
-    lifecycle so the registry doesn't stay 'running' forever."""
+    """Unhandled exception → state=crashed (resumable), not failed.
+
+    Crashed is a NON-terminal lifecycle state — the resume detector picks
+    it up next time the parent spawns the same task. The body.result still
+    carries the error message so a verifier reading the registry can tell
+    what went wrong without crawling the checkpoint files."""
     orch = _make_orchestrator_with_fake(
         lambda name: _FakeSubAgent(name, raise_inside_run=True)
     )
     result = orch.spawn("explore", "ignored", background=True)
-    record = _wait_for_terminal(result.task_id)
-    assert record["state"] == "failed"
+    record = _wait_for_state(result.task_id, ("crashed", "failed"))
+    assert record["state"] == "crashed"
+    assert record["state"] not in task_index.TERMINAL_STATES
+    assert record["state"] in task_index.RESUMABLE_STATES
     assert "simulated crash" in record["body"]["result"]["error"]
 
 

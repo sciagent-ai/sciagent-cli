@@ -11,7 +11,7 @@ import os
 import json
 import threading
 import uuid
-from typing import Dict, Any, List, Optional, Callable
+from typing import Dict, Any, List, Optional, Callable, Tuple
 from dataclasses import dataclass, field
 from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from datetime import datetime, timezone
@@ -21,6 +21,12 @@ from .tools import ToolRegistry, BaseTool, ToolResult, create_default_registry
 from .state import ContextWindow, generate_session_id
 from .agent import AgentLoop, AgentConfig
 from .defaults import DEFAULT_MODEL
+from .checkpoint import (
+    SubagentCheckpoint,
+    find_resumable_subagents,
+    task_description_hash,
+    warm_resume_window_seconds,
+)
 from .subagent_observations import (
     Observation,
     OBSERVATION_PROMPT_BLOCK,
@@ -117,6 +123,12 @@ class SubAgent:
         self.working_dir = working_dir
         self.is_nested = is_nested
         self.parent_interrupt_event = parent_interrupt_event
+        # Per-iteration checkpoint, attached after construction by the
+        # orchestrator via ``attach_checkpoint``. Kept off the constructor
+        # signature so existing test fixtures that patch ``_build_subagent``
+        # with ``lambda config: ...`` keep working unchanged.
+        self.task_id: Optional[str] = None
+        self.checkpoint: Optional[SubagentCheckpoint] = None
 
         # Create filtered tool registry if restrictions specified
         if tools and config.allowed_tools is not None:
@@ -189,6 +201,117 @@ class SubAgent:
         # emits provenance under. Equal at the top level; differ when nested.
         self.session_id = self.agent.state.session_id
         self.parent_session_id = parent_shared_session
+
+    def attach_checkpoint(
+        self,
+        task_id: str,
+        *,
+        owning_session_id: Optional[str] = None,
+    ) -> Optional[SubagentCheckpoint]:
+        """Wire per-iteration checkpointing for this subagent run.
+
+        Called by the orchestrator after construction. Kept separate from
+        ``__init__`` so existing fakes / test patches that build a SubAgent
+        directly (with the legacy signature) continue to work.
+
+        Returns the live ``SubagentCheckpoint`` (or None if disk setup
+        failed — in which case the subagent runs uncheckpointed but still
+        completes normally).
+        """
+        if not task_id:
+            return None
+        owning = owning_session_id or self.parent_session_id or self.session_id
+        try:
+            self.checkpoint = SubagentCheckpoint(
+                session_id=owning,
+                task_id=task_id,
+            )
+        except Exception:
+            self.checkpoint = None
+            return None
+        self.task_id = task_id
+        self._install_checkpoint_hooks()
+        return self.checkpoint
+
+    def seed_state_from_dict(self, state_dict: Dict[str, Any]) -> bool:
+        """Replace this subagent's AgentState with a previously saved one.
+
+        Used by the resume path after a crashed run. Preserves the NEW
+        session id and working_dir so the resumed run records under a
+        fresh session (the dead session id stays recorded in the
+        checkpoint meta for cross-reference). Returns True on success.
+        """
+        if not state_dict:
+            return False
+        try:
+            from .state import AgentState
+            restored = AgentState.from_dict(state_dict)
+            restored.session_id = self.agent.state.session_id
+            restored.working_dir = self.agent.state.working_dir
+            self.agent.state = restored
+            return True
+        except Exception:
+            return False
+
+    def _install_checkpoint_hooks(self) -> None:
+        """Wire on_tool_start / on_tool_end so each successful tool call
+        appends a checkpoint line and snapshots the AgentState.
+
+        on_tool_start records the tool args (the AgentLoop's existing
+        callback signature only passes args at start time). on_tool_end
+        pairs them with the result and writes one JSONL line plus the
+        full state snapshot. Both writes are best-effort — checkpoint
+        failures never break the run, per the same discipline
+        provenance_log uses.
+        """
+        if self.checkpoint is None:
+            return
+
+        # LIFO stack of (tool_name, args) entries. Same-named parallel
+        # tool calls within a single iteration aren't possible inside
+        # AgentLoop (it dispatches sequentially per turn), so a flat list
+        # is enough — no per-call_id keying required.
+        pending: List[Tuple[str, Any]] = []
+        prev_start = self.agent._on_tool_start
+        prev_end = self.agent._on_tool_end
+
+        def on_start(tool_name: str, args: Any) -> None:
+            pending.append((tool_name, args))
+            if prev_start is not None:
+                try:
+                    prev_start(tool_name, args)
+                except Exception:
+                    pass
+
+        def on_end(tool_name: str, result: Any) -> None:
+            args: Any = None
+            for i in range(len(pending) - 1, -1, -1):
+                if pending[i][0] == tool_name:
+                    _, args = pending.pop(i)
+                    break
+            try:
+                state = self.agent.state
+                todos_dict = state.todos.to_dict() if state else {}
+                self.checkpoint.record_iteration(
+                    iteration=getattr(self.agent, "iteration_count", 0),
+                    tool_name=tool_name,
+                    tool_args=args,
+                    tool_result=getattr(result, "output", None) if result else None,
+                    todo_state=todos_dict.get("items") or [],
+                    message_count=len(state.context.messages) if state else 0,
+                    success=getattr(result, "success", False),
+                )
+                self.checkpoint.save_agent_state(state.to_dict())
+            except Exception:
+                pass
+            if prev_end is not None:
+                try:
+                    prev_end(tool_name, result)
+                except Exception:
+                    pass
+
+        self.agent._on_tool_start = on_start
+        self.agent._on_tool_end = on_end
     
     def run(self, task: str) -> SubAgentResult:
         """Execute a task and return the result"""
@@ -1276,7 +1399,9 @@ class SubAgentOrchestrator:
         Factored out so background and synchronous paths share one
         construction site, and so tests can monkey-patch this single point
         to inject a fake SubAgent without touching the global SubAgent
-        class.
+        class. Per-iteration checkpointing is attached after construction
+        (see ``SubAgent.attach_checkpoint``) so this signature stays
+        stable across the resume work.
         """
         return SubAgent(
             config=config,
@@ -1295,6 +1420,8 @@ class SubAgentOrchestrator:
         on_complete: Optional[Callable[[SubAgentResult], None]] = None,
         produces_uris: Optional[List[str]] = None,
         produces_min_bytes: int = 256,
+        resume_choice: Optional[str] = None,
+        resume_task_id: Optional[str] = None,
     ) -> SubAgentResult:
         """
         Spawn and run a sub-agent
@@ -1333,11 +1460,38 @@ class SubAgentOrchestrator:
                 error=f"Unknown agent type: {agent_name}. Available: {[a['name'] for a in self.registry.list_agents()]}"
             )
 
+        # Resume detection — check task_index for crashed/blocked_resume
+        # entries belonging to the current parent session whose task hash
+        # matches this spawn. Surface a 3-way decision when the parent
+        # didn't already pick one. Detection is best-effort: any error
+        # from the lookup falls through to a normal fresh spawn.
+        if resume_choice is None:
+            resumable = self._detect_resumable(agent_name, task)
+            if resumable is not None:
+                return self._build_resume_decision_result(
+                    agent_name, task, resumable
+                )
+
+        if resume_choice == "skip":
+            return SubAgentResult(
+                agent_name=agent_name,
+                task=task,
+                success=True,
+                output=(
+                    f"Skipped resume of subagent '{agent_name}'. The crashed "
+                    f"task remains in the registry under id "
+                    f"{resume_task_id!r} for later inspection."
+                ),
+                session_id=None,
+            )
+
         if background:
             return self._spawn_background(
                 agent_name, task, config, on_complete,
                 produces_uris=produces_uris,
                 produces_min_bytes=produces_min_bytes,
+                resume_choice=resume_choice,
+                resume_task_id=resume_task_id,
             )
 
         # Drain a stale parent interrupt event before spawning. If the
@@ -1359,7 +1513,64 @@ class SubAgentOrchestrator:
         # Create and run the sub-agent
         sub_agent = self._build_subagent(config)
 
-        result = sub_agent.run(task)
+        # Allocate a task_id for checkpointing even on the synchronous
+        # path. The 62-iteration server-disconnect failure mode that
+        # motivated this work hits sync compute spawns just as easily as
+        # background ones — a long-running synchronous subagent that dies
+        # mid-flight loses every iteration without an iteration-level
+        # checkpoint. The cost is one extra directory under
+        # ``~/.sciagent/sessions/<sid>/subagents/``; no task_index entry
+        # is written from the sync path so the existing "registry
+        # unchanged on sync spawn" invariant holds.
+        task_id = (
+            resume_task_id
+            if (resume_choice == "resume" and resume_task_id)
+            else self._new_subagent_task_id()
+        )
+        # ``attach_checkpoint`` is defined on real SubAgent; tests that
+        # patch ``_build_subagent`` with a fake lacking the method get a
+        # silent no-op (matches the "checkpoints are best-effort" rule).
+        cp = None
+        attach = getattr(sub_agent, "attach_checkpoint", None)
+        if callable(attach):
+            try:
+                cp = attach(task_id)
+            except Exception:
+                cp = None
+        if cp is not None:
+            cp.write_meta(
+                agent_name=agent_name,
+                task=task,
+                parent_session_id=getattr(sub_agent, "parent_session_id", None),
+                child_session_id=getattr(sub_agent, "session_id", None),
+            )
+
+        # Resume path: load the saved AgentState dict from the prior
+        # crashed run and seed the new SubAgent's context with it. Cold
+        # resumes (last checkpoint older than the warm window) also
+        # trigger a compaction pass so the resumed run starts with a
+        # summarized context instead of full message replay against a
+        # cold prompt cache.
+        if resume_choice == "resume" and resume_task_id and cp is not None:
+            self._apply_resume(sub_agent, cp)
+
+        try:
+            result = sub_agent.run(task)
+        except Exception as e:
+            # SubAgent.run catches its own exceptions today, but if a
+            # future change leaks one, treat it as a "crashed" lifecycle
+            # rather than swallowing it. The checkpoint files persist;
+            # the parent's next spawn() with the same task hash will see
+            # the crashed state and surface the resume decision.
+            return SubAgentResult(
+                agent_name=agent_name,
+                task=task,
+                success=False,
+                output="",
+                error=f"unhandled subagent exception: {e}",
+                session_id=getattr(sub_agent, "session_id", None),
+                task_id=task_id,
+            )
 
         # produces_uris gate: validate after a successful claim. A failure
         # here turns the result into success=False so the parent sees the
@@ -1396,6 +1607,186 @@ class SubAgentOrchestrator:
 
         return result
 
+    # ---- Resume detection / replay -----------------------------------------
+
+    def _detect_resumable(
+        self, agent_name: str, task: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return a resume candidate descriptor if one matches, else None.
+
+        A "resume candidate" is a task_index entry with kind="subagent"
+        and state in RESUMABLE_STATES whose stored task hash matches this
+        spawn's task. The current parent session bounds the search — we
+        do NOT match across sessions, since the user explicitly opted
+        into a fresh session each time the CLI is launched.
+
+        Returns a dict the caller surfaces verbatim to the parent LLM:
+        ``{task_id, state, iterations_completed, last_tool_name,
+        last_checkpoint_age_seconds, agent_name, task}``.
+        """
+        try:
+            from .compute import task_index
+            from .provenance_log import _active_session_id
+            from .tools.atomic.compute import ComputeTool
+
+            parent_sid = (
+                ComputeTool._shared_session_id or _active_session_id
+            )
+            if not parent_sid:
+                return None
+
+            wanted_hash = task_description_hash(task)
+            entries = task_index.list_tasks(
+                kind="subagent", session_id=parent_sid
+            )
+            for entry in entries:
+                state = entry.get("state")
+                if state not in task_index.RESUMABLE_STATES:
+                    continue
+                body = entry.get("body") or {}
+                # Match on agent_name AND task hash so two concurrent
+                # crashed subagents with different tasks don't collide.
+                if body.get("name") != agent_name:
+                    continue
+                meta = self._read_checkpoint_meta(parent_sid, entry.get("job_id"))
+                if not meta:
+                    continue
+                if meta.get("task_hash") != wanted_hash:
+                    continue
+                return self._summarize_resume_candidate(
+                    entry, meta, parent_sid
+                )
+        except Exception:
+            return None
+        return None
+
+    @staticmethod
+    def _read_checkpoint_meta(
+        parent_session_id: str, task_id: Optional[str]
+    ) -> Optional[Dict[str, Any]]:
+        if not task_id:
+            return None
+        try:
+            cp = SubagentCheckpoint(
+                session_id=parent_session_id, task_id=task_id
+            )
+            return cp.load_meta()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _summarize_resume_candidate(
+        entry: Dict[str, Any],
+        meta: Dict[str, Any],
+        parent_session_id: str,
+    ) -> Dict[str, Any]:
+        """Compose the resume-candidate payload the parent LLM sees."""
+        task_id = entry.get("job_id")
+        cp = SubagentCheckpoint(
+            session_id=parent_session_id, task_id=task_id
+        )
+        records = cp.read_records()
+        last = records[-1] if records else {}
+        mtime = cp.last_record_mtime()
+        age = None
+        if mtime is not None:
+            now = datetime.now(timezone.utc)
+            age = max(0, int((now - mtime).total_seconds()))
+        return {
+            "task_id": task_id,
+            "state": entry.get("state"),
+            "agent_name": meta.get("agent_name") or (entry.get("body") or {}).get("name"),
+            "task": meta.get("task"),
+            "iterations_completed": last.get("iteration", len(records)),
+            "last_tool_name": last.get("tool_name"),
+            "last_checkpoint_age_seconds": age,
+            "checkpoint_count": len(records),
+        }
+
+    def _build_resume_decision_result(
+        self,
+        agent_name: str,
+        task: str,
+        candidate: Dict[str, Any],
+    ) -> SubAgentResult:
+        """Return a SubAgentResult that surfaces the 3-way resume decision.
+
+        ``success=False`` so a wrap-and-trust caller (e.g. TaskTool) sees
+        it as a non-terminal "needs guidance" outcome rather than a clean
+        completion. The error string names the choices verbatim so the
+        parent LLM (or its prompt) can route to ask_user when ambiguous.
+        """
+        warm = warm_resume_window_seconds()
+        age = candidate.get("last_checkpoint_age_seconds")
+        warmth = (
+            "warm (cache likely valid; full message replay)"
+            if (age is not None and age <= warm)
+            else "cold (cache likely stale; replay with summarization)"
+        )
+        msg = (
+            f"Resumable subagent run found for agent '{agent_name}'.\n"
+            f"  task_id: {candidate.get('task_id')}\n"
+            f"  prior state: {candidate.get('state')}\n"
+            f"  iterations completed: {candidate.get('iterations_completed')}\n"
+            f"  last tool: {candidate.get('last_tool_name')}\n"
+            f"  last checkpoint age: {age}s ({warmth})\n"
+            f"\n"
+            f"Choose one and re-call task with resume_choice set:\n"
+            f"  - resume_choice=\"resume\": continue from the last checkpoint\n"
+            f"  - resume_choice=\"fresh\":  start over (the prior crashed run "
+            f"stays on disk for inspection)\n"
+            f"  - resume_choice=\"skip\":   don't run; report the crashed task "
+            f"to the user via ask_user\n"
+            f"\n"
+            f"If the right choice isn't obvious, call ask_user first — "
+            f"the user knows whether the prior run's progress is still "
+            f"meaningful for the current goal."
+        )
+        return SubAgentResult(
+            agent_name=agent_name,
+            task=task,
+            success=False,
+            output="",
+            error=msg,
+            task_id=candidate.get("task_id"),
+        )
+
+    def _apply_resume(
+        self, sub_agent: SubAgent, checkpoint: SubagentCheckpoint
+    ) -> None:
+        """Seed the subagent with the saved AgentState; compact if cold.
+
+        Warm path (last checkpoint mtime within window): replay full
+        message history. The prompt cache may still be valid; continuation
+        is cheap.
+
+        Cold path (older than window): replay the same state but invoke
+        the AgentLoop's compaction pass first. The cache is stale, so we
+        pay for context anyway — better to start with a summarized
+        context than the full message replay.
+        """
+        state_dict = checkpoint.load_agent_state()
+        if not state_dict:
+            return
+        sub_agent.seed_state_from_dict(state_dict)
+
+        mtime = checkpoint.last_record_mtime()
+        if mtime is None:
+            return
+        warm = warm_resume_window_seconds()
+        age = (datetime.now(timezone.utc) - mtime).total_seconds()
+        if age > warm:
+            try:
+                # Compact the resumed context using the AgentLoop's own
+                # summarizer. Best-effort: a summarizer failure leaves the
+                # state intact and the resumed run pays full token cost.
+                summarizer = getattr(sub_agent.agent, "_summarize_context", None)
+                sub_agent.agent.state.context.compress_if_needed(
+                    summarizer=summarizer
+                )
+            except Exception:
+                pass
+
     # ---- Background spawn machinery (PR4) ----------------------------------
 
     def _ensure_bg_executor(self) -> ThreadPoolExecutor:
@@ -1428,13 +1819,21 @@ class SubAgentOrchestrator:
         on_complete: Optional[Callable[[SubAgentResult], None]],
         produces_uris: Optional[List[str]] = None,
         produces_min_bytes: int = 256,
+        resume_choice: Optional[str] = None,
+        resume_task_id: Optional[str] = None,
     ) -> SubAgentResult:
         """Write the manifest, hand off to a worker thread, return immediately."""
         from .compute import task_index
         from .provenance_log import _active_session_id
         from .tools.atomic.compute import ComputeTool
 
-        task_id = self._new_subagent_task_id()
+        # Reuse the prior task_id on resume so the checkpoint history
+        # threads through; otherwise allocate fresh.
+        task_id = (
+            resume_task_id
+            if (resume_choice == "resume" and resume_task_id)
+            else self._new_subagent_task_id()
+        )
         output_log_path = self._output_log_path(task_id)
 
         # Build the SubAgent in the parent thread BEFORE submitting — its
@@ -1443,6 +1842,22 @@ class SubAgentOrchestrator:
         # globals are not thread-local). The worker thread only calls
         # sub_agent.run().
         sub_agent = self._build_subagent(config)
+        cp = None
+        attach = getattr(sub_agent, "attach_checkpoint", None)
+        if callable(attach):
+            try:
+                cp = attach(task_id)
+            except Exception:
+                cp = None
+        if cp is not None:
+            cp.write_meta(
+                agent_name=agent_name,
+                task=task,
+                parent_session_id=getattr(sub_agent, "parent_session_id", None),
+                child_session_id=getattr(sub_agent, "session_id", None),
+            )
+        if resume_choice == "resume" and cp is not None:
+            self._apply_resume(sub_agent, cp)
 
         parent_session_id = (
             ComputeTool._shared_session_id or _active_session_id
@@ -1536,12 +1951,17 @@ class SubAgentOrchestrator:
         """
         from .compute import task_index
 
+        crashed = False
         try:
             result = sub_agent.run(task)
         except Exception as e:
             # SubAgent.run catches its own exceptions; reaching here means
-            # something inside SubAgent.run leaked. Synthesize a failed
-            # result so the lifecycle still closes cleanly.
+            # something inside SubAgent.run leaked (server disconnect,
+            # network drop, transient LLM error). Mark the run "crashed"
+            # — distinct from "failed" so the resume detector picks it
+            # up next time the parent spawns the same task. The
+            # checkpoint files persist on disk regardless of this branch.
+            crashed = True
             result = SubAgentResult(
                 agent_name=sub_agent.config.name,
                 task=task,
@@ -1565,6 +1985,7 @@ class SubAgentOrchestrator:
                 produces_uris=produces_uris,
                 produces_min_bytes=produces_min_bytes,
                 agent_name=sub_agent.config.name,
+                crashed=crashed,
             )
         except Exception:
             pass
@@ -1589,6 +2010,7 @@ class SubAgentOrchestrator:
         produces_uris: Optional[List[str]] = None,
         produces_min_bytes: int = 256,
         agent_name: Optional[str] = None,
+        crashed: bool = False,
     ) -> None:
         """Read the manifest, merge body.result + lifecycle, atomic write.
 
@@ -1665,6 +2087,10 @@ class SubAgentOrchestrator:
             terminal_state = "completed"
         elif produce_blocked:
             terminal_state = "blocked_produce_missing"
+        elif crashed:
+            # Resumable, not terminal — leaves the entry visible to the
+            # next spawn's resume detector.
+            terminal_state = "crashed"
         else:
             terminal_state = "failed"
         record["state"] = terminal_state
