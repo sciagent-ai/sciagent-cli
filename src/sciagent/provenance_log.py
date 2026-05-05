@@ -481,6 +481,36 @@ class ProvenanceLog:
             actor=f"subagent:{subagent_name}",
         )
 
+    def emit_subagent_observation(
+        self,
+        *,
+        subagent_name: str,
+        observation: Dict[str, Any],
+    ) -> str:
+        """Emit a subagent_observation event.
+
+        Lite-tier candidate finding (image quirk, backend quirk, workflow
+        pattern, service idiom) parsed off a sub-agent's terminal reply and
+        bubbled to the parent. One event per Observation. ``observation`` is
+        the dict shape from ``Observation.to_dict()``: kind, scope, trigger,
+        symptom, fix_shape, confidence, session_id.
+
+        Shape mirrors ``emit_produces_validation_passed`` (subagent_name +
+        structured body + actor) so a verifier reading the log can match
+        on event_kind without tolerating ad-hoc shapes. Observations are
+        candidate findings only — they're never auto-applied; an
+        ``observation_codified`` event would be Full-tier territory.
+        """
+        body = {
+            "subagent_name": subagent_name,
+            "observation": dict(observation) if observation else {},
+        }
+        return self._write_event(
+            "subagent_observation",
+            body,
+            actor=f"subagent:{subagent_name}",
+        )
+
     def emit_verification_result(
         self,
         *,

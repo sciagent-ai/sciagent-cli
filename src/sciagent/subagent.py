@@ -21,6 +21,12 @@ from .tools import ToolRegistry, BaseTool, ToolResult, create_default_registry
 from .state import ContextWindow, generate_session_id
 from .agent import AgentLoop, AgentConfig
 from .defaults import DEFAULT_MODEL
+from .subagent_observations import (
+    Observation,
+    OBSERVATION_PROMPT_BLOCK,
+    format_observations_for_parent,
+    parse_observations_block,
+)
 
 
 @dataclass
@@ -66,6 +72,11 @@ class SubAgentResult:
     # Set when spawn(background=True) returns immediately with a registry id
     # the caller uses with task_wait / task_get. None for synchronous spawns.
     task_id: Optional[str] = None
+    # Lite-tier observations the subagent emitted in its terminal reply.
+    # Parsed off the output (between <observations>...</observations>) by
+    # SubAgent.run; bubbled to the parent's tool result by TaskTool out of
+    # band — they don't count toward the 4KB output cap.
+    observations: List[Observation] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return {
@@ -79,6 +90,7 @@ class SubAgentResult:
             "duration_seconds": self.duration_seconds,
             "session_id": self.session_id,
             "task_id": self.task_id,
+            "observations": [o.to_dict() for o in self.observations],
         }
 
 
@@ -236,6 +248,18 @@ class SubAgent:
 
         duration = time.time() - start_time
 
+        # Lite-tier: parse any <observations>...</observations> block off the
+        # terminal output before it reaches the parent. Stripping the block
+        # from `output` keeps observations out of band — TaskTool's 4KB cap
+        # applies to narrative only; observations are bubbled separately
+        # under their own header. Best-effort: malformed blocks return ([],
+        # output) unchanged.
+        observations: List[Observation] = []
+        if output:
+            observations, output = parse_observations_block(
+                output, session_id=self.session_id
+            )
+
         return SubAgentResult(
             agent_name=self.config.name,
             task=task,
@@ -245,7 +269,8 @@ class SubAgent:
             iterations=self.agent.iteration_count,
             tokens_used=self.agent.total_tokens,
             duration_seconds=duration,
-            session_id=self.session_id
+            session_id=self.session_id,
+            observations=observations,
         )
 
 
@@ -931,7 +956,9 @@ suggested_followup:
        produces_uris=["<the deliverable path>"])
 ```
 
-The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated derivation with the wrong env is the failure mode this rule exists to prevent.""",
+The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated derivation with the wrong env is the failure mode this rule exists to prevent.
+
+""" + OBSERVATION_PROMPT_BLOCK,
             allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             # 120 (matches main agent's default) — compute work routinely
             # involves probe → setup → mesh/data prep → run → post-process
@@ -1053,7 +1080,9 @@ When you start a stopped cluster for L2 analysis, end with `compute_cluster(acti
 
 Bounded summary: status, the manifest of artifacts produced (URIs + local paths if materialized + a one-line description per artifact + derived_from input URIs), key numerical results, lane chosen, wall time. Do NOT paste raw data, full notebooks, or chatty install logs.
 
-If you couldn't produce a real artifact (missing input data + couldn't get it; library install failed; data tier inaccessible): BLOCKED, with what's missing and what you tried. Reporting BLOCKED honestly is far more valuable than a fabricated plot dressed up as success.""",
+If you couldn't produce a real artifact (missing input data + couldn't get it; library install failed; data tier inaccessible): BLOCKED, with what's missing and what you tried. Reporting BLOCKED honestly is far more valuable than a fabricated plot dressed up as success.
+
+""" + OBSERVATION_PROMPT_BLOCK,
             allowed_tools=["file_ops", "bash", "search", "materialize", "compute_run", "compute_exec", "compute_cluster", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             max_iterations=80,
             max_session_tokens=2_000_000,
@@ -1289,6 +1318,7 @@ class SubAgentOrchestrator:
                     duration_seconds=result.duration_seconds,
                     session_id=result.session_id,
                     task_id=result.task_id,
+                    observations=result.observations,
                 )
 
         self._results.append(result)
@@ -1538,6 +1568,7 @@ class SubAgentOrchestrator:
                     duration_seconds=result.duration_seconds,
                     session_id=result.session_id,
                     task_id=result.task_id,
+                    observations=result.observations,
                 )
 
         full_output = result.output or ""
@@ -1954,6 +1985,29 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
         except Exception:
             pass
 
+    @staticmethod
+    def _emit_observations(
+        plog,
+        agent_name: str,
+        result: SubAgentResult,
+    ) -> None:
+        """Emit one ``subagent_observation`` event per Observation on the
+        result. Best-effort: provenance is never load-bearing (matches the
+        try/except discipline of ``_emit_completed`` and the
+        ``emit_produces_validation_*`` callsites). One event per observation
+        keeps the JSONL line-bounded even if a session emits many.
+        """
+        if plog is None or not result.observations:
+            return
+        for obs in result.observations:
+            try:
+                plog.emit_subagent_observation(
+                    subagent_name=agent_name,
+                    observation=obs.to_dict(),
+                )
+            except Exception:
+                pass
+
     def execute(
         self,
         agent_name: str,
@@ -1980,6 +2034,7 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
             # the parent's session changes.
             def _on_complete(result: SubAgentResult) -> None:
                 self._emit_completed(plog, agent_name, spawn_event_id, result)
+                self._emit_observations(plog, agent_name, result)
 
             placeholder = self.orchestrator.spawn(
                 agent_name, task,
@@ -2013,6 +2068,20 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
         )
         self._emit_completed(plog, agent_name, spawn_event_id, result)
 
+        # Lite-tier observations are bubbled out of band: appended AFTER
+        # the narrative truncation so they never count toward
+        # _MAX_RETURN_CHARS. The parent LLM sees them under their own
+        # header and can mention them in its end-of-task summary; they
+        # are candidate findings, never auto-applied (Lite contract).
+        observations_block = format_observations_for_parent(
+            result.observations
+        )
+        # Best-effort provenance side-effect for cross-session aggregation
+        # later — mirrors emit_produces_validation_*'s shape and try/except
+        # discipline. Emitted regardless of success/failure outcome since
+        # observations can surface even on a failed run.
+        self._emit_observations(plog, agent_name, result)
+
         if result.success:
             output = result.output or ""
             if len(output) > self._MAX_RETURN_CHARS:
@@ -2024,9 +2093,15 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
                     f"if you need the full content, ask the sub-agent to write it to "
                     f"_outputs/<file> and return only the path]"
                 )
+            full = (
+                f"[Sub-agent '{agent_name}' completed in "
+                f"{result.iterations} iterations]\n\n{output}"
+            )
+            if observations_block:
+                full = f"{full}\n\n{observations_block}"
             return ToolResult(
                 success=True,
-                output=f"[Sub-agent '{agent_name}' completed in {result.iterations} iterations]\n\n{output}",
+                output=full,
                 # Subagent token cost rolls into the parent's cumulative
                 # meter via this side-channel — never visible to the LLM
                 # (only ``output`` reaches the model), but the parent's
@@ -2035,17 +2110,30 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
                     "subagent_tokens_used": result.tokens_used,
                     "subagent_name": agent_name,
                     "subagent_iterations": result.iterations,
+                    "subagent_observations": [
+                        o.to_dict() for o in result.observations
+                    ],
                 },
             )
         else:
+            error = f"Sub-agent failed: {result.error}"
+            if observations_block:
+                # Failed runs can still surface lessons (e.g., "this image
+                # rejects MPI as root") — append under the same header so
+                # the parent can codify even when the run itself didn't
+                # land artifacts.
+                error = f"{error}\n\n{observations_block}"
             return ToolResult(
                 success=False,
                 output=None,
-                error=f"Sub-agent failed: {result.error}",
+                error=error,
                 metadata={
                     "subagent_tokens_used": result.tokens_used,
                     "subagent_name": agent_name,
                     "subagent_iterations": result.iterations,
+                    "subagent_observations": [
+                        o.to_dict() for o in result.observations
+                    ],
                 },
             )
 

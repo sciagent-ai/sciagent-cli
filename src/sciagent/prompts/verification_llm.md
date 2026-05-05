@@ -217,3 +217,23 @@ Output:
     "reasoning": "Cannot verify simulation ran - no execution log exists and output file is empty. Evidence is insufficient to confirm the claim."
 }
 ```
+
+## Lessons learned (observations)
+
+If, while auditing, you noticed something non-obvious about how claims of this shape tend to be fabricated, what evidence is reliably missing in this image/backend, or what verification idiom would have caught the failure earlier — emit it as an Observation in your final reply, alongside the JSON verdict, between `<observations>` tags as a JSON list:
+
+```
+<observations>
+[{
+  "kind": "image_quirk",            // image_quirk | backend_quirk | workflow_pattern | service_idiom
+  "scope": ["service:<name>"],      // service:<name> | backend:<name> | workflow:<shape>
+  "trigger": "<command or situation that surfaced it>",
+  "symptom": "<what went wrong, or what was non-obvious>",
+  "fix_shape": {"destination": "smoke_test",  // dockerfile_env | dockerfile_run | registry_quirks | registry_parallel | prompt_compute | prompt_analyse | smoke_test | none
+                "patch": "<one-line patch sketch>"},
+  "confidence": "high"              // high | medium | low
+}]
+</observations>
+```
+
+Empty list (or omit the block) is fine — most audits don't surface novel lessons, and fabricating observations to look thorough is worse than silence. Observations surface to the user as candidate findings; they are never auto-applied.
