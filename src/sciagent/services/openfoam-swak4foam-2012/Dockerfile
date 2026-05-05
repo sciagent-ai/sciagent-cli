@@ -30,6 +30,12 @@ LABEL org.opencontainers.image.licenses="GPL-3.0"
 ENV DEBIAN_FRONTEND=noninteractive
 ENV FOAM_INST=/usr/lib/openfoam/openfoam2012
 
+# OpenMPI 4+ refuses to start as root unless both vars are set; the opencfd
+# base runs as root, so any parallel solver invocation (mpirun -np N <solver>
+# -parallel) needs these.
+ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+
 RUN echo "source ${FOAM_INST}/etc/bashrc" >> /etc/bash.bashrc
 
 # Build deps + system metis (the metisDecomp link target) + OpenFOAM source.

@@ -53,6 +53,9 @@ Create structured task lists with dependencies BEFORE implementation.
 - If stuck 3+ attempts on same task -> add new todo "Try alternative approach for X"
 - Use `query: "ready_tasks"` to see what's unblocked
 
+### Phases vs. dispatches
+A todo phase describes WORK — not which sub-agent runs it. A phase usually executes via a single `task(...)` dispatch, but a phase whose work spans containers (e.g. "post-process + plot": producer-side post-processing then derivation) executes as MULTIPLE consecutive dispatches under the same phase. Each dispatch carries its own `produces_uris`; the phase's `produces` validates only after the final dispatch lands the file. See delegation.md for the full pattern.
+
 ### Research Tasks
 Delegate to sub-agent:
 ```

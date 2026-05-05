@@ -41,67 +41,76 @@ task(agent_name="analyze", task="Reproduce <figure / fit / comparison> from the 
    a separate analysis cluster.
 ```
 
-### compute vs analyze — which subagent
+### The todo DAG is the decomposition — sub-agents execute work within phases
 
-- **compute** produces primary data (runs the solver / model / scan; trains heavy ML; runs simulators).
-- **analyze** consumes data → derived result (plots, fits, stats, comparisons, light fits).
+For any non-trivial task, build a `todo` DAG first (see planning section). The DAG IS the decomposition: phases describe the workflow steps (setup, mesh, solve, post-process, derive, …). Sub-agent dispatches are how phase work EXECUTES — they don't replace the DAG and phases aren't pre-bound to a single sub-agent.
 
-If the user's ask requires re-running the simulation or training a heavy model, that's `compute`. If it's "do something with what we already produced," that's `analyze`. If both — decompose into compute first, then analyze; the data tier is shared, so analyze picks up where compute left off without re-fetching.
+When you author a phase, think about which sub-agent(s) will execute its work; that informs the phase's `content` and `produces`. But the routing is **per-work-item** at execution time, not "phase has a role." Match each work item to the sub-agent whose container fits it:
+
+- Work that runs on a **producer-side image** (simulation, training, scans, solver-shipped post-processing utilities, mesh generation, decomposition / partitioning) → dispatch `compute`.
+- Work that **derives off primary data** using a numerics/plotting container (plots, fits, statistics, comparisons, distributions, residuals, light fits) → dispatch `analyze`.
+- **Read-only** work (file inspection, codebase search, web/literature) → main agent itself, or `explore`/`research`. No `produces_uris` needed.
+
+A phase usually dispatches once — its work fits one container. A phase whose work crosses a container boundary executes as **multiple consecutive dispatches under the same phase**: each dispatch carries its own `produces_uris`, and the phase's `todo.produces` only validates after all of them have landed. Don't bind a phase to a single role and don't fragment a natural workflow phase into one-dispatch-each phases just to keep them single-roled — the workflow shape is what the DAG should reflect.
 
 ### Artifact contract — declare produces_uris on every artifact-producing dispatch
 
-When a sub-agent's deliverable is a durable artifact (figure, fitted model, dataset, derived table, plot, generated report), pass `produces_uris` to the `task` tool naming the URI patterns or local globs the artifact must land at. The orchestrator validates after the sub-agent claims success and fails the result back if any pattern resolves to zero non-trivial files.
+When a phase's dispatch produces a durable artifact (figure, fitted model, dataset, derived table, plot, generated report, simulation field), pass `produces_uris` to the `task` tool naming the URI patterns or local globs the artifact must land at. The orchestrator validates after the sub-agent claims success and fails the result back if any pattern resolves to zero non-trivial files.
 
-**Cloud-agnostic.** Listing-validation supports `s3://`, `gs://`, `r2://`; full fetch (`materialize`) additionally supports `az://`, `oci://`. Local paths and globs (`./foo/*.png`, `_outputs/**/result.h5`) work too. Pick whatever scheme matches the user's data-tier setup — sciagent picks the right CLI per scheme; nothing in the contract is AWS-specific. The examples below use `<cloud>://` as a placeholder; substitute the user's actual scheme (or a local path) when dispatching.
+**Cloud-agnostic.** Listing-validation supports `s3://`, `gs://`, `r2://`; full fetch (`materialize`) additionally supports `az://`, `oci://`. Local paths and globs (`./foo/*.png`, `_outputs/**/result.h5`) work too. Pick whatever scheme matches the user's data-tier setup — sciagent picks the right CLI per scheme; nothing in the contract is AWS-specific. The examples below use `<cloud>://` as a placeholder; substitute the user's actual scheme (or a local path).
 
-```
-# Cloud handoff (any supported scheme):
-task(agent_name="compute",
-     task="<run the producer step (sim/training/pull)>; write primary outputs (e.g. <field_a>, <field_b>) under <cloud>://<session>/<run-id>/",
-     produces_uris=["<cloud>://<session>/<run-id>/<field_a>/**",
-                    "<cloud>://<session>/<run-id>/<field_b>/**"])
+### todo.produces and task.produces_uris stack — point them at the same artifact
 
-task(agent_name="analyze",
-     task="<derive the user-facing artifact (figure / fit / comparison)> from <cloud>://<session>/<run-id>/{<field_a>,<field_b>}/",
-     produces_uris=["./<deliverable>.pdf"])
-
-# Local handoff (when user wants files in the project folder):
-task(agent_name="compute",
-     task="<run producer>; write primary outputs to ./_outputs/<run-id>/",
-     produces_uris=["./_outputs/<run-id>/<field_a>/**",
-                    "./_outputs/<run-id>/<field_b>/**"])
-
-task(agent_name="analyze",
-     task="<derive Y> from ./_outputs/<run-id>/{<field_a>,<field_b>}/",
-     produces_uris=["./<deliverable>.pdf"])
-```
-
-Skip `produces_uris` only for read-only tasks (research summaries, code reviews, status checks). For multi-tool chains (producer-step → consumer-step, simulator → visualizer, training → evaluation, multi-physics A → multi-physics B), one `task` dispatch per tool boundary, with `produces_uris` on each handoff. For iterative loops, version the URIs: `<workflow>/iter-{N}/<step>/<artifact>`.
-
-### When todos and produces_uris align (multi-phase plans)
-
-For tasks with 3+ phases you'll typically build a `todo` DAG (see planning section). When a `todo` node maps to a `task` dispatch that produces a durable artifact, **pass the same path in both places** — the todo's `produces` field and the dispatch's `produces_uris`. The two gates stack:
+When a `todo` node has a `produces` field and its execution dispatches a `task` that lands the same artifact, **point both at the same path**. The two gates stack:
 
 - `todo.produces` validates parent-side completion (the node only marks done if the artifact exists locally).
-- `task.produces_uris` validates subagent-side production (the orchestrator fails the dispatch if the artifact didn't land at the named URI, even on cloud).
+- `task.produces_uris` validates sub-agent-side production (the orchestrator fails the dispatch if the artifact didn't land at the named URI, including on cloud).
+
+Example: a 4-phase todo for a producer→analysis workflow. Phase 4 has work that crosses a container boundary, so it dispatches twice:
 
 ```
-{"id": "produce_primary", "content": "Run the producer step",
- "produces": "file:_outputs/primary_output.<ext>",
- "depends_on": []}
+todo: [
+  {"id": "setup",   "content": "Stage inputs / config / mesh dict (main agent file_ops)",
+                    "produces": "file:_outputs/<run-id>/case/system/blockMeshDict",
+                    "depends_on": []},
+  {"id": "solve",   "content": "Run the producer step (sim / training / scan); fields under ./_outputs/<run-id>/fields/",
+                    "produces": "file:_outputs/<run-id>/fields/",
+                    "depends_on": ["setup"]},
+  {"id": "derive",  "content": "Produce the user-facing deliverable: solver-side post-processing (e.g. extract auxiliary fields), then compose the figure / fit / report",
+                    "produces": "file:./<deliverable>.pdf",
+                    "depends_on": ["solve"]}
+]
 
+# Phase "setup": no dispatch — main agent stages files via file_ops.
+
+# Phase "solve": one dispatch (work all fits the producer container).
 task(agent_name="compute",
-     task="<run the producer step>; write result to $OUTPUTS_DIR/primary_output.<ext>",
-     produces_uris=["./_outputs/primary_output.<ext>"])
+     task="<run producer step using staged inputs>; write fields to ./_outputs/<run-id>/fields/",
+     produces_uris=["./_outputs/<run-id>/fields/**"])
+
+# Phase "derive": work crosses container boundary, so two dispatches under this one phase.
+#   First — solver-side post-processing utility (writeCellVolumes-style) belongs on the producer image:
+task(agent_name="compute",
+     task="run solver-side post-processing utility on ./_outputs/<run-id>/fields/; write auxiliary outputs to ./_outputs/<run-id>/postProcessing/",
+     produces_uris=["./_outputs/<run-id>/postProcessing/**"])
+#   Then — derivation (figure / fit / KDE / comparison) needs numerics/plotting libs, which live in analyze's container:
+task(agent_name="analyze",
+     task="<derive deliverable> from ./_outputs/<run-id>/{fields,postProcessing}/",
+     produces_uris=["./<deliverable>.pdf"])
+# The phase's todo.produces (`./<deliverable>.pdf`) only validates after the analyze dispatch lands the file.
 ```
 
-Same artifact, two gates. When the dispatch's natural URI is on the data tier (`<cloud>://...`) and the todo's `produces` is local-only (`file:...`), name the cloud URI in `produces_uris` and the local materialized path in todo's `produces` — they validate on different sides of the same handoff.
+`setup` typically needs no dispatch (main agent owns file_ops). `solve` dispatches once. `derive` dispatches twice because its work spans the producer image and the derivation image — that's a single phase with two dispatches, NOT two phases. Don't fragment the workflow's natural shape just to keep each phase single-dispatch.
+
+When the dispatch's natural URI is cloud (`<cloud>://...`) and the todo's `produces` is local-only (`file:...`), name the cloud URI in `produces_uris` and the local materialized path in `todo.produces` — both gates fire on the same handoff from different sides.
+
+Skip `produces_uris` only for read-only phases (explore/research). For iterative loops, version the URIs: `<workflow>/iter-{N}/<phase>/<artifact>`.
 
 ### Receiving a DERIVATION_DEFERRED return from compute
 
-Compute returns `PARTIAL: DERIVATION_DEFERRED` when its container produced primary data but the next step (figure, fit, comparison) needs the analyze peer (different libs, different role). The return names: the URIs where data landed, what the user actually asked for, and a suggested follow-up.
+If you dispatched compute with a task that bundled producer-side work AND derivation (e.g. "run sim and plot the result") into one dispatch, compute may return `PARTIAL: DERIVATION_DEFERRED`. The return names: the URIs where primary data landed, what derivation was asked for, and a suggested follow-up.
 
-The right response is to dispatch analyze with the named URIs and the original derivation ask:
+This is compute saying "the producer-side work item is done; the derivation work item belongs in a separate dispatch on a numerics/plotting container." It does NOT mean the phase was wrong — a phase can legitimately bundle both work items; it just needs to dispatch twice. The right response is to dispatch analyze with the URIs compute landed, completing the phase:
 
 ```
 task(agent_name="analyze",
@@ -109,7 +118,7 @@ task(agent_name="analyze",
      produces_uris=["<the user's deliverable path>"])
 ```
 
-Do NOT re-spawn compute on the same task or try to do the derivation yourself in the main agent — analyze picks the right container for derivation (a numerics/plotting image), reads from the URIs, validates against produces_uris.
+Do NOT re-spawn compute on the same task or try to do the derivation yourself in the main agent — analyze picks the right container for derivation, reads from the URIs, validates against produces_uris.
 
 ### Receiving a registry-gap signal from compute
 

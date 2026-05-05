@@ -9,6 +9,12 @@ LABEL org.opencontainers.image.licenses="GPL-3.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# OpenMPI 4+ refuses to start as root unless both vars are set; the opencfd
+# base runs as root, so any parallel solver invocation (mpirun -np N <solver>
+# -parallel) needs these.
+ENV OMPI_ALLOW_RUN_AS_ROOT=1 \
+    OMPI_ALLOW_RUN_AS_ROOT_CONFIRM=1
+
 # Source OpenFOAM environment in bashrc for all sessions
 RUN echo "source /usr/lib/openfoam/openfoam2406/etc/bashrc" >> /etc/bash.bashrc
 

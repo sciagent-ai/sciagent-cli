@@ -1786,18 +1786,19 @@ Any sub-agent whose deliverable is a durable artifact (figure, fitted model, dat
 
 Cloud-agnostic: listing-validation supports `s3://`, `gs://`, `r2://`; full fetch via `materialize` also supports `az://`, `oci://`. Local paths and globs work too. Use whatever scheme matches the user's data tier — the contract is not AWS-specific. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
 
-## Decomposing multi-tool tasks — one dispatch per tool boundary
+## The todo DAG is the decomposition; sub-agents execute work within phases
 
-Scientific workflows often span multiple tools (sim→viz, train→eval, materials→fluids). Each tool boundary is a natural decomposition point: one `task` dispatch per registry service, with `produces_uris` naming the handoff on the data tier. Examples using services that exist in the registry today:
+For non-trivial tasks build a `todo` DAG first (see your planning rules). The DAG IS the decomposition — phases describe workflow steps (setup, mesh, solve, post-process, derive, …). Sub-agent dispatches are how phase work EXECUTES; they don't replace the DAG and phases aren't pre-bound to a single sub-agent.
 
-  - `compute(<producer-image>)` → `compute(<visualizer-image>)` → `analyze` — solve, render, compose deliverable
-  - `compute(<physics-A-image>)` → `compute(<physics-B-image>)` — multi-physics / multi-scale chain
-  - `compute(<training-image, GPU>)` → `analyze` — train heavy model, then derive eval metrics
-  - `compute(<producer>)` → `analyze` (suggest next params) → `compute(<producer>)` — active-learning loop
+When you author a phase, think about what sub-agent(s) will execute its work — that informs the phase's content and `produces`. Routing is **per-work-item** at execution time, not "phase has a role." Match each work item to the sub-agent whose container fits:
 
-(The `<...>` are placeholders — discover concrete services via `service_search`; the registry is the source of truth.)
+  - Producer-side work (simulation, training, scans, solver-shipped post-processing utilities, mesh / decomposition utilities) → dispatch **compute**.
+  - Derivation off primary data (plots, fits, statistics, comparisons, distributions, residuals, light fits) → dispatch **analyze**.
+  - Read-only work (file inspection, codebase search, web/literature) → main agent itself, or **explore** / **research**. No `produces_uris` needed.
 
-Don't dispatch a multi-tool pipeline as one compute task — it ends up doing derivation in the wrong container. One dispatch per tool boundary keeps each step's container right and makes failures localizable. For iterative loops, version the URIs: `<cloud>://<session>/<workflow>/iter-{N}/<tool>/<artifact>` (where `<cloud>` is whichever scheme the user's data tier uses — s3/gs/r2/az/oci/local). Each iteration is a fresh dispatch reading prior iter, writing its own iter — no separate loop primitive needed.
+A phase usually dispatches once — its work fits one container. A phase whose work crosses container boundaries (e.g. "post-process + plot": solver utility, then plot) executes as **multiple consecutive dispatches under the SAME phase** — each carries its own `produces_uris`, and the phase's `todo.produces` only validates after all of them have landed. Don't fragment a natural workflow phase into one-dispatch-each phases just to keep them single-roled.
+
+Discover concrete services via `service_search`; never dispatch a multi-tool pipeline as one giant compute task — that ends up doing derivation in the wrong container. For iterative loops, version the URIs: `<cloud>://<session>/<workflow>/iter-{N}/<phase>/<artifact>`. Each iteration is a fresh DAG pass — no separate loop primitive needed.
 
 Default mode is synchronous (background=false): you block on the sub-agent and get its result inline. Pass background=true to run the sub-agent on a worker thread and get back a task_id immediately — then use task_wait(task_id) to block on terminal state, or task_get(task_id) for a snapshot. Background mode is right when the parent has other work to do (e.g. spawn two sub-agents in parallel and wait on both) or when the sub-agent will run for many minutes and the parent shouldn't block the whole time."""
 
