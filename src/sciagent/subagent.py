@@ -647,6 +647,95 @@ Hard rules for cluster mode:
   - Cluster mode requires backend="skypilot" — local Docker has no
     cluster equivalent.
 
+## Match container to work — and role to deliverable
+
+Two orthogonal decisions every multi-step task forces. Take them in order.
+
+### Decision 1 — Role: am I the right peer for the next step?
+
+You produce primary scientific data. If the next step the user is asking for is *derivation* (figure, fit, statistics, comparison, KDE, residuals), that's the **analyze** peer's job — different prompt, different idioms, different failure modes. Return PARTIAL with `DERIVATION_DEFERRED` (see "What to return when the deliverable was a derivation" below) and let the parent dispatch analyze. This decision comes BEFORE any "do I have the libs?" question — even if you could pip-install matplotlib, you shouldn't be the one plotting simulation fields.
+
+The trajectory failure that prompted this rule: compute, finished sim, no plotting libs in container, tried local Python (silent error), spun a second cluster and ran a plotting script there that **never read the extracted data** — it plotted from synthesised arrays. Don't.
+
+### Decision 2 — Container: when role IS right but the libs are missing
+
+Four branches, ranked by recurrence + lib weight:
+
+  A) **Pip-install in the current container.** Lightweight Python libs (numpy,
+     scipy, matplotlib, pandas, sklearn, requests) that won't conflict with
+     the solver stack. `pip install -q` on a warm cluster, ~10-30s. Normal
+     and expected — don't avoid this when it's the right tool. Use when the
+     next step still belongs in your role (a probe script that needs pandas;
+     a post-processing util the solver image lacks but pip can supply).
+
+  B) **Switch to an existing registry service.** Heavy / binary / system
+     deps pip can't supply: ParaView's full GUI stack, MPI/CUDA stacks,
+     specific OS libs, proprietary solvers, anything where install would be
+     fragile or slow. `service_search` for the right entry, `compute_run` a
+     new cluster mounting the data tier (so it reads the prior step's URIs),
+     `compute_cluster(action="stop", ...)` the prior cluster.
+
+  C) **Surface a registry gap to the parent / user.** When no existing
+     service fits AND the gap looks recurring (a new scientific stack, an
+     unpinned tool version, a binary dep that no current image carries),
+     return a structured BLOCKED report or use `ask_user` with a concrete
+     recommendation: name the tool + version, the closest near-match
+     service, and the tradeoff. **Never autonomously build images
+     mid-task.** Image building is expensive, persistent, and is the
+     parent's call — the parent has access to sciagent's `build-service`
+     skill (auto-matched on triggers like "build/dockerize/rebuild
+     <tool>", or invoked deliberately via `skill(skill_name="build-service")`)
+     and may either follow that workflow itself or surface the decision
+     to the user. Your job is to recognize the gap and surface it
+     cleanly, not to act on it.
+
+  D) **Ask user.** When you're stuck between branches or the right answer
+     genuinely isn't clear. One focused question is cheaper than ten retries.
+
+### Multi-scale, multi-tool, iterative loops, sweeps — same primitives
+
+  - **Same tool, different scale** (LAMMPS 1K atoms vs 1M atoms; CFD coarse vs
+    fine mesh): same service, different resources (`num_nodes`, GPU type,
+    memory). Resources are immutable per cluster — change them by launching a
+    new cluster_name. Container does NOT switch for scale alone.
+  - **Different tools across scales** (DFT → MD → continuum CFD;
+    materials → fluids): one `compute_run` per tool boundary, URIs on the
+    data tier between them. Same shape as sim→viz, more rungs.
+  - **Iterative loops** (sim → analyze → refined sim → ...): each iteration
+    is a fresh dispatch. Version the URIs:
+    `<workflow>/iter-{N}/<tool>/<artifact>`. The parent's todo +
+    re-delegate IS the loop — no separate primitive needed.
+  - **Sweeps** (N parameter variations): launch N `compute_run` in parallel
+    (each gets its own `job_id` → its own `/outputs/<job_id>/` so no
+    collisions); one downstream analyze reads them all.
+
+### Concrete chains using current registry services (illustrative, not exhaustive)
+
+  - openfoam → paraview → analyze        (CFD: solve, render, compose figure)
+  - gromacs → openfoam                   (MD trajectories → continuum CFD)
+  - <gpu-image train> → scipy-base eval  (ML workflow)
+  - any solver → scipy-base              (light derivation off any sim)
+
+The principle is tool-agnostic; the examples are illustrations. Same rule applies to any registry service combination.
+
+### The non-negotiable across all of this
+
+The handoff between containers — same role or different role, same scale or different scale — is **a URI on the data tier**: `$OUTPUTS_DIR`, a parent-declared `produces_uris` path, or an explicit `s3://` / `gs://` / etc. URI. Never an in-memory blob, never an ad-hoc text dump (`cat ... | awk ...`), never a local-disk shuffle. The data tier is what makes chains re-runnable, makes provenance work across tool boundaries, and makes any single step restartable without re-running the upstream.
+
+### Forbidden patterns (the trajectory failures)
+
+  - Doing derivation (plot/fit/compare) inside compute when analyze is
+    the right peer — role decision comes first.
+  - Pip-installing heavy / system-dep stacks (ParaView, CUDA, MPI) instead
+    of switching to a service that has them — that's branch (B), not (A).
+  - Extracting solver outputs via `cat`/`awk`/`grep` into shell variables
+    or text dumps for downstream plotting — URIs are the handoff.
+  - Spinning a second cluster and running a script there that doesn't
+    actually read from the URI where the first cluster wrote — that's
+    the fabrication path the trajectory took.
+  - Autonomously triggering image builds — surface the gap; let the
+    parent / user decide.
+
 ## Path contract (image-agnostic, identical across every registry image)
 
 Three roles, three paths. One rule for inputs, one for outputs, one for code shipping. Image WORKDIR is irrelevant for the contract — sciagent never invents a CWD.
@@ -817,7 +906,25 @@ task.
 ## What to return to the parent (success path)
 A bounded summary: status, job_id, list of local files produced, cost, total wall time. Do NOT paste script contents, install logs, or full job output — those stay in your context. Parent sees a tight result.
 
-If you bailed out due to environmental failure (sky misbehavior, image pull, auth, quota), include the diagnosis output (last 20 lines of `sky api logs <request_id>` or equivalent) and the request_id in the summary. The parent can decide whether to retry with different params, change region, or escalate to the user — but only with the actual error in hand. "(Stopped due to error)" with no specifics gives the parent zero signal and forces another round of debugging.""",
+If you bailed out due to environmental failure (sky misbehavior, image pull, auth, quota), include the diagnosis output (last 20 lines of `sky api logs <request_id>` or equivalent) and the request_id in the summary. The parent can decide whether to retry with different params, change region, or escalate to the user — but only with the actual error in hand. "(Stopped due to error)" with no specifics gives the parent zero signal and forces another round of debugging.
+
+## What to return when the deliverable was a derivation you can't do here
+
+If your declared deliverable was a derivation (figure, fit, statistics, comparison, KDE) and your container lacks the libs for it, do NOT improvise (no pip-install into the simulator container, no local Python plotting off cat-extracted data). Land the primary data at a durable URI and return:
+
+```
+status: PARTIAL — DERIVATION_DEFERRED
+primary_data:
+  - <URI(s) where the data landed; e.g. s3://.../cfd_fields/{T,U,p}/>
+deferred:
+  - <what the user actually asked for; e.g. "figure 3 KDE of T">
+suggested_followup:
+  task(agent_name="analyze",
+       task="<the derivation, in terms of the URIs above>",
+       produces_uris=["<the deliverable path; e.g. ./fig3.pdf>"])
+```
+
+The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated figure with the wrong env is the failure mode this rule exists to prevent.""",
             allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             # 120 (matches main agent's default) — compute work routinely
             # involves probe → setup → mesh/data prep → run → post-process
@@ -840,7 +947,7 @@ If you bailed out due to environmental failure (sky misbehavior, image pull, aut
 
         # Analyze agent - peer to compute. Reads from the data tier (S3
         # mounts, manifests, materialized URIs), produces analysis
-        # artifacts (plots, fits, summaries, surrogates) back into the
+        # artifacts (plots, fits, summaries, light models) back into the
         # data tier with provenance linking each artifact to the input
         # URIs it was derived from. Lane-routed: the prompt teaches when
         # to run locally (small data), on a warm compute cluster (data-
@@ -855,15 +962,31 @@ If you bailed out due to environmental failure (sky misbehavior, image pull, aut
         self.register(SubAgentConfig(
             name="analyze",
             description=(
-                "Analyze data produced by compute jobs — plots, statistics, "
-                "comparisons, surrogate fitting, design-space exploration. "
-                "Reads from the data tier (URIs / manifests), writes "
+                "Analyze data produced upstream — plots, statistics, "
+                "comparisons, KDE, residuals, light fits (regression / "
+                "GP / sklearn-scale BO), design-space exploration. Reads "
+                "from declared URIs on the data tier, writes derived "
                 "artifacts back with provenance. Use whenever the user "
-                "wants something *derived from* simulation output rather "
-                "than the simulation itself."
+                "wants something *derived from* simulation/data outputs "
+                "rather than the simulation itself."
             ),
             model=CODING_MODEL,
-            system_prompt="""You analyze data produced by compute jobs and emit analysis artifacts (plots, statistics, fits, surrogates) with provenance linking each artifact to the input URIs it was derived from. Your goal: turn data tier outputs into the result the user actually asked for.
+            system_prompt="""You analyze data produced upstream and emit analysis artifacts (plots, statistics, light fits, comparisons) with provenance linking each artifact to the input URIs it was derived from. Your goal: turn data tier outputs into the result the user actually asked for.
+
+## Inputs and outputs are URIs the parent declared
+
+The parent dispatches you with two implicit contracts:
+  - Input URIs are named in your task description (or discoverable via the data tier and provenance log). Read inputs ONLY from those URIs (use `materialize` for cloud, `file_ops`/`bash` for local). If a named input URI doesn't exist or is empty, the producer didn't finish — return BLOCKED with the missing URI; do NOT improvise from a different source, a parameter table you derive, or a years-old reference file.
+  - Output URIs come from the parent's `produces_uris` parameter, which the orchestrator validates after you return. Write your derived artifacts to those exact paths; landing them elsewhere will fail validation and force re-spawn.
+
+You can be both producer and consumer in iterative chains: read iteration N's compute outputs, emit iteration N's figure, AND emit iteration N+1's parameter suggestions at a URI compute will consume next pass.
+
+## What analyze does NOT do
+
+  - Train neural-network surrogates (PINN, FNO, DeepONet, large GP regressors) — that's a compute job on a GPU image. Training-run weights are primary data; the parent dispatches `compute` for it.
+  - Search HF / GitHub for pretrained surrogates or external datasets — that's research (pure lookup) or a future `data` peer (when a pull lands).
+
+Light fits that run on a CPU box and finish in seconds-to-minutes (sklearn regression, scipy curve_fit, GP fit on small data, sklearn-scale BO) are in scope.
 
 ## Core invariant: never fabricate
 
@@ -894,13 +1017,15 @@ Don't bake every conceivable analysis library into the registry — that's the w
 
 When pip CAN'T do it: binary deps (paraview, MPI/CUDA stacks, GUI). For those, `service_search` for the existing service with the heavy bits already installed.
 
-## Cross-job analysis (DSE / surrogate fitting)
+## Cross-job analysis (DSE / light fits across many runs)
 
-For design-space exploration or surrogate fitting, you'll read from many compute jobs' outputs:
+For design-space exploration or fitting a model across many compute jobs' outputs:
 - Enumerate prior jobs via the local task index / provenance log; each has an `outputs_uri` in the data tier.
 - For each, `materialize(uri=..., list_only=True)` to see what's there, then `materialize(uri=...)` to pull only the slices you need (don't drag whole cases when one scalar per run will do).
-- Aggregate into a single dataframe / array, fit the surrogate, write the model file back to the data tier with provenance pointing to all input job manifests.
+- Aggregate into a single dataframe / array, fit the light model (sklearn regression, scipy curve_fit, GP), write the model file back to the data tier with provenance pointing to all input job manifests.
 - Subsequent iterations: re-read just the new jobs (incremental), update the model.
+
+If the model you actually need is heavy (a neural surrogate, large-scale BO with a GP over thousands of points), that's a compute job on a GPU/CPU cluster — return BLOCKED with that recommendation rather than try to train it inside analyze.
 
 This stays cheap because the data tier is shared and `list_only` is free.
 
@@ -1061,6 +1186,8 @@ class SubAgentOrchestrator:
         custom_config: Optional[SubAgentConfig] = None,
         background: bool = False,
         on_complete: Optional[Callable[[SubAgentResult], None]] = None,
+        produces_uris: Optional[List[str]] = None,
+        produces_min_bytes: int = 256,
     ) -> SubAgentResult:
         """
         Spawn and run a sub-agent
@@ -1077,6 +1204,12 @@ class SubAgentOrchestrator:
                 after the manifest's terminal state has been written. Used
                 by TaskTool to emit subagent_completed once the background
                 run finishes.
+            produces_uris: Optional URI patterns / local globs the
+                sub-agent must land artifacts at. After the sub-agent
+                returns success, the orchestrator validates each pattern
+                resolves to ≥1 file ≥ produces_min_bytes; on failure the
+                result is downgraded to success=False.
+            produces_min_bytes: Per-pattern non-trivial floor; default 256.
 
         Returns:
             SubAgentResult with output (synchronous) or with task_id set
@@ -1094,7 +1227,11 @@ class SubAgentOrchestrator:
             )
 
         if background:
-            return self._spawn_background(agent_name, task, config, on_complete)
+            return self._spawn_background(
+                agent_name, task, config, on_complete,
+                produces_uris=produces_uris,
+                produces_min_bytes=produces_min_bytes,
+            )
 
         # Drain a stale parent interrupt event before spawning. If the
         # parent's pause-menu cleared `_paused` and `_cancelled` on resume
@@ -1116,6 +1253,35 @@ class SubAgentOrchestrator:
         sub_agent = self._build_subagent(config)
 
         result = sub_agent.run(task)
+
+        # produces_uris gate: validate after a successful claim. A failure
+        # here turns the result into success=False so the parent sees the
+        # gap. Iterations / tokens / duration are preserved for cost
+        # attribution. The underlying subagent's own failure path is left
+        # alone — the gate only runs on successful claims.
+        if result.success and produces_uris:
+            missing = self._validate_produces_uris(
+                produces_uris, produces_min_bytes
+            )
+            self._emit_produces_validation(
+                agent_name, not missing, produces_uris, missing
+            )
+            if missing:
+                result = SubAgentResult(
+                    agent_name=agent_name,
+                    task=task,
+                    success=False,
+                    output=result.output,
+                    error=self._format_produces_failure(
+                        agent_name, produces_uris, missing
+                    ),
+                    iterations=result.iterations,
+                    tokens_used=result.tokens_used,
+                    duration_seconds=result.duration_seconds,
+                    session_id=result.session_id,
+                    task_id=result.task_id,
+                )
+
         self._results.append(result)
         self._active[result.session_id] = sub_agent
 
@@ -1151,6 +1317,8 @@ class SubAgentOrchestrator:
         task: str,
         config: SubAgentConfig,
         on_complete: Optional[Callable[[SubAgentResult], None]],
+        produces_uris: Optional[List[str]] = None,
+        produces_min_bytes: int = 256,
     ) -> SubAgentResult:
         """Write the manifest, hand off to a worker thread, return immediately."""
         from .compute import task_index
@@ -1211,6 +1379,8 @@ class SubAgentOrchestrator:
             task_id,
             output_log_path,
             on_complete,
+            produces_uris,
+            produces_min_bytes,
         )
 
         return SubAgentResult(
@@ -1238,6 +1408,8 @@ class SubAgentOrchestrator:
         task_id: str,
         output_log_path,
         on_complete: Optional[Callable[[SubAgentResult], None]],
+        produces_uris: Optional[List[str]] = None,
+        produces_min_bytes: int = 256,
     ) -> None:
         """Worker-thread entry point for backgrounded subagent runs.
 
@@ -1272,7 +1444,12 @@ class SubAgentOrchestrator:
             pass
 
         try:
-            self._finalize_background(task_id, result)
+            self._finalize_background(
+                task_id, result,
+                produces_uris=produces_uris,
+                produces_min_bytes=produces_min_bytes,
+                agent_name=sub_agent.config.name,
+            )
         except Exception:
             pass
 
@@ -1289,8 +1466,21 @@ class SubAgentOrchestrator:
             except Exception:
                 pass
 
-    def _finalize_background(self, task_id: str, result: SubAgentResult) -> None:
-        """Read the manifest, merge body.result + lifecycle, atomic write."""
+    def _finalize_background(
+        self,
+        task_id: str,
+        result: SubAgentResult,
+        produces_uris: Optional[List[str]] = None,
+        produces_min_bytes: int = 256,
+        agent_name: Optional[str] = None,
+    ) -> None:
+        """Read the manifest, merge body.result + lifecycle, atomic write.
+
+        If produces_uris is non-empty and the subagent's result was a success,
+        runs the validator before writing the terminal state. A validation
+        failure downgrades the result to success=False so the manifest's
+        terminal state becomes "failed" and the parent sees the gap.
+        """
         from .compute import task_index
 
         record = task_index.read_task(task_id)
@@ -1299,6 +1489,35 @@ class SubAgentOrchestrator:
 
         record = dict(record)
         body = dict(record.get("body") or {})
+
+        # produces_uris gate: same logic as the sync path. Runs BEFORE the
+        # terminal state is decided so the manifest lands in "failed" rather
+        # than "completed" when artifacts are missing. Provenance event is
+        # emitted either way.
+        if result.success and produces_uris:
+            missing = self._validate_produces_uris(
+                produces_uris, produces_min_bytes
+            )
+            self._emit_produces_validation(
+                agent_name or body.get("name") or "unknown",
+                not missing, produces_uris, missing,
+            )
+            if missing:
+                result = SubAgentResult(
+                    agent_name=result.agent_name,
+                    task=result.task,
+                    success=False,
+                    output=result.output,
+                    error=self._format_produces_failure(
+                        agent_name or body.get("name") or "unknown",
+                        produces_uris, missing,
+                    ),
+                    iterations=result.iterations,
+                    tokens_used=result.tokens_used,
+                    duration_seconds=result.duration_seconds,
+                    session_id=result.session_id,
+                    task_id=result.task_id,
+                )
 
         full_output = result.output or ""
         if len(full_output) > self._MAX_RESULT_SUMMARY_CHARS:
@@ -1337,7 +1556,144 @@ class SubAgentOrchestrator:
             task_index.write_task(record)
         except Exception:
             pass
-    
+
+    # ---- produces_uris validation gate -------------------------------------
+    #
+    # Schemes _LIST_CMDS in tools/atomic/materialize.py supports for cheap
+    # listing. az and oci can full-fetch but not list, so v1 skips them
+    # rather than failing closed for a tooling limitation.
+    _LIST_CAPABLE_CLOUD_SCHEMES = frozenset({"s3", "gs", "r2"})
+    _SKIPPABLE_CLOUD_SCHEMES = frozenset({"az", "oci"})
+
+    def _validate_produces_uris(
+        self,
+        patterns: List[str],
+        min_bytes: int,
+    ) -> List[Dict[str, str]]:
+        """List each pattern; confirm at least one file ≥ min_bytes resolves.
+
+        Returns a list of {pattern, reason} entries for patterns that failed
+        to resolve. An empty return means every pattern passed. The check is
+        mechanical (one cloud listing or one glob per pattern, no LLM call) —
+        cheap relative to the subagent work just done.
+
+        Cloud URIs (s3/gs/r2) go through MaterializeTool(list_only=True);
+        az/oci pass through unvalidated for v1 (tooling gap, not policy).
+        Local paths and file:// URIs use glob.glob + os.path.getsize.
+        """
+        import glob
+        import os
+        from urllib.parse import urlparse
+        from .tools.atomic.materialize import MaterializeTool
+
+        materialize: Optional[MaterializeTool] = None
+        missing: List[Dict[str, str]] = []
+
+        for pat in patterns:
+            scheme = urlparse(pat).scheme
+            if scheme in self._LIST_CAPABLE_CLOUD_SCHEMES:
+                if materialize is None:
+                    materialize = MaterializeTool(working_dir=self.working_dir)
+                r = materialize.execute(uri=pat, list_only=True, timeout=60)
+                if not r.success or not isinstance(r.output, dict):
+                    missing.append({
+                        "pattern": pat,
+                        "reason": f"list failed: {r.error or 'no output'}",
+                    })
+                    continue
+                files = r.output.get("files") or []
+                ok = any((f.get("bytes") or 0) >= min_bytes for f in files)
+                if not ok:
+                    missing.append({
+                        "pattern": pat,
+                        "reason": (
+                            f"{len(files)} files listed, none ≥ {min_bytes} bytes"
+                        ),
+                    })
+            elif scheme in self._SKIPPABLE_CLOUD_SCHEMES:
+                # v1: cloud schemes without cheap listing pass through.
+                continue
+            elif scheme and scheme != "file":
+                missing.append({
+                    "pattern": pat,
+                    "reason": f"unsupported scheme {scheme!r} for validation",
+                })
+            else:
+                local = pat[7:] if pat.startswith("file://") else pat
+                base = local if os.path.isabs(local) else os.path.join(
+                    self.working_dir, local
+                )
+                matches = glob.glob(base, recursive=True)
+                file_matches = [m for m in matches if os.path.isfile(m)]
+                sized = [(m, os.path.getsize(m)) for m in file_matches]
+                ok = any(sz >= min_bytes for _, sz in sized)
+                if not ok:
+                    missing.append({
+                        "pattern": pat,
+                        "reason": (
+                            f"glob matched {len(matches)} entries, "
+                            f"{len(file_matches)} are files, "
+                            f"none ≥ {min_bytes} bytes"
+                        ),
+                    })
+        return missing
+
+    @staticmethod
+    def _emit_produces_validation(
+        agent_name: str,
+        passed: bool,
+        patterns: List[str],
+        missing: List[Dict[str, str]],
+    ) -> None:
+        """Best-effort provenance event. Matches TaskTool's _emit_spawned/
+        _emit_completed idiom — _write_event directly, no formal emit_*
+        method on ProvenanceLog yet. Promote when the event shape stabilizes.
+        """
+        from .provenance_log import get_active_session_log
+        plog = get_active_session_log()
+        if plog is None:
+            return
+        try:
+            plog._write_event(
+                "produces_validation_passed" if passed else "produces_validation_failed",
+                {
+                    "subagent_name": agent_name,
+                    "patterns": list(patterns),
+                    "missing": missing,
+                },
+                actor=f"subagent:{agent_name}",
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _format_produces_failure(
+        agent_name: str,
+        patterns: List[str],
+        missing: List[Dict[str, str]],
+    ) -> str:
+        """Compose the error string the parent sees on a gate failure.
+
+        Names the missing patterns + their reasons + a remediation hint so
+        the parent LLM can compose the next move (re-spawn corrective,
+        change inputs, escalate to user) per compose-and-trust.
+        """
+        lines = [
+            f"produces_uris validation FAILED for sub-agent '{agent_name}'.",
+            "The sub-agent reported success but the following declared "
+            "output URIs are empty or below the byte floor:",
+        ]
+        for entry in missing:
+            lines.append(f"  - {entry['pattern']}: {entry['reason']}")
+        lines.append("")
+        lines.append(
+            "Do not record this task as done. Either re-spawn with a "
+            "corrective task that writes to the declared URIs, switch "
+            "containers if the env lacked required libs, or surface the "
+            "gap to the user."
+        )
+        return "\n".join(lines)
+
     def spawn_parallel(
         self,
         tasks: List[Dict[str, str]]
@@ -1405,7 +1761,8 @@ Available agents:
 - explore: Fast codebase search (uses Haiku). Quick file/pattern lookups.
 - debug: Error investigation with web research. Use when fixing errors.
 - research: Web research, documentation, literature review. Use for external knowledge.
-- compute: Run jobs on the cloud (SkyPilot) end-to-end and bring outputs back local. Use for any 'on sky', 'on AWS', 'in the cloud' task.
+- compute: Run jobs on the cloud (SkyPilot) end-to-end and bring outputs back local. Use for any 'on sky', 'on AWS', 'in the cloud' task. Produces primary scientific data.
+- analyze: Consume data produced upstream (compute jobs, prior analyze runs, acquired datasets) and emit derived artifacts: plots, statistics, comparisons, KDE, residuals, light fits (regression / GP / sklearn-scale BO). Picks its own container based on libs needed. Use for ANY 'plot X', 'fit Y', 'compare runs', 'reproduce figure N' deliverable.
 - plan: Break down complex problems into steps.
 - general: Complex multi-step tasks requiring both exploration AND action.
 - verifier: Independent claim verification (fresh context, adversarial). Use for final output verification.
@@ -1414,9 +1771,27 @@ Use 'explore' for quick local searches.
 Use 'debug' when investigating errors.
 Use 'research' for documentation, APIs, scientific methods.
 Use 'compute' for ANY task that runs on the cloud — keeps install chatter, status polls, and job logs out of your context. Returns a tight summary with local file paths.
+Use 'analyze' for ANY derivation off compute outputs — plots, fits, comparisons. Don't make compute do plotting in a container that lacks plotting libs; that path ends in fabricated figures.
 Use 'plan' before implementing anything non-trivial.
 Use 'general' for complex tasks that need to make changes.
 Use 'verifier' to independently verify claims before final output.
+
+## Artifact contract — declare produces_uris when the deliverable is a file
+
+Any sub-agent whose deliverable is a durable artifact (figure, fitted model, dataset, derived table, generated report) should be dispatched with `produces_uris` naming the URI patterns or local globs the artifact must land at. After the sub-agent claims success, the orchestrator validates each pattern and fails the result back to you with the missing pattern named if nothing landed. Skip `produces_uris` for read-only tasks (research summaries returned as text, code review, status checks) — there's no artifact to validate.
+
+Cloud (`s3://`, `gs://`, `r2://`) and local paths/globs both work. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
+
+## Decomposing multi-tool tasks — one dispatch per tool boundary
+
+Scientific workflows often span multiple tools (sim→viz, train→eval, materials→fluids). Each tool boundary is a natural decomposition point: one `task` dispatch per registry service, with `produces_uris` naming the handoff on the data tier. Examples using services that exist in the registry today:
+
+  - `compute(openfoam)` → `compute(paraview)` → `analyze` — solve, render, compose
+  - `compute(gromacs)` → `compute(openfoam)` — molecular dynamics → continuum CFD
+  - `compute(pytorch-gpu)` → `analyze` — train surrogate, evaluate
+  - `compute(...sim...)` → `analyze` (BO suggest) → `compute(...sim...)` — active-learning loop
+
+Don't dispatch a multi-tool pipeline as one compute task — it ends up doing derivation in the wrong container. One dispatch per tool boundary keeps each step's container right and makes failures localizable. For iterative loops, version the URIs: `s3://<session>/<workflow>/iter-{N}/<tool>/<artifact>`. Each iteration is a fresh dispatch reading prior iter, writing its own iter — no separate loop primitive needed.
 
 Default mode is synchronous (background=false): you block on the sub-agent and get its result inline. Pass background=true to run the sub-agent on a worker thread and get back a task_id immediately — then use task_wait(task_id) to block on terminal state, or task_get(task_id) for a snapshot. Background mode is right when the parent has other work to do (e.g. spawn two sub-agents in parallel and wait on both) or when the sub-agent will run for many minutes and the parent shouldn't block the whole time."""
 
@@ -1426,7 +1801,7 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
             "agent_name": {
                 "type": "string",
                 "description": "Name of the sub-agent to use",
-                "enum": ["explore", "debug", "research", "compute", "plan", "general", "verifier"]
+                "enum": ["explore", "debug", "research", "compute", "analyze", "plan", "general", "verifier"]
             },
             "task": {
                 "type": "string",
@@ -1435,6 +1810,15 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
             "background": {
                 "type": "boolean",
                 "description": "If true, run on a worker thread and return a task_id; default false."
+            },
+            "produces_uris": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "URI patterns or local globs the sub-agent must land artifacts at; orchestrator validates after success and fails the result back if any pattern resolves to zero non-trivial files."
+            },
+            "produces_min_bytes": {
+                "type": "integer",
+                "description": "Per-pattern non-trivial byte floor; default 256."
             }
         },
         "required": ["agent_name", "task"]
@@ -1502,6 +1886,8 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
         agent_name: str,
         task: str,
         background: bool = False,
+        produces_uris: Optional[List[str]] = None,
+        produces_min_bytes: int = 256,
     ) -> ToolResult:
         # M1B provenance: emit subagent_spawned / subagent_completed events
         # to the active (parent's) provenance log so the audit trail shows
@@ -1523,7 +1909,11 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
                 self._emit_completed(plog, agent_name, spawn_event_id, result)
 
             placeholder = self.orchestrator.spawn(
-                agent_name, task, background=True, on_complete=_on_complete
+                agent_name, task,
+                background=True,
+                on_complete=_on_complete,
+                produces_uris=produces_uris,
+                produces_min_bytes=produces_min_bytes,
             )
             if not placeholder.success or placeholder.task_id is None:
                 # spawn rejected the request before launching the thread —
@@ -1543,7 +1933,11 @@ Default mode is synchronous (background=false): you block on the sub-agent and g
                 ),
             )
 
-        result = self.orchestrator.spawn(agent_name, task)
+        result = self.orchestrator.spawn(
+            agent_name, task,
+            produces_uris=produces_uris,
+            produces_min_bytes=produces_min_bytes,
+        )
         self._emit_completed(plog, agent_name, spawn_event_id, result)
 
         if result.success:

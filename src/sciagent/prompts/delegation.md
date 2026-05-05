@@ -19,7 +19,7 @@ Load both sci-compute and build-service together for scientific work - this lets
 | Error investigation | debug | Stuck on an error, need root cause |
 | External documentation | research | Need info NOT in provided files |
 | Cloud compute jobs | compute | ANY "run on sky / on AWS / in the cloud" task — including the WRITING of run scripts, not just execution (see below) |
-| Analysis of compute outputs | analyze | Plotting, statistics, comparisons, surrogate fitting, design-space exploration. ANY "make X plot / fit Y surrogate / compare A vs B" against simulation outputs. Reads from the data tier, writes artifacts back with provenance. |
+| Analysis of compute outputs | analyze | Plotting, statistics, comparisons, KDE, residuals, light fits (regression / GP / sklearn-scale BO), design-space exploration. ANY "make X plot / fit Y / compare A vs B" against simulation outputs. Reads from URIs the parent declared, writes artifacts back to the URIs the parent declared. NOT for training neural surrogates (that's a compute job on a GPU image). |
 | Complex planning | plan | Before implementing non-trivial features |
 
 ### Pattern
@@ -43,10 +43,51 @@ task(agent_name="analyze", task="Reproduce Figure 3 (volume-density vs temperatu
 
 ### compute vs analyze — which subagent
 
-- **compute** produces primary data (runs the solver / model / scan).
-- **analyze** consumes data → result (plots, fits, stats, comparisons, surrogates).
+- **compute** produces primary data (runs the solver / model / scan; trains heavy ML; runs simulators).
+- **analyze** consumes data → derived result (plots, fits, stats, comparisons, light fits).
 
-If the user's ask requires re-running the simulation, that's `compute`. If it's "do something with what we already produced," that's `analyze`. If both — ordinarily delegate compute first, then analyze; the data tier is shared, so analyze picks up where compute left off without re-fetching.
+If the user's ask requires re-running the simulation or training a heavy model, that's `compute`. If it's "do something with what we already produced," that's `analyze`. If both — decompose into compute first, then analyze; the data tier is shared, so analyze picks up where compute left off without re-fetching.
+
+### Artifact contract — declare produces_uris on every artifact-producing dispatch
+
+When a sub-agent's deliverable is a durable artifact (figure, fitted model, dataset, derived table, plot, generated report), pass `produces_uris` to the `task` tool naming the URI patterns or local globs the artifact must land at. The orchestrator validates after the sub-agent claims success and fails the result back if any pattern resolves to zero non-trivial files. Cloud (`s3://` / `gs://` / `r2://`) and local paths/globs both work.
+
+```
+task(agent_name="compute",
+     task="run boussinesq sim, land T and V at s3://<session>/sim/<run-id>/",
+     produces_uris=["s3://<session>/sim/<run-id>/T/**",
+                    "s3://<session>/sim/<run-id>/V/**"])
+
+task(agent_name="analyze",
+     task="reproduce fig3 KDE from s3://<session>/sim/<run-id>/{T,V}/",
+     produces_uris=["./fig3_reproduction.pdf"])
+```
+
+Skip `produces_uris` only for read-only tasks (research summaries, code reviews, status checks). For multi-tool chains (sim→viz, train→eval, materials→fluids), one `task` dispatch per tool boundary, with `produces_uris` on each handoff. For iterative loops, version the URIs: `<workflow>/iter-{N}/<tool>/<artifact>`.
+
+### Receiving a DERIVATION_DEFERRED return from compute
+
+Compute returns `PARTIAL: DERIVATION_DEFERRED` when its container produced primary data but the next step (figure, fit, comparison) needs the analyze peer (different libs, different role). The return names: the URIs where data landed, what the user actually asked for, and a suggested follow-up.
+
+The right response is to dispatch analyze with the named URIs and the original derivation ask:
+
+```
+task(agent_name="analyze",
+     task="<the deferred derivation, in terms of the URIs compute landed>",
+     produces_uris=["<the user's deliverable path>"])
+```
+
+Do NOT re-spawn compute on the same task or try to do the derivation yourself in the main agent — analyze picks the right container (often scipy-base), reads from the URIs, validates against produces_uris.
+
+### Receiving a registry-gap signal from compute
+
+When compute reports "no registry service for <tool> <version>" (typically via `ask_user` from inside compute, or as part of a BLOCKED report), you have three options:
+
+- **Pivot to a near-match service** if the user's science tolerates it. State the substitution and the trade-off; let user accept or reject before relaunching compute.
+- **Invoke the build-service skill** to load the workflow for adding a new image to the registry: `skill(skill_name="build-service")`. Returns the step-by-step workflow (Dockerfile, multi-arch build, GHCR push, registry.yaml update). Do this when the gap looks recurring or the user has indicated they want a proper image rather than a workaround.
+- **Surface to the user** if neither pivot nor build is clearly right. Quote compute's gap report; ask the user to pick.
+
+Compute itself never autonomously triggers `build-service` — image creation is your call (with user input where appropriate).
 
 ### Don't pre-write cloud-bound code in the main agent
 
