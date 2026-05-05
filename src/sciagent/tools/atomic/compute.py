@@ -12,12 +12,130 @@ Use existing bg_status, bg_wait, bg_output, bg_kill for job management.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Union
 
 import yaml
+
+
+_logger = logging.getLogger(__name__)
+
+
+# Default ask_user commit threshold. Tool-layer gate (not a prompt rule):
+# the LLM cannot bypass it because it lives below the tool boundary, in
+# execute(). Configurable in ~/.sciagent/config.yaml under
+# compute.commit_threshold_usd; env override
+# SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD wins over the file.
+_DEFAULT_COMMIT_THRESHOLD_USD: float = 5.0
+
+
+def _load_commit_threshold_usd() -> float:
+    """Resolve the ask_user commit threshold ($). Env wins, then config file,
+    else the $5 default. Any parse failure falls back silently — the gate is
+    a safety rail, not a structural dependency.
+    """
+    env_val = os.environ.get("SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD")
+    if env_val is not None and env_val != "":
+        try:
+            return float(env_val)
+        except ValueError:
+            pass
+    cfg_path = Path.home() / ".sciagent" / "config.yaml"
+    if cfg_path.exists():
+        try:
+            with open(cfg_path) as fh:
+                data = yaml.safe_load(fh) or {}
+            compute_cfg = data.get("compute") or {}
+            val = compute_cfg.get("commit_threshold_usd")
+            if val is not None:
+                return float(val)
+        except Exception:
+            pass
+    return _DEFAULT_COMMIT_THRESHOLD_USD
+
+
+def _format_menu_for_prompt(menu: list, proposed_total_usd: float) -> str:
+    """Render the menu as a small text table for the interactive gate.
+
+    Tight on purpose: instance, cloud, region, spot, hourly, total — six
+    columns the user actually decides on. ``available=False`` rows are
+    appended verbatim with their reason so the user sees what didn't work.
+    """
+    lines: List[str] = []
+    lines.append(
+        f"  Proposed launch estimated total: ${proposed_total_usd:.2f}"
+    )
+    lines.append("")
+    lines.append("  Sky optimizer menu:")
+    if not menu:
+        lines.append("    (menu unavailable — Sky optimizer returned no rows)")
+        return "\n".join(lines)
+    for idx, row in enumerate(menu):
+        if not row.get("available", True):
+            lines.append(
+                f"    [x] {row.get('label', '?'):>13s}  unavailable: "
+                f"{row.get('reason', 'unknown')}"
+            )
+            continue
+        spot_str = "spot" if row.get("spot") else "on-dem"
+        lines.append(
+            f"    [{idx}] {row.get('label', '?'):>13s}  "
+            f"{row.get('num_nodes', 1)}x{row.get('cpus', '?')}cpu"
+            f"{('+' + str(row.get('gpus')) + 'gpu') if row.get('gpus') else ''}  "
+            f"{row.get('instance', '?'):<14s} {row.get('cloud', '?'):<6s} "
+            f"{row.get('region', '?'):<14s} {spot_str:<6s} "
+            f"${row.get('estimated_hourly_usd', 0):.3f}/h "
+            f"${row.get('estimated_total_usd', 0):.2f} total"
+            f"{'  OVER BUDGET' if row.get('over_budget') else ''}"
+        )
+    return "\n".join(lines)
+
+
+def _commit_gate_prompt(
+    proposed_total_usd: float,
+    threshold_usd: float,
+    menu: list,
+) -> Optional[str]:
+    """Synchronous interactive ask_user. Returns:
+        - "proceed"   : user confirmed the proposed launch as-is
+        - "abort"     : user declined
+        - None        : non-interactive shell — caller proceeds with original
+                        args (gate falls back gracefully so batch runs don't
+                        break, per the slim-plan acceptance bar)
+    """
+    if not (sys.stdin and sys.stdin.isatty() and sys.stdout and sys.stdout.isatty()):
+        _logger.warning(
+            "compute_run: estimated total $%.2f exceeds commit threshold "
+            "$%.2f but no interactive shell available; proceeding with the "
+            "original args. Set SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD to "
+            "change the threshold or run in an interactive shell to confirm.",
+            proposed_total_usd,
+            threshold_usd,
+        )
+        return None
+    print("", file=sys.stderr)
+    print(
+        f"sciagent compute_run: estimated total ${proposed_total_usd:.2f} "
+        f"exceeds commit threshold ${threshold_usd:.2f}.",
+        file=sys.stderr,
+    )
+    print(_format_menu_for_prompt(menu, proposed_total_usd), file=sys.stderr)
+    print("", file=sys.stderr)
+    try:
+        ans = input(
+            "Proceed with the proposed launch? [y/N] (n aborts; "
+            "to pick a different row, abort and re-run with the row's params) "
+        ).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return "abort"
+    if ans in {"y", "yes"}:
+        return "proceed"
+    return "abort"
 
 
 # Path-contract validation: agent-visible absolute paths. References to
@@ -236,6 +354,26 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                     "to T4 when GPUs are requested."
                 )
             },
+            "num_nodes": {
+                "type": "integer",
+                "description": (
+                    "Number of cluster nodes (Sky Task.num_nodes). Default 1. "
+                    ">1 provisions a multi-node Sky cluster; the user's command "
+                    "is responsible for MPI/DDP coordination using SkyPilot's "
+                    "native env vars (SKYPILOT_NUM_NODES, SKYPILOT_NODE_RANK, "
+                    "SKYPILOT_NODE_IPS)."
+                ),
+                "default": 1,
+            },
+            "use_spot": {
+                "type": "boolean",
+                "description": (
+                    "Use spot/preemptible instances (Sky Resources.use_spot). "
+                    "3-5x cheaper but interruptible; the managed-jobs "
+                    "controller handles re-launch on preemption. Default False."
+                ),
+                "default": False,
+            },
             "background": {
                 "type": "boolean",
                 "description": "Run in background (default: true)",
@@ -243,8 +381,49 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
             },
             "estimate_only": {
                 "type": "boolean",
-                "description": "Only estimate cost, don't run job",
+                "description": (
+                    "Only return Sky's optimizer menu, don't run. Rows are at "
+                    "scale points {1,2,4} x {spot, on-demand}, sorted by "
+                    "total cost. Combine with duration_hours / budget_usd / "
+                    "target_total_cores / target_gpus to shape the menu."
+                ),
                 "default": False
+            },
+            "duration_hours": {
+                "type": "number",
+                "description": (
+                    "Estimated runtime in hours. Drives estimated_total_usd "
+                    "in the menu and the commit-gate threshold check. Be "
+                    "honest — under-estimating skips a gate that should "
+                    "have fired. Default 1.0."
+                ),
+                "default": 1.0,
+            },
+            "target_total_cores": {
+                "type": "integer",
+                "description": (
+                    "Optional. A specific total core count the user wants "
+                    "matched (a published reference, a prior baseline, an "
+                    "internal SLA). The menu adds an extra row sized to "
+                    "this target so you can see what matching it would cost."
+                )
+            },
+            "target_gpus": {
+                "type": "integer",
+                "description": (
+                    "Optional. A specific GPU count the user wants matched. "
+                    "The menu adds an extra row sized to this target so you "
+                    "can compare it against the standard scale points."
+                )
+            },
+            "budget_usd": {
+                "type": "number",
+                "description": (
+                    "Optional spend cap in USD. Each menu row is flagged "
+                    "over_budget=True if estimated_total_usd exceeds this; "
+                    "rows are still returned so you can see the shape of the "
+                    "tradeoff."
+                )
             },
             "backend": {
                 "type": "string",
@@ -497,6 +676,8 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         memory_gb: Optional[float] = None,
         gpus: Optional[int] = None,
         gpu_type: Optional[str] = None,
+        num_nodes: int = 1,
+        use_spot: bool = False,
         background: bool = True,
         estimate_only: bool = False,
         backend: str = "auto",
@@ -511,6 +692,10 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         cluster_name: Optional[str] = None,
         autostop_minutes: int = 30,
         autostop_hook: Optional[str] = None,
+        duration_hours: float = 1.0,
+        target_total_cores: Optional[int] = None,
+        target_gpus: Optional[int] = None,
+        budget_usd: Optional[float] = None,
     ) -> ToolResult:
         """Execute compute job.
 
@@ -615,6 +800,8 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
             "memory_gb": memory_gb,
             "gpus": gpus,
             "gpu_type": gpu_type if gpus > 0 else None,
+            "num_nodes": int(num_nodes) if num_nodes else 1,
+            "use_spot": bool(use_spot),
         }
         if timeout_sec is not None:
             requirements_kwargs["timeout_sec"] = int(timeout_sec)
@@ -756,20 +943,37 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
             # Select backend and get cost estimate
             preferred = backend if backend != "auto" else None
             selected_backend, routing_reason = router.select(job.requirements, preferred=preferred)
-            cost_estimate = router.estimate_cost(job, duration_hours=1.0)
+            estimate_duration = float(duration_hours or 1.0)
+            cost_estimate = router.estimate_cost(
+                job, duration_hours=estimate_duration
+            )
 
-            # If estimate_only, return cost without running
+            # If estimate_only, return Sky's optimizer menu (multi-scale).
+            # The single-row cost_estimate is preserved so existing callers
+            # see the same key, but the menu is the new primary surface.
             if estimate_only:
+                menu = router.estimate_menu(
+                    job,
+                    duration_hours=float(duration_hours or 1.0),
+                    target_total_cores=target_total_cores,
+                    target_gpus=target_gpus,
+                    budget_usd=budget_usd,
+                )
                 output = {
                     "backend": selected_backend.name,
                     "routing_reason": routing_reason,
-                    "cost_estimate": cost_estimate,
+                    "cost_estimate": cost_estimate,  # cheapest single row, back-compat
+                    "options": menu,
                     "resources": {
                         "cpus": cpus,
                         "memory_gb": memory_gb,
                         "gpus": gpus,
                         "gpu_type": gpu_type if gpus > 0 else None,
+                        "num_nodes": int(num_nodes) if num_nodes else 1,
+                        "use_spot": bool(use_spot),
                     },
+                    "duration_hours": float(duration_hours or 1.0),
+                    "budget_usd": budget_usd,
                     "image": resolved_image,
                 }
                 if gpu_hint:
@@ -777,6 +981,57 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                     if gpu_hint == "gpu_beneficial":
                         output["gpu_note"] = f"Service '{service}' benefits from GPU (5-13x speedup). Add gpus=1 for better performance."
                 return ToolResult(success=True, output=output)
+
+            # ask_user commit gate. Tool-layer (not prompt-layer) so the LLM
+            # can't silently bypass it. Only meaningful for cloud launches —
+            # local Docker has no $-cost. estimated_total_usd comes from
+            # router.estimate_cost (Sky's optimizer when skypilot is the
+            # selected backend; otherwise a no-op zero).
+            estimated_total_usd = 0.0
+            if isinstance(cost_estimate, dict):
+                # estimate_cost returns "estimated_total" (existing key);
+                # fall back to hourly * duration if absent.
+                estimated_total_usd = float(
+                    cost_estimate.get("estimated_total")
+                    or (cost_estimate.get("estimated_hourly", 0.0) or 0.0)
+                    * estimate_duration
+                )
+            threshold_usd = _load_commit_threshold_usd()
+            if (
+                selected_backend.name == "skypilot"
+                and estimated_total_usd > threshold_usd
+            ):
+                menu = router.estimate_menu(
+                    job,
+                    duration_hours=estimate_duration,
+                    target_total_cores=target_total_cores,
+                    target_gpus=target_gpus,
+                    budget_usd=budget_usd,
+                )
+                decision = _commit_gate_prompt(
+                    proposed_total_usd=estimated_total_usd,
+                    threshold_usd=threshold_usd,
+                    menu=menu,
+                )
+                if decision == "abort":
+                    return ToolResult(
+                        success=False,
+                        output={
+                            "failure_type": "commit_gate_aborted",
+                            "estimated_total_usd": estimated_total_usd,
+                            "threshold_usd": threshold_usd,
+                            "options": menu,
+                        },
+                        error=(
+                            f"Aborted by user at commit gate "
+                            f"(${estimated_total_usd:.2f} > "
+                            f"${threshold_usd:.2f}). Re-run with explicit "
+                            f"params from the options list, or raise the "
+                            f"threshold via "
+                            f"SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD."
+                        ),
+                    )
+                # decision in {"proceed", None}: fall through to launch.
 
             # Mode dispatch (Sky's two execution surfaces):
             #   - "job"     → managed-jobs (sky.jobs.launch). Sky owns

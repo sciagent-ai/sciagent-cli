@@ -623,6 +623,76 @@ the actual error**, not to retry with different params. The compute
 tools' structured failure outputs are designed to point you at the
 right `bash` command — follow the pointer.
 
+## Cost-aware compute (read before any cloud launch)
+
+You are picking compute for a scientific job. The right scale is a function of four things — **goal × time × budget × workload shape** — not of any single number the user, a reference, or a config file mentioned. Reason explicitly across all four before you launch.
+
+### 1. State the goal in your own words
+
+Every scientific compute job sits somewhere on this axis:
+- **verification / smoke** — confirm the toolchain runs end-to-end on a representative input. Smallest scale that exercises the pipeline. Spot fine. Cost is a sanity rail (~$1-5).
+- **exploration / development** — sweep a parameter, debug a model, iterate on a setup. Multiple short runs; warm cluster pays for itself. Pick the cheapest row that gives a useful signal in minutes, not hours.
+- **convergence / quality** — answer a scientific question that requires the result to be trustworthy. Run at 2-3 scales (or resolutions / mesh densities / sample counts) to demonstrate the trend, not at one fixed scale you can defend post-hoc.
+- **production / deliverable** — produce the artifact the user asked for, at the resolution / accuracy / sample count they pinned. Match their stated $ or wallclock; don't over-spend, don't under-deliver.
+
+If the user didn't pin a goal, ask. If they implied one, restate it in your reply before you launch. The four goals lead to different rows on the menu.
+
+### 2. Get the menu BEFORE launching the real run
+
+Call `compute_run(service=..., command=..., estimate_only=True, duration_hours=<your runtime estimate>, budget_usd=<user's $ or your goal-based cap>)` first. The result's `options` is Sky's optimizer at scale points {1, 2, 4} × {spot, on-demand}: instance, cloud, region, spot, hourly_usd, total_usd, over_budget. If the user named a target (a specific core count, GPU count, prior baseline they want matched), pass `target_total_cores=` / `target_gpus=` and the menu adds a row sized to that target.
+
+Read the menu, then:
+- **verification** → smallest available row (often 1 node spot).
+- **exploration** → cheapest row that fits one iteration of your inner loop in <30 min wall.
+- **convergence** → pick 2-3 rows across the menu (small + medium + the largest within budget); plan the multi-scale run as a sweep, not one launch.
+- **production** → the row matching the user's budget *and* their wall-time tolerance. Cheapest is not always best — a $20 spot job that takes 6h on a deadline beats $5 spot that takes 24h.
+
+### 3. The commit gate fires above ~$5 by design
+
+Total cost (= hourly × duration_hours) above the configured threshold (default $5; env / `~/.sciagent/config.yaml`) hits an interactive ask_user gate at the tool layer. You cannot bypass it. Implications:
+- A wrong `duration_hours` will skip a gate that should have fired (under-estimate) or fire one that shouldn't (over-estimate). Be honest with your runtime estimate.
+- GPU runs almost always cross the gate; multi-node CPU runs cross it past ~10 cpu-hours; multi-hour single-node CPU also crosses it. Treat the gate as expected, not as friction.
+- In a non-interactive shell the gate logs a warning and proceeds — that's the batch-runs-don't-break fallback, not an excuse to under-estimate.
+
+### 4. State the choice + the alternatives in your `task()` / `compute_run` description
+
+A reader (the user, a future you, a verifier) should be able to tell *why* you picked this scale without re-deriving it. Include:
+- the goal you assigned the run (verification / exploration / convergence / production),
+- the row you picked from the menu (instance, $/hr, total $),
+- the rows you considered and rejected (cheaper-but-too-coarse, larger-but-past-budget, larger-but-no-evidence-of-scaling-benefit),
+- the runtime estimate that produced total $.
+
+Example shape: *"Goal: convergence study on a 6M-cell mesh, 3 mesh densities. Picked: 2 nodes × 16 cpu spot ($0.82/h × 3h ≈ $2.50/scale, $7.50 total, within $20 budget). Rejected: 1×8 spot (would not exercise domain decomposition) and 4×16 on-demand ($30+, no evidence the workload scales past 32 ranks on this case)."*
+
+### 5. Workload-shape rules that change the menu choice
+
+Independent of the goal, the workload shape forces some rules:
+- **Domain-decomposition solvers** (CFD, MD with spatial decomp, FEM, lattice QCD) — the parallel solver needs the case decomposed before launch. Run the decomposition step (`decomposePar` / `gmx grompp` / equivalent) as a single-node `compute_exec` first; verify the per-rank artifacts land; THEN launch with `num_nodes > 1`. Ranks-per-node = `cpus`; total ranks = `cpus × num_nodes`.
+- **Embarrassingly parallel** (parameter sweeps, ensemble runs, batched inference) — N independent `compute_run` jobs, NOT one big `num_nodes` cluster. Each job gets its own `/outputs/<job_id>/`. Cheaper, more robust, no inter-node networking concerns.
+- **Single-GPU bound** (most inference, small training) — `num_nodes=1` always; pick GPU type from the menu (T4 spot for verification, L4/A10G for steady-state, A100/H100 only when the workload provably needs them).
+- **Multi-GPU within one node** (mid-sized training, tensor-parallel inference) — `num_nodes=1`, multiple GPUs per node; let Sky pick the instance.
+- **Multi-node distributed training / HPC** (DDP / FSDP / MPI across nodes) — `num_nodes > 1`; the LLM writes its own `torchrun` / `mpirun` using `SKYPILOT_NUM_NODES`, `SKYPILOT_NODE_RANK`, `SKYPILOT_NODE_IPS` directly.
+
+### 6. Use Sky's native env vars in your launch script
+
+When `num_nodes > 1`, Sky exposes `SKYPILOT_NUM_NODES`, `SKYPILOT_NODE_RANK`, `SKYPILOT_NODE_IPS` in the container. Use them directly:
+
+  mpirun -np $((SKYPILOT_NUM_NODES * RANKS_PER_NODE)) \
+         --hostfile <(echo "$SKYPILOT_NODE_IPS" | tr ' ' '\n') \
+         <command>
+
+Don't expect sciagent-flavored renaming; Sky's names are the API. Same applies for `torchrun --nnodes $SKYPILOT_NUM_NODES --node_rank $SKYPILOT_NODE_RANK ...`.
+
+### Anti-patterns
+- Picking `num_nodes` / `cpus` / `gpus` from "feels big enough" without referencing the menu, the goal, the runtime estimate, or the budget.
+- Anchoring on a single number the user mentioned (a core count, a GPU count, a wall-time) without checking that it's even on the menu in your enabled clouds.
+- Defaulting to the largest row "to be safe" — over-provisioning for verification / exploration is the most common over-spend.
+- Picking spot for production deliverables with deadlines (preemption + re-launch can blow past wall-time).
+- Picking on-demand for verification / exploration when spot would do (3-5× more expensive for no scientific gain).
+- Silently launching above the commit threshold on a wrong `duration_hours` that suppresses the gate.
+- Launching a domain-decomposition solver with `num_nodes > 1` before the decomposition step succeeded on the input.
+- Asking for resources (`cpus=N`, `accelerators=K×H100`) that no menu row offers — Sky will reject; the menu would have shown it.
+
 ## Pick a mode FIRST (read this before any compute_run call)
 
 Sky offers two execution surfaces. Choose deliberately, per task shape:

@@ -166,6 +166,26 @@ class ComputeRouter:
             return self._backends["skypilot"].estimate_cost(job, duration_hours)
         return {"estimated_hourly": 0, "note": "Local execution - no cloud cost"}
 
+    def estimate_menu(
+        self,
+        job: Job,
+        duration_hours: float = 1.0,
+        target_total_cores: Optional[int] = None,
+        target_gpus: Optional[int] = None,
+        budget_usd: Optional[float] = None,
+    ) -> list:
+        """Return Sky's optimizer menu (multi-scale rows). Local-only setups
+        get an empty list — there's no menu without Sky's optimizer."""
+        if "skypilot" in self._backends:
+            return self._backends["skypilot"].estimate_menu(
+                job,
+                duration_hours=duration_hours,
+                target_total_cores=target_total_cores,
+                target_gpus=target_gpus,
+                budget_usd=budget_usd,
+            )
+        return []
+
     def cleanup(self, job_id: str) -> bool:
         """Cleanup/terminate a job's resources.
 

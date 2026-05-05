@@ -65,6 +65,10 @@ class ComputeRequirements:
     gpu_type: Optional[str] = None
     timeout_sec: int = 3600
     storage: Optional[List[StorageMount]] = None  # Cloud storage mounts
+    # Sky-native multi-node + spot pass-through (per-node cpus/memory/gpus
+    # apply to each node when num_nodes > 1, matching SkyPilot's Task model).
+    num_nodes: int = 1
+    use_spot: bool = False
 
 
 @dataclass

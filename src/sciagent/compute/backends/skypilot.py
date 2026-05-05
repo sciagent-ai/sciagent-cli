@@ -934,6 +934,12 @@ class SkyPilotBackend:
             gpu_type = job.requirements.gpu_type or "A10G"
             resources_kwargs["accelerators"] = {gpu_type: job.requirements.gpus}
 
+        # Spot pass-through (Sky-native; the managed-jobs controller handles
+        # re-launch on preemption). Cheaper pool; surfaced explicitly so the
+        # menu row that picks spot can land on the cluster as spot.
+        if getattr(job.requirements, "use_spot", False):
+            resources_kwargs["use_spot"] = True
+
         # Add Docker image if specified
         if job.image:
             resources_kwargs["image_id"] = f"docker:{job.image}"
@@ -960,6 +966,12 @@ class SkyPilotBackend:
         ship_workdir = getattr(job, "ship_workdir", None)
         if ship_workdir:
             task_kwargs["workdir"] = ship_workdir
+        # Sky-native multi-node pass-through. The user's command sees
+        # SKYPILOT_NUM_NODES / SKYPILOT_NODE_RANK / SKYPILOT_NODE_IPS in
+        # the container; sciagent does not invent its own renaming.
+        num_nodes = int(getattr(job.requirements, "num_nodes", 1) or 1)
+        if num_nodes > 1:
+            task_kwargs["num_nodes"] = num_nodes
         task = sky.Task(**task_kwargs)
         task.set_resources(resources)
 
@@ -2012,6 +2024,166 @@ class SkyPilotBackend:
         ``get_job_status`` still get the expected JobResult shape.
         """
         return self.get_status(job_id)
+
+    # Scale points the menu walks. Kept small (3 nodes x 2 pricing models) so
+    # the optimizer call budget stays bounded; the slim P0 plan caps at
+    # {1, 2, 4} x {spot, on-demand} plus an optional paper_match row.
+    _MENU_NODE_COUNTS: Tuple[int, ...] = (1, 2, 4)
+    _MENU_LABELS: Dict[int, str] = {1: "minimum", 2: "intermediate", 4: "scale_out"}
+
+    def _optimize_one(self, job: Job) -> Dict[str, Any]:
+        """Return one menu row from sky.Optimizer().optimize() for ``job``.
+
+        On any failure (no capacity at requested resources/spot, optimizer
+        raises, no cloud configured for the constraint) returns a row with
+        ``available=False`` and the reason; never raises. The menu must keep
+        returning whatever did work.
+        """
+        sky = self._get_sky()
+        try:
+            task = self._build_task(job)
+            dag = sky.Dag()
+            dag.add(task)
+            optimizer = sky.Optimizer()
+            with _silence_sky_chatter():
+                optimized = optimizer.optimize(dag)
+            if not (optimized and optimized.tasks):
+                return {"available": False, "reason": "optimizer returned no tasks"}
+            opt_task = optimized.tasks[0]
+            resources = opt_task.best_resources
+            if not resources:
+                return {"available": False, "reason": "no resources matched constraints"}
+            cost_per_sec = resources.get_cost(1.0)
+            hourly = cost_per_sec * 3600
+            return {
+                "available": True,
+                "instance": resources.instance_type,
+                "cloud": str(resources.cloud).lower() if resources.cloud else None,
+                "region": resources.region,
+                "spot": bool(getattr(resources, "use_spot", False)),
+                "estimated_hourly_usd": round(hourly, 4),
+                "accelerators": (
+                    str(resources.accelerators) if resources.accelerators else None
+                ),
+            }
+        except Exception as e:
+            return {"available": False, "reason": f"{type(e).__name__}: {e}"}
+
+    def estimate_menu(
+        self,
+        job: Job,
+        duration_hours: float = 1.0,
+        target_total_cores: Optional[int] = None,
+        target_gpus: Optional[int] = None,
+        budget_usd: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return Sky's optimizer menu at multiple scale points.
+
+        Walks {1, 2, 4} x {spot, on-demand}, plus an optional paper_match row
+        sized at ``target_total_cores`` / ``target_gpus`` when passed. Each
+        row carries the fields Sky's optimizer returned, plus ``label``,
+        ``estimated_total_usd`` (= hourly * duration_hours), and
+        ``over_budget`` (vs ``budget_usd`` if passed). Rows where the
+        optimizer failed are kept with ``available=False`` so the menu still
+        surfaces "this scale isn't reachable in your enabled clouds."
+
+        Working rows are sorted by ``estimated_total_usd``; unavailable rows
+        are appended at the end so the LLM sees the cheapest reachable option
+        first.
+        """
+        from copy import copy as _copy
+
+        base_req = job.requirements
+        rows: List[Dict[str, Any]] = []
+
+        for n in self._MENU_NODE_COUNTS:
+            for spot in (False, True):
+                req = _copy(base_req)
+                req.num_nodes = n
+                req.use_spot = spot
+                # Clone storage list reference is fine; we don't mutate it.
+                trial_job = Job(
+                    id=job.id,
+                    service=job.service,
+                    image=job.image,
+                    command=job.command,
+                    working_dir=job.working_dir,
+                    requirements=req,
+                    ship_workdir=getattr(job, "ship_workdir", None),
+                )
+                row = self._optimize_one(trial_job)
+                row["label"] = self._MENU_LABELS.get(n, f"nodes_{n}")
+                row["num_nodes"] = n
+                row["cpus"] = base_req.cpus
+                row["gpus"] = base_req.gpus
+                row["gpu_type"] = base_req.gpu_type if base_req.gpus > 0 else None
+                if row.get("available"):
+                    hourly = row.get("estimated_hourly_usd", 0.0) or 0.0
+                    total = round(hourly * float(duration_hours), 4)
+                    row["estimated_total_usd"] = total
+                    row["over_budget"] = (
+                        bool(budget_usd is not None and total > float(budget_usd))
+                    )
+                    # Keep the explicit spot flag even when Sky's resources
+                    # didn't echo it — the request shape is the source of
+                    # truth for the menu row label.
+                    row.setdefault("spot", spot)
+                rows.append(row)
+
+        # Optional target_match row: size at user's named target compute (a
+        # published reference, a prior baseline, an internal SLA), leave
+        # num_nodes to Sky's optimizer by trying the smallest node count
+        # that fits per_node_cpus <= 64 (Sky's typical large-instance ceiling
+        # for non-HPC clouds). We trust the optimizer to reject infeasible
+        # combinations; the row falls back to available=False with the
+        # optimizer's reason in that case.
+        if target_total_cores or target_gpus:
+            for n in (1, 2, 4, 8):
+                req = _copy(base_req)
+                req.num_nodes = n
+                req.use_spot = False
+                if target_total_cores:
+                    per_node = max(1, int(target_total_cores) // n)
+                    req.cpus = per_node
+                if target_gpus:
+                    per_node_gpus = max(1, int(target_gpus) // n)
+                    req.gpus = per_node_gpus
+                    if not req.gpu_type:
+                        req.gpu_type = base_req.gpu_type or "A10G"
+                trial_job = Job(
+                    id=job.id,
+                    service=job.service,
+                    image=job.image,
+                    command=job.command,
+                    working_dir=job.working_dir,
+                    requirements=req,
+                    ship_workdir=getattr(job, "ship_workdir", None),
+                )
+                row = self._optimize_one(trial_job)
+                row["label"] = "target_match"
+                row["num_nodes"] = n
+                row["cpus"] = req.cpus
+                row["gpus"] = req.gpus
+                row["gpu_type"] = req.gpu_type if req.gpus > 0 else None
+                if row.get("available"):
+                    hourly = row.get("estimated_hourly_usd", 0.0) or 0.0
+                    total = round(hourly * float(duration_hours), 4)
+                    row["estimated_total_usd"] = total
+                    row["over_budget"] = (
+                        bool(budget_usd is not None and total > float(budget_usd))
+                    )
+                    row.setdefault("spot", False)
+                    rows.append(row)
+                    break  # First feasible split wins; don't add 4 target rows.
+            else:
+                # No feasible split — append the last failure row so the
+                # caller sees that target_match was attempted.
+                rows.append(row)
+
+        available = [r for r in rows if r.get("available")]
+        unavailable = [r for r in rows if not r.get("available")]
+        available.sort(key=lambda r: r.get("estimated_total_usd", float("inf")))
+        return available + unavailable
 
     def estimate_cost(self, job: Job, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Estimate cost for running job.
