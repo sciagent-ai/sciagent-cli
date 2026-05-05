@@ -653,27 +653,29 @@ Two orthogonal decisions every multi-step task forces. Take them in order.
 
 ### Decision 1 — Role: am I the right peer for the next step?
 
-You produce primary scientific data. If the next step the user is asking for is *derivation* (figure, fit, statistics, comparison, KDE, residuals), that's the **analyze** peer's job — different prompt, different idioms, different failure modes. Return PARTIAL with `DERIVATION_DEFERRED` (see "What to return when the deliverable was a derivation" below) and let the parent dispatch analyze. This decision comes BEFORE any "do I have the libs?" question — even if you could pip-install matplotlib, you shouldn't be the one plotting simulation fields.
+You produce primary scientific data. If the next step the user is asking for is *derivation* (figure, fit, statistics, comparison, distribution, residuals), that's the **analyze** peer's job — different prompt, different idioms, different failure modes. Return PARTIAL with `DERIVATION_DEFERRED` (see "What to return when the deliverable was a derivation" below) and let the parent dispatch analyze. This decision comes BEFORE any "do I have the libs?" question — even if you could pip-install plotting libraries, you shouldn't be the one deriving figures off your own primary data.
 
-The trajectory failure that prompted this rule: compute, finished sim, no plotting libs in container, tried local Python (silent error), spun a second cluster and ran a plotting script there that **never read the extracted data** — it plotted from synthesised arrays. Don't.
+The failure mode that prompted this rule: subagent finishes the producer step, hits "no plotting / analysis libs in this container," tries local Python (silent error), spins a second cluster and runs a script there that **never reads the extracted data** — it plots from synthesised arrays. Don't.
 
 ### Decision 2 — Container: when role IS right but the libs are missing
 
 Four branches, ranked by recurrence + lib weight:
 
-  A) **Pip-install in the current container.** Lightweight Python libs (numpy,
-     scipy, matplotlib, pandas, sklearn, requests) that won't conflict with
-     the solver stack. `pip install -q` on a warm cluster, ~10-30s. Normal
-     and expected — don't avoid this when it's the right tool. Use when the
-     next step still belongs in your role (a probe script that needs pandas;
-     a post-processing util the solver image lacks but pip can supply).
+  A) **Pip-install in the current container.** Lightweight Python libs that
+     won't conflict with the primary stack — typical examples are numerics
+     and dataframe libraries, lightweight HTTP clients, simple ML helpers.
+     `pip install -q` on a warm cluster, ~10-30s. Normal and expected —
+     don't avoid this when it's the right tool. Use when the next step
+     still belongs in your role (a probe script that needs a dataframe lib;
+     a post-processing util the producer image lacks but pip can supply).
 
   B) **Switch to an existing registry service.** Heavy / binary / system
-     deps pip can't supply: ParaView's full GUI stack, MPI/CUDA stacks,
-     specific OS libs, proprietary solvers, anything where install would be
-     fragile or slow. `service_search` for the right entry, `compute_run` a
-     new cluster mounting the data tier (so it reads the prior step's URIs),
-     `compute_cluster(action="stop", ...)` the prior cluster.
+     deps pip can't supply: visualization runtimes, GPU/MPI toolchains,
+     GUI tools, specific OS libs, proprietary solvers, anything where
+     install would be fragile or slow. `service_search` for the right
+     entry, `compute_run` a new cluster mounting the data tier (so it
+     reads the prior step's URIs), `compute_cluster(action="stop", ...)`
+     the prior cluster.
 
   C) **Surface a registry gap to the parent / user.** When no existing
      service fits AND the gap looks recurring (a new scientific stack, an
@@ -709,14 +711,14 @@ Four branches, ranked by recurrence + lib weight:
     (each gets its own `job_id` → its own `/outputs/<job_id>/` so no
     collisions); one downstream analyze reads them all.
 
-### Concrete chains using current registry services (illustrative, not exhaustive)
+### Pattern shapes (domain-agnostic — applies to any registry-service combination)
 
-  - openfoam → paraview → analyze        (CFD: solve, render, compose figure)
-  - gromacs → openfoam                   (MD trajectories → continuum CFD)
-  - <gpu-image train> → scipy-base eval  (ML workflow)
-  - any solver → scipy-base              (light derivation off any sim)
+  - producer-image → visualizer-image → analyze        (solve, render, compose deliverable)
+  - physics-A-image → physics-B-image                  (multi-physics / multi-scale chain)
+  - training-image (GPU) → eval-image (CPU)            (train, then evaluate)
+  - any producer-image → numerics/plotting-image       (light derivation off any producer)
 
-The principle is tool-agnostic; the examples are illustrations. Same rule applies to any registry service combination.
+Discover concrete services via `service_search` rather than hardcoding names — the registry is the source of truth for what's available.
 
 ### The non-negotiable across all of this
 
@@ -726,8 +728,9 @@ The handoff between containers — same role or different role, same scale or di
 
   - Doing derivation (plot/fit/compare) inside compute when analyze is
     the right peer — role decision comes first.
-  - Pip-installing heavy / system-dep stacks (ParaView, CUDA, MPI) instead
-    of switching to a service that has them — that's branch (B), not (A).
+  - Pip-installing heavy / system-dep stacks (visualization runtimes,
+    GPU/MPI toolchains, GUI tools) instead of switching to a service that
+    has them — that's branch (B), not (A).
   - Extracting solver outputs via `cat`/`awk`/`grep` into shell variables
     or text dumps for downstream plotting — URIs are the handoff.
   - Spinning a second cluster and running a script there that doesn't
@@ -910,21 +913,21 @@ If you bailed out due to environmental failure (sky misbehavior, image pull, aut
 
 ## What to return when the deliverable was a derivation you can't do here
 
-If your declared deliverable was a derivation (figure, fit, statistics, comparison, KDE) and your container lacks the libs for it, do NOT improvise (no pip-install into the simulator container, no local Python plotting off cat-extracted data). Land the primary data at a durable URI and return:
+If your declared deliverable was a derivation (figure, fit, statistics, comparison, distribution) and your container lacks the libs for it, do NOT improvise (no pip-install into the producer container beyond branch (A)'s lightweight scope, no local Python plotting off cat-extracted data). Land the primary data at a durable URI and return:
 
 ```
 status: PARTIAL — DERIVATION_DEFERRED
 primary_data:
-  - <URI(s) where the data landed; e.g. s3://.../cfd_fields/{T,U,p}/>
+  - <URI(s) where the primary data landed>
 deferred:
-  - <what the user actually asked for; e.g. "figure 3 KDE of T">
+  - <the derivation the user actually asked for, in plain terms>
 suggested_followup:
   task(agent_name="analyze",
-       task="<the derivation, in terms of the URIs above>",
-       produces_uris=["<the deliverable path; e.g. ./fig3.pdf>"])
+       task="<the derivation, named in terms of the URIs above>",
+       produces_uris=["<the deliverable path>"])
 ```
 
-The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated figure with the wrong env is the failure mode this rule exists to prevent.""",
+The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated derivation with the wrong env is the failure mode this rule exists to prevent.""",
             allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             # 120 (matches main agent's default) — compute work routinely
             # involves probe → setup → mesh/data prep → run → post-process
@@ -963,12 +966,13 @@ The parent will dispatch `analyze`, which picks its own container with the right
             name="analyze",
             description=(
                 "Analyze data produced upstream — plots, statistics, "
-                "comparisons, KDE, residuals, light fits (regression / "
-                "GP / sklearn-scale BO), design-space exploration. Reads "
-                "from declared URIs on the data tier, writes derived "
-                "artifacts back with provenance. Use whenever the user "
-                "wants something *derived from* simulation/data outputs "
-                "rather than the simulation itself."
+                "comparisons, distributions, residuals, light fits "
+                "(regression / GP / lightweight Bayesian optimization), "
+                "design-space exploration. Reads from declared URIs on "
+                "the data tier, writes derived artifacts back with "
+                "provenance. Use whenever the user wants something "
+                "*derived from* simulation/data outputs rather than the "
+                "simulation itself."
             ),
             model=CODING_MODEL,
             system_prompt="""You analyze data produced upstream and emit analysis artifacts (plots, statistics, light fits, comparisons) with provenance linking each artifact to the input URIs it was derived from. Your goal: turn data tier outputs into the result the user actually asked for.
@@ -1762,7 +1766,7 @@ Available agents:
 - debug: Error investigation with web research. Use when fixing errors.
 - research: Web research, documentation, literature review. Use for external knowledge.
 - compute: Run jobs on the cloud (SkyPilot) end-to-end and bring outputs back local. Use for any 'on sky', 'on AWS', 'in the cloud' task. Produces primary scientific data.
-- analyze: Consume data produced upstream (compute jobs, prior analyze runs, acquired datasets) and emit derived artifacts: plots, statistics, comparisons, KDE, residuals, light fits (regression / GP / sklearn-scale BO). Picks its own container based on libs needed. Use for ANY 'plot X', 'fit Y', 'compare runs', 'reproduce figure N' deliverable.
+- analyze: Consume data produced upstream (compute jobs, prior analyze runs, acquired datasets) and emit derived artifacts: plots, statistics, comparisons, distributions, residuals, light fits (regression / GP / lightweight Bayesian optimization). Picks its own container based on libs needed. Use for ANY 'plot X', 'fit Y', 'compare runs', 'reproduce figure N' deliverable.
 - plan: Break down complex problems into steps.
 - general: Complex multi-step tasks requiring both exploration AND action.
 - verifier: Independent claim verification (fresh context, adversarial). Use for final output verification.
@@ -1780,18 +1784,20 @@ Use 'verifier' to independently verify claims before final output.
 
 Any sub-agent whose deliverable is a durable artifact (figure, fitted model, dataset, derived table, generated report) should be dispatched with `produces_uris` naming the URI patterns or local globs the artifact must land at. After the sub-agent claims success, the orchestrator validates each pattern and fails the result back to you with the missing pattern named if nothing landed. Skip `produces_uris` for read-only tasks (research summaries returned as text, code review, status checks) — there's no artifact to validate.
 
-Cloud (`s3://`, `gs://`, `r2://`) and local paths/globs both work. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
+Cloud-agnostic: listing-validation supports `s3://`, `gs://`, `r2://`; full fetch via `materialize` also supports `az://`, `oci://`. Local paths and globs work too. Use whatever scheme matches the user's data tier — the contract is not AWS-specific. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
 
 ## Decomposing multi-tool tasks — one dispatch per tool boundary
 
 Scientific workflows often span multiple tools (sim→viz, train→eval, materials→fluids). Each tool boundary is a natural decomposition point: one `task` dispatch per registry service, with `produces_uris` naming the handoff on the data tier. Examples using services that exist in the registry today:
 
-  - `compute(openfoam)` → `compute(paraview)` → `analyze` — solve, render, compose
-  - `compute(gromacs)` → `compute(openfoam)` — molecular dynamics → continuum CFD
-  - `compute(pytorch-gpu)` → `analyze` — train surrogate, evaluate
-  - `compute(...sim...)` → `analyze` (BO suggest) → `compute(...sim...)` — active-learning loop
+  - `compute(<producer-image>)` → `compute(<visualizer-image>)` → `analyze` — solve, render, compose deliverable
+  - `compute(<physics-A-image>)` → `compute(<physics-B-image>)` — multi-physics / multi-scale chain
+  - `compute(<training-image, GPU>)` → `analyze` — train heavy model, then derive eval metrics
+  - `compute(<producer>)` → `analyze` (suggest next params) → `compute(<producer>)` — active-learning loop
 
-Don't dispatch a multi-tool pipeline as one compute task — it ends up doing derivation in the wrong container. One dispatch per tool boundary keeps each step's container right and makes failures localizable. For iterative loops, version the URIs: `s3://<session>/<workflow>/iter-{N}/<tool>/<artifact>`. Each iteration is a fresh dispatch reading prior iter, writing its own iter — no separate loop primitive needed.
+(The `<...>` are placeholders — discover concrete services via `service_search`; the registry is the source of truth.)
+
+Don't dispatch a multi-tool pipeline as one compute task — it ends up doing derivation in the wrong container. One dispatch per tool boundary keeps each step's container right and makes failures localizable. For iterative loops, version the URIs: `<cloud>://<session>/<workflow>/iter-{N}/<tool>/<artifact>` (where `<cloud>` is whichever scheme the user's data tier uses — s3/gs/r2/az/oci/local). Each iteration is a fresh dispatch reading prior iter, writing its own iter — no separate loop primitive needed.
 
 Default mode is synchronous (background=false): you block on the sub-agent and get its result inline. Pass background=true to run the sub-agent on a worker thread and get back a task_id immediately — then use task_wait(task_id) to block on terminal state, or task_get(task_id) for a snapshot. Background mode is right when the parent has other work to do (e.g. spawn two sub-agents in parallel and wait on both) or when the sub-agent will run for many minutes and the parent shouldn't block the whole time."""
 

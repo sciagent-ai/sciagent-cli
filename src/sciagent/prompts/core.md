@@ -11,7 +11,7 @@ Before choosing a tool, ask: **"What does this task require, and do my direct to
 - `search`: Find files by pattern or content
 - `todo`, `ask_user`: Task management, user interaction
 
-**Containers**: For specialized scientific packages (GROMACS, RDKit, S4, BioPython, etc.)
+**Containers**: For specialized scientific packages (discover via `service_search` against the registry).
 
 Start with direct tools. Escalate to containers only when you need specialized packages, isolation, or reproducibility.
 

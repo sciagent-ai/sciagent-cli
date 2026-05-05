@@ -19,7 +19,7 @@ Load both sci-compute and build-service together for scientific work - this lets
 | Error investigation | debug | Stuck on an error, need root cause |
 | External documentation | research | Need info NOT in provided files |
 | Cloud compute jobs | compute | ANY "run on sky / on AWS / in the cloud" task — including the WRITING of run scripts, not just execution (see below) |
-| Analysis of compute outputs | analyze | Plotting, statistics, comparisons, KDE, residuals, light fits (regression / GP / sklearn-scale BO), design-space exploration. ANY "make X plot / fit Y / compare A vs B" against simulation outputs. Reads from URIs the parent declared, writes artifacts back to the URIs the parent declared. NOT for training neural surrogates (that's a compute job on a GPU image). |
+| Analysis of compute outputs | analyze | Derivation off primary data: plots, distributions, residuals, statistics, comparisons, light fits (regression / GP / lightweight Bayesian-optimization). ANY "make X plot / fit Y / compare A vs B" against simulation outputs. Reads from URIs the parent declared, writes artifacts back to the URIs the parent declared. NOT for training heavy surrogate models (that's a compute job on a GPU image). |
 | Complex planning | plan | Before implementing non-trivial features |
 
 ### Pattern
@@ -34,7 +34,7 @@ task(agent_name="compute", task="Visualize sine waves on sky and download result
    chatter and intermediate status polls stay in the subagent's context.
 
 # User asks for analysis derived from a prior compute job
-task(agent_name="analyze", task="Reproduce Figure 3 (volume-density vs temperature KDE) from the buoyantBoussinesqSimpleFoam run on cluster `datacenter-cfd`. Outputs are in s3://...; manuscript is in CaseFiles/.")
+task(agent_name="analyze", task="Reproduce <figure / fit / comparison> from the prior <producer-step> run on cluster `<cluster-name>`. Outputs are in <cloud>://...; reference material is in <project-path>/.")
 -> Returns: artifact manifest with derived_from URIs, lane chosen,
    key numerical results. The analyze subagent decides whether to run
    locally, on the warm compute cluster (start it if stopped), or on
@@ -50,20 +50,52 @@ If the user's ask requires re-running the simulation or training a heavy model, 
 
 ### Artifact contract — declare produces_uris on every artifact-producing dispatch
 
-When a sub-agent's deliverable is a durable artifact (figure, fitted model, dataset, derived table, plot, generated report), pass `produces_uris` to the `task` tool naming the URI patterns or local globs the artifact must land at. The orchestrator validates after the sub-agent claims success and fails the result back if any pattern resolves to zero non-trivial files. Cloud (`s3://` / `gs://` / `r2://`) and local paths/globs both work.
+When a sub-agent's deliverable is a durable artifact (figure, fitted model, dataset, derived table, plot, generated report), pass `produces_uris` to the `task` tool naming the URI patterns or local globs the artifact must land at. The orchestrator validates after the sub-agent claims success and fails the result back if any pattern resolves to zero non-trivial files.
+
+**Cloud-agnostic.** Listing-validation supports `s3://`, `gs://`, `r2://`; full fetch (`materialize`) additionally supports `az://`, `oci://`. Local paths and globs (`./foo/*.png`, `_outputs/**/result.h5`) work too. Pick whatever scheme matches the user's data-tier setup — sciagent picks the right CLI per scheme; nothing in the contract is AWS-specific. The examples below use `<cloud>://` as a placeholder; substitute the user's actual scheme (or a local path) when dispatching.
 
 ```
+# Cloud handoff (any supported scheme):
 task(agent_name="compute",
-     task="run boussinesq sim, land T and V at s3://<session>/sim/<run-id>/",
-     produces_uris=["s3://<session>/sim/<run-id>/T/**",
-                    "s3://<session>/sim/<run-id>/V/**"])
+     task="<run the producer step (sim/training/pull)>; write primary outputs (e.g. <field_a>, <field_b>) under <cloud>://<session>/<run-id>/",
+     produces_uris=["<cloud>://<session>/<run-id>/<field_a>/**",
+                    "<cloud>://<session>/<run-id>/<field_b>/**"])
 
 task(agent_name="analyze",
-     task="reproduce fig3 KDE from s3://<session>/sim/<run-id>/{T,V}/",
-     produces_uris=["./fig3_reproduction.pdf"])
+     task="<derive the user-facing artifact (figure / fit / comparison)> from <cloud>://<session>/<run-id>/{<field_a>,<field_b>}/",
+     produces_uris=["./<deliverable>.pdf"])
+
+# Local handoff (when user wants files in the project folder):
+task(agent_name="compute",
+     task="<run producer>; write primary outputs to ./_outputs/<run-id>/",
+     produces_uris=["./_outputs/<run-id>/<field_a>/**",
+                    "./_outputs/<run-id>/<field_b>/**"])
+
+task(agent_name="analyze",
+     task="<derive Y> from ./_outputs/<run-id>/{<field_a>,<field_b>}/",
+     produces_uris=["./<deliverable>.pdf"])
 ```
 
-Skip `produces_uris` only for read-only tasks (research summaries, code reviews, status checks). For multi-tool chains (sim→viz, train→eval, materials→fluids), one `task` dispatch per tool boundary, with `produces_uris` on each handoff. For iterative loops, version the URIs: `<workflow>/iter-{N}/<tool>/<artifact>`.
+Skip `produces_uris` only for read-only tasks (research summaries, code reviews, status checks). For multi-tool chains (producer-step → consumer-step, simulator → visualizer, training → evaluation, multi-physics A → multi-physics B), one `task` dispatch per tool boundary, with `produces_uris` on each handoff. For iterative loops, version the URIs: `<workflow>/iter-{N}/<step>/<artifact>`.
+
+### When todos and produces_uris align (multi-phase plans)
+
+For tasks with 3+ phases you'll typically build a `todo` DAG (see planning section). When a `todo` node maps to a `task` dispatch that produces a durable artifact, **pass the same path in both places** — the todo's `produces` field and the dispatch's `produces_uris`. The two gates stack:
+
+- `todo.produces` validates parent-side completion (the node only marks done if the artifact exists locally).
+- `task.produces_uris` validates subagent-side production (the orchestrator fails the dispatch if the artifact didn't land at the named URI, even on cloud).
+
+```
+{"id": "produce_primary", "content": "Run the producer step",
+ "produces": "file:_outputs/primary_output.<ext>",
+ "depends_on": []}
+
+task(agent_name="compute",
+     task="<run the producer step>; write result to $OUTPUTS_DIR/primary_output.<ext>",
+     produces_uris=["./_outputs/primary_output.<ext>"])
+```
+
+Same artifact, two gates. When the dispatch's natural URI is on the data tier (`<cloud>://...`) and the todo's `produces` is local-only (`file:...`), name the cloud URI in `produces_uris` and the local materialized path in todo's `produces` — they validate on different sides of the same handoff.
 
 ### Receiving a DERIVATION_DEFERRED return from compute
 
@@ -77,7 +109,7 @@ task(agent_name="analyze",
      produces_uris=["<the user's deliverable path>"])
 ```
 
-Do NOT re-spawn compute on the same task or try to do the derivation yourself in the main agent — analyze picks the right container (often scipy-base), reads from the URIs, validates against produces_uris.
+Do NOT re-spawn compute on the same task or try to do the derivation yourself in the main agent — analyze picks the right container for derivation (a numerics/plotting image), reads from the URIs, validates against produces_uris.
 
 ### Receiving a registry-gap signal from compute
 
