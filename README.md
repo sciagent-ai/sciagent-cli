@@ -10,7 +10,7 @@ You give sciagent a scientific task — a simulation to run, a hypothesis to tes
 
 ```mermaid
 flowchart TD
-    Goal["Your scientific task<br/>(simulation, analysis,<br/>hypothesis test, reproduction)"]
+    Goal["Your scientific task<br/>(design, computation,<br/>optimization)"]
     Main["Main agent<br/>plans + delegates"]
     Compute["<b>compute</b> subagent<br/>SkyPilot cluster +<br/>workspace bucket"]
     Analyze["<b>analyze</b> subagent<br/>plots, stats, fits, comparisons"]
