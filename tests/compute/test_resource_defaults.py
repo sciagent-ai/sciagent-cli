@@ -37,14 +37,28 @@ def _patched_registry(registry: dict):
 
 def _stub_router_returning(name="sciagent-job1"):
     """Build a fake router whose backend records the job spec it received."""
+    from sciagent.compute.job import StorageMount, StorageMode
+
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.run.return_value = (name, 1)
     # New mount API: outputs auto-attached, inputs from caller. Resource-
     # defaults tests don't exercise mounts, so return None / [] to keep
-    # storage_list empty.
+    # storage_list empty for those.
     fake_skypilot.build_outputs_mount.return_value = None
     fake_skypilot.build_input_mounts.return_value = []
+    # P0.5: durable session workspace auto-mounts on skypilot when
+    # workspace_source is None. Return a real StorageMount so the
+    # downstream attribute access stays string-typed.
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router._backends = {"skypilot": fake_skypilot}

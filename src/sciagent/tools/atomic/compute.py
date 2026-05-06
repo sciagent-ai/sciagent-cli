@@ -818,6 +818,11 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         outputs_uri_for_manifest: Optional[str] = None
         outputs_prefix_for_manifest: Optional[str] = None
         mounts_for_manifest: List[Dict[str, str]] = []
+        # workspace_uri surfaces the durable session bucket to the LLM so
+        # it can declare it in produces_uris and pass it to materialize.
+        # Stays None when an explicit workspace_source override is in
+        # effect (per the auto-mount contract).
+        workspace_uri: Optional[str] = None
 
         will_attach_mounts = backend == "skypilot" or (
             backend == "auto" and gpus > 0
@@ -840,6 +845,7 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         # a structured error instead of crashing inside the backend.
         try:
             from sciagent.compute.backends.skypilot import (
+                _DEFAULT_INPUT_MOUNT_PATH,
                 _normalize_workspace_source as _normalize_ws,
             )
             normalized_inputs = _normalize_ws(workspace_source)
@@ -850,12 +856,31 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                 error=f"Invalid workspace_source: {e}",
             )
 
+        # Auto-mount the session workspace at /workspace/ when the caller
+        # didn't pass workspace_source explicitly. The session workspace is
+        # a persistent cloud bucket that survives cluster stop/down/crash —
+        # the durable cross-step data tier. Honors "compute is too-thin
+        # wrapper around sky": uses sky.Storage directly, no abstraction.
+        # Explicit workspace_source is preserved verbatim — caller knows
+        # what they want and the auto-mount must not override.
+        auto_workspace_mount = (
+            will_attach_mounts and workspace_source is None
+        )
+
         # Path-contract validation (fail-fast, before the backend launch).
         # Only enforced for skypilot — local Docker has its own filesystem
         # semantics that don't share /workspace, /outputs, or ~/sky_workdir.
         if will_attach_mounts:
             declared_paths = [entry["path"] for entry in normalized_inputs]
-            err = self._validate_path_contract(command, declared_paths)
+            # When auto-workspace fires, /workspace/ is implicitly declared.
+            # Add it to the allowed-prefix set so the validator doesn't
+            # reject the (very natural) command that writes to /workspace/
+            # without an explicit workspace_source.
+            if auto_workspace_mount and _DEFAULT_INPUT_MOUNT_PATH not in declared_paths:
+                effective_paths = declared_paths + [_DEFAULT_INPUT_MOUNT_PATH]
+            else:
+                effective_paths = declared_paths
+            err = self._validate_path_contract(command, effective_paths)
             if err is not None:
                 return ToolResult(
                     success=False,
@@ -881,6 +906,23 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                     )
                     if outputs_mount is not None:
                         storage_list.append(outputs_mount)
+
+                    # Auto-mount the durable session workspace at /workspace/
+                    # when no explicit workspace_source was given. The bucket
+                    # is persistent (sky.Storage(persistent=True)), so writes
+                    # survive cluster stop/down/crash and are visible to the
+                    # next compute_exec / compute_run in the session.
+                    if auto_workspace_mount:
+                        ws_mount = skypilot_backend.build_session_workspace_mount(
+                            actual_session_id
+                        )
+                        storage_list.append(ws_mount)
+                        from sciagent.compute.backends.skypilot import (
+                            _build_workspace_uri as _bld_ws_uri,
+                        )
+                        workspace_uri = _bld_ws_uri(
+                            ws_mount.store, actual_session_id
+                        )
 
                     # Input mounts, if any.
                     input_mounts = skypilot_backend.build_input_mounts(
@@ -1104,6 +1146,12 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                         "memory_gb": memory_gb,
                         "gpus": gpus,
                     },
+                    # Durable session tier — persists across cluster
+                    # stop/down so compute_exec follow-ups (and the next
+                    # compute_run on a fresh cluster in this session) can
+                    # read prior writes at /workspace/. Sky-provisioned
+                    # via sky.Storage(persistent=True, mode=MOUNT).
+                    "workspace_uri": workspace_uri,
                     "message": (
                         f"Cluster {cluster} launched (or reused if UP); "
                         f"per-cluster job_id {cluster_job_id}. Subsequent "
@@ -1222,6 +1270,10 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                         "gpus": gpus,
                     },
                     "message": f"Job {job_id} started. Check with bg_status('{job_id}')",
+                    # Sky-provisioned durable session tier (persistent bucket
+                    # mounted at /workspace/). Stays None when the caller
+                    # passed an explicit workspace_source override.
+                    "workspace_uri": workspace_uri,
                 }
                 # Probe-shape nudge: when the agent is using mode="job"
                 # (managed-jobs default) on a command that looks like a
@@ -1253,6 +1305,7 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                 if actual_session_id and requirements.storage:
                     output_mounts: List[Dict[str, str]] = []
                     input_mounts_info: List[Dict[str, str]] = []
+                    durable_mounts_info: List[Dict[str, str]] = []
                     for m in requirements.storage:
                         info = {
                             "path": m.path,
@@ -1261,14 +1314,18 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                         }
                         if m.source:
                             info["source"] = m.source
-                        if getattr(m, "kind", "input") == "output":
+                        kind = getattr(m, "kind", "input")
+                        if kind == "output":
                             output_mounts.append(info)
+                        elif kind == "durable":
+                            durable_mounts_info.append(info)
                         else:
                             input_mounts_info.append(info)
                     workspace_info = {
                         "session_id": actual_session_id,
                         "outputs": output_mounts,
                         "inputs": input_mounts_info,
+                        "durable": durable_mounts_info,
                         "outputs_dir_env": "$OUTPUTS_DIR",
                     }
                     if output_mounts:
@@ -1286,6 +1343,11 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                         output["message"] += (
                             f" Outputs at /outputs/{job_id}/ "
                             f"(session: {actual_session_id})"
+                        )
+                    if durable_mounts_info and workspace_uri:
+                        output["message"] += (
+                            f". Durable workspace at /workspace/ "
+                            f"(persistent across stop/down): {workspace_uri}"
                         )
                 return ToolResult(success=True, output=output)
             else:

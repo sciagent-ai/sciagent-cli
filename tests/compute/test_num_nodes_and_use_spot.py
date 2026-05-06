@@ -17,12 +17,24 @@ from sciagent.compute.job import Job, ComputeRequirements
 
 
 def _stub_router():
+    from sciagent.compute.job import StorageMount, StorageMode
+
     fake_router = MagicMock()
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.run.return_value = ("sciagent-job-1", 1)
     fake_skypilot.build_outputs_mount.return_value = None
     fake_skypilot.build_input_mounts.return_value = []
+    # P0.5 auto-mount: stub returns a real StorageMount.
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_router._backends = {"skypilot": fake_skypilot}
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router.select.return_value = (fake_skypilot, "test routing")

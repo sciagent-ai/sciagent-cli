@@ -57,12 +57,26 @@ def test_looks_like_probe_classification(command, expected):
 
 
 def _make_tool_with_skypilot():
+    from sciagent.compute.job import StorageMount, StorageMode
+
     tool = ComputeTool(working_dir=".")
     fake_router = MagicMock()
     fake_backend = MagicMock()
     fake_backend.name = "skypilot"
     fake_backend.build_outputs_mount.return_value = None
     fake_backend.build_input_mounts.return_value = []
+    # P0.5: compute_run auto-mounts /workspace/ when workspace_source is
+    # None on skypilot. Stub returns a real StorageMount so attribute
+    # access downstream gets strings (not MagicMock).
+    fake_backend.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_backend.run.return_value = ("sciagent-job-x", 1)
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router._backends = {"skypilot": fake_backend}

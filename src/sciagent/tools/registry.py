@@ -338,6 +338,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     from .atomic.compute_exec import ComputeExecTool
     from .atomic.compute_cluster import ComputeClusterTool
     from .atomic.materialize import MaterializeTool
+    from .atomic.materialize_workspace import MaterializeWorkspaceTool
     from .atomic.service_search import ServiceSearchTool, ServiceDetailTool
     from .atomic.monitor import MonitorTool, MonitorStopTool
 
@@ -376,6 +377,12 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     registry.register(ComputeExecTool(working_dir))
     registry.register(ComputeClusterTool(working_dir))
     registry.register(MaterializeTool(working_dir))
+    # Durable session workspace tier — auto-mounted at /workspace/ during
+    # cluster jobs, fetched back to local via this tool. Pairs with
+    # `materialize` (URI / job_id) to give the agent one tool per data tier:
+    # managed-jobs outputs (materialize(job_id)) vs cross-step durable
+    # data (materialize_workspace).
+    registry.register(MaterializeWorkspaceTool(working_dir))
 
     # Service registry discovery — keyword search across name, description,
     # packages, and capabilities. Cheaper than reading registry.yaml (which

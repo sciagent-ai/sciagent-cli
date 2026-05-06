@@ -258,6 +258,24 @@ class ComputeExecTool(BaseTool):
                 error=str(exc),
             )
 
+        # Surface the durable session workspace URI so the LLM can declare
+        # it in produces_uris and pass it to materialize / materialize_workspace.
+        # The cluster's /workspace/ mount is inherited from launch (Sky's
+        # exec model: file_mounts apply per-cluster, not per-exec). When
+        # the cluster was launched with an explicit workspace_source override
+        # we don't know the auto-mount URI from here — leave it None.
+        workspace_uri: Optional[str] = None
+        if session_for_job:
+            try:
+                from sciagent.compute.backends.skypilot import (
+                    SkyPilotBackend,
+                    _build_workspace_uri as _bld_ws_uri,
+                )
+                store = SkyPilotBackend().resolve_workspace_store()
+                workspace_uri = _bld_ws_uri(store, session_for_job)
+            except Exception:
+                workspace_uri = None
+
         return ToolResult(
             success=True,
             output={
@@ -266,6 +284,10 @@ class ComputeExecTool(BaseTool):
                 "status": "running",
                 "backend": "skypilot",
                 "mode": "cluster_exec",
+                # Inherited from the cluster's launch-time mount config —
+                # /workspace/ is the persistent session tier, durable across
+                # exec calls and cluster stop/down.
+                "workspace_uri": workspace_uri,
                 "message": (
                     f"Exec'd on warm cluster {cluster}; per-cluster job_id "
                     f"{int_job_id}. Tail logs via "

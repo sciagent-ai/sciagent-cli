@@ -304,6 +304,25 @@ class ComputeClusterTool(BaseTool):
             info = router.cluster_status(cluster_name)
         except RuntimeError as exc:
             return ToolResult(success=False, output=None, error=str(exc))
+        # Surface the durable session workspace URI alongside the cluster
+        # status so the agent's next step (compute_exec, materialize, or
+        # produces_uris) doesn't have to recompute the bucket name. The URI
+        # is derivable from session_id; we read it from the cluster manifest
+        # written at launch.
+        manifest = (info or {}).get("manifest") or {}
+        session_id = manifest.get("session_id")
+        if session_id:
+            try:
+                from sciagent.compute.backends.skypilot import (
+                    SkyPilotBackend,
+                    _build_workspace_uri as _bld_ws_uri,
+                )
+                store = SkyPilotBackend().resolve_workspace_store()
+                info["workspace_uri"] = _bld_ws_uri(store, session_id)
+            except Exception:
+                info["workspace_uri"] = None
+        else:
+            info["workspace_uri"] = None
         return ToolResult(success=True, output=info)
 
     def _do_down(self, router, cluster_name: str, graceful: bool) -> ToolResult:

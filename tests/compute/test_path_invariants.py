@@ -133,6 +133,17 @@ def _stub_router_with_skypilot():
         kind="output",
     )
     fake_skypilot.build_input_mounts.return_value = []
+    # Auto-mounted durable session workspace (P0.5): compute_run now calls
+    # this when workspace_source is None on skypilot.
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_skypilot.run.return_value = ("sciagent-job-1", 1)
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]
@@ -146,8 +157,11 @@ def _stub_router_with_skypilot():
 
 
 def test_validation_fails_when_command_refs_workspace_without_source():
-    """Command says /workspace/foo but no input mount was declared. Fail
-    fast before the backend is even contacted."""
+    """With explicit workspace_source declaring /data/x but a command that
+    references /workspace/foo, validation still fails — explicit
+    workspace_source overrides the auto-mount, so /workspace/ becomes
+    undeclared again and the validator catches it.
+    """
     ComputeTool._shared_session_id = None
     tool = ComputeTool()
     fake_router, fake_skypilot = _stub_router_with_skypilot()
@@ -157,11 +171,33 @@ def test_validation_fails_when_command_refs_workspace_without_source():
             command="ls /workspace/foo",
             image="python:3.11",
             backend="skypilot",
+            workspace_source=[
+                {"path": "/data/x", "source": "s3://x/"}
+            ],
         )
 
     assert result.success is False
     assert "path_contract" in str(result.output)
     fake_skypilot.run.assert_not_called()  # never reached the backend
+
+
+def test_validation_passes_for_workspace_under_auto_mount():
+    """P0.5: with workspace_source=None on skypilot, /workspace/ is auto-
+    mounted (durable session bucket). The validator must implicitly allow
+    /workspace/ paths in this case so the natural "write durable cross-
+    step data" command isn't rejected."""
+    ComputeTool._shared_session_id = None
+    tool = ComputeTool()
+    fake_router, fake_skypilot = _stub_router_with_skypilot()
+
+    with patch.object(tool, "_get_router", return_value=fake_router):
+        result = tool.execute(
+            command="echo hi > /workspace/run-1/data.txt",
+            image="python:3.11",
+            backend="skypilot",
+        )
+
+    assert result.success is True, result.error
 
 
 def test_validation_passes_when_command_refs_declared_workspace():

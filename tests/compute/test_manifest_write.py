@@ -110,6 +110,17 @@ def test_compute_tool_writes_manifest_after_skypilot_launch(tmp_manifest_dir: Pa
     fake_skypilot.build_outputs_mount.return_value = None
     fake_skypilot.build_input_mounts.return_value = []
     fake_skypilot.get_workspace_mount.return_value = None  # legacy alias, unused
+    # P0.5 auto-mount: real StorageMount so attribute access stays string-typed.
+    from sciagent.compute.job import StorageMount, StorageMode
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     # M1A: SkyPilotBackend.run returns (name, managed_job_id). The integer
     # is what flows into the manifest's new managed_job_id field.
     fake_skypilot.run.return_value = ("sciagent-manifest1", 7777)
@@ -208,6 +219,17 @@ def test_compute_tool_manifest_write_failure_does_not_break_launch(
     fake_skypilot.name = "skypilot"
     fake_skypilot.build_outputs_mount.return_value = None
     fake_skypilot.build_input_mounts.return_value = []
+    # P0.5 auto-mount stub.
+    from sciagent.compute.job import StorageMount, StorageMode
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_skypilot.run.return_value = ("sciagent-flaky-fs", None)
     fake_router = MagicMock()
     fake_router.list_backends.return_value = ["skypilot"]

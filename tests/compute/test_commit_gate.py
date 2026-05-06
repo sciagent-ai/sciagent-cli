@@ -55,12 +55,27 @@ def test_non_interactive_shell_proceeds_with_warning(caplog):
 
 
 def _stub_router_for_skypilot(estimated_total_usd, estimated_hourly_usd=None):
+    from sciagent.compute.job import StorageMount, StorageMode
+
     fake_router = MagicMock()
     fake_skypilot = MagicMock()
     fake_skypilot.name = "skypilot"
     fake_skypilot.run.return_value = ("sciagent-job-1", 1)
     fake_skypilot.build_outputs_mount.return_value = None
     fake_skypilot.build_input_mounts.return_value = []
+    # Auto-mounted durable session workspace (P0.5). compute_run now calls
+    # this when workspace_source is None; return a real StorageMount so
+    # downstream attribute access (kind, store, path) gets strings, not
+    # MagicMocks.
+    fake_skypilot.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test-sess",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_router._backends = {"skypilot": fake_skypilot}
     fake_router.list_backends.return_value = ["skypilot"]
     fake_router.select.return_value = (fake_skypilot, "test routing")

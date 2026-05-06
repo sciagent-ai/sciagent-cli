@@ -27,11 +27,16 @@ class StorageMount:
     mode: StorageMode = StorageMode.MOUNT
     source: Optional[str] = None        # Local path or s3://… URI to sync from (optional)
     persistent: bool = True             # Keep bucket after job ends
-    # kind="input" or "output". The output mount is auto-attached at
-    # /outputs/ and exposes $OUTPUTS_DIR=/outputs/<job_id>/ to the user
-    # command; auto-fetched on terminal status. Input mounts (default)
-    # come from the caller's workspace_source= and may have any path.
-    # Only input mounts are eligible to be the run-CWD target.
+    # kind discriminator for the primary-input picker and the prologue:
+    #   - "output"   → /outputs/<job_id>/, auto-fetched on terminal.
+    #   - "input"    → caller-declared via workspace_source=. Eligible to
+    #                  become the run-CWD when no workdir= is set.
+    #   - "durable"  → Sky-provisioned auto-mount of the persistent session
+    #                  workspace at /workspace/. RW like input, but NOT a
+    #                  cd target — leaving the image's WORKDIR alone is the
+    #                  whole point: /workspace/ is a *data* tier, code lives
+    #                  in workdir= or the image. Skipped by the cd picker.
+    # Only "input" mounts are eligible to be the run-CWD target.
     kind: str = "input"
     # Deprecated: was used to discriminate auto-attached output flow from
     # caller-asked input flow. Now subsumed by kind. Field retained as a

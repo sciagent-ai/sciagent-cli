@@ -971,6 +971,21 @@ Three roles, three paths. One rule for inputs, one for outputs, one for code shi
   - `cp -r postProcessing $OUTPUTS_DIR/`
   Cross-job reads in the same session: `/outputs/<other_job_id>/...` directly. (Job 2 reads Job 1's outputs by absolute path; you have job_1_id from the prior launch result.)
 
+**Durable cross-step data — `/workspace/`, AUTO-MOUNTED on every cluster job.** Sky-provisioned persistent bucket (`sciagent-workspace-<sid>`) auto-mounted RW at `/workspace/` on every `compute_run` and `compute_exec` in this session. Survives `sky stop`, `sky down`, agent restart, cross-day resume — the data tier IS the source of truth. Writes stream continuously to the object store via Sky's MOUNT mode, so `/workspace/` content is durable in the cloud BEFORE the cluster shuts down. The `workspace_uri` (e.g. `s3://sciagent-workspace-<sid>/`) appears in every `compute_run` / `compute_exec` / `compute_cluster(action="status")` result.
+
+  - Use `/workspace/` for cross-step durable data: meshes that feed solvers, solver fields that feed analyses, anything you'll read in a later `compute_exec` or after a `sky stop` → restart. Suggested layout: `/workspace/<run-id>/<artifact>/` (e.g. `/workspace/run-001/mesh/`, `/workspace/run-001/fields/U`, `/workspace/run-001/derived/`).
+  - Use `$OUTPUTS_DIR` (`/outputs/<job_id>/`) for ephemeral per-call deliverables — logs, run summaries, final reports the parent will fetch. `$OUTPUTS_DIR` does NOT persist across exec calls; `/workspace/` does.
+  - Declare `produces_uris` against `/workspace/` paths when the artifact is a cross-step durable: `produces_uris=["s3://sciagent-workspace-<sid>/run-001/fields/**"]`. The URI is in your tool result.
+  - Pull the workspace (or a subpath) back to local with `materialize_workspace()` (whole bucket → `./_outputs/workspace/`) or `materialize(uri="s3://sciagent-workspace-<sid>/run-001/fields/")` for a slice.
+  - When a single `compute_exec` writes large data right before `sky stop`, append `&& sync` to the command (or use `autostop_hook="sync"`) to flush MOUNT-mode buffers; routine writes flush continuously and need no extra step.
+
+### Anti-patterns (the failure modes /workspace/ exists to kill)
+
+  - **`bash cp` from cluster paths.** Local bash CANNOT see cluster filesystems. If a path was written on the cluster, fetch it via `materialize_workspace` or `materialize`, never via local bash `cp`.
+  - **`tar`-and-copy inside the cluster.** There is no magic transport from cluster → local. Either write to `/workspace/` from the start and `materialize_workspace` it back, OR write to `$OUTPUTS_DIR` and let `bg_wait` auto-fetch the per-job prefix.
+  - **Writing deliverables to `/tmp/<work>/` on the cluster.** `/tmp/` is cluster-local scratch — vanishes at `sky down`, even survives a `sky stop` only by accident. Use `/workspace/` for anything you want to keep across exec calls and across cluster lifecycle events.
+  - **Writing to `/outputs/<job_id>/` when you really need cross-step durability.** Each `compute_exec` gets its own `/outputs/<job_id>/`; the next exec can't see the previous one. Use `/workspace/`.
+
 **Cluster-local working state — `/tmp/<work>/` (or `$HOME/<work>/`), opt-in.** When iterating across multiple `compute_exec` calls on the SAME cluster — staging case files, modifying configs between runs, building intermediate artifacts — use a path on the cluster's local disk. `/tmp/<your-work>/` persists across `compute_exec` calls on that cluster until the cluster goes down. **`$OUTPUTS_DIR` does NOT persist across exec calls** — each exec is a separate Sky job and gets its own per-job outputs dir. The pattern:
 
   - Job 1 (setup): `mkdir -p /tmp/run/case1 && <build case in /tmp/run/case1>`
@@ -998,6 +1013,7 @@ You have these primitives — pick the smallest set that solves the task:
   - `compute_exec` — follow-ups on a warm cluster.
   - `compute_cluster` — cluster lifecycle: `wait_until_up`, `wait_for_job`, `status`, `logs`, `refresh_mounts`, `autostop`, `stop`/`start` (default end-of-task), `down` (destroy — explicit cleanup only).
   - `materialize` — fetch a remote artifact (URI like `s3://bucket/path/` or a managed-jobs `job_id`) onto the local filesystem. Cloud-agnostic; replaces ad-hoc `aws s3 cp` / `gsutil` / `az storage` invocations. Use whenever you need to read or plot a file that lives in the data tier.
+  - `materialize_workspace` — fetch the durable session workspace (`/workspace/` ↔ `s3://sciagent-workspace-<sid>/`) to local. Pass `subpath=` for a slice. Default dest is `./_outputs/workspace/`. Use this at the end of a multi-step cluster workflow.
   - `bg_wait` — managed-jobs to terminal (auto-fetches `/outputs/<job_id>/`).
   - `monitor` / `monitor_stop` — live log tailing while a job runs.
   - `bash` + sky CLI — diagnosis and anything the wrappers don't cover.
@@ -1152,7 +1168,7 @@ suggested_followup:
 The parent will dispatch `analyze`, which picks its own container with the right libs. This is the right outcome — a fabricated derivation with the wrong env is the failure mode this rule exists to prevent.
 
 """ + OBSERVATION_PROMPT_BLOCK,
-            allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
+            allowed_tools=["file_ops", "bash", "search", "compute_run", "compute_exec", "compute_cluster", "materialize", "materialize_workspace", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             # 120 (matches main agent's default) — compute work routinely
             # involves probe → setup → mesh/data prep → run → post-process
             # → analyze, with debug iterations at each stage. 60 was a
@@ -1276,7 +1292,7 @@ Bounded summary: status, the manifest of artifacts produced (URIs + local paths 
 If you couldn't produce a real artifact (missing input data + couldn't get it; library install failed; data tier inaccessible): BLOCKED, with what's missing and what you tried. Reporting BLOCKED honestly is far more valuable than a fabricated plot dressed up as success.
 
 """ + OBSERVATION_PROMPT_BLOCK,
-            allowed_tools=["file_ops", "bash", "search", "materialize", "compute_run", "compute_exec", "compute_cluster", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
+            allowed_tools=["file_ops", "bash", "search", "materialize", "materialize_workspace", "compute_run", "compute_exec", "compute_cluster", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             max_iterations=80,
             max_session_tokens=2_000_000,
         ))

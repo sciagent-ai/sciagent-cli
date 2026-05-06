@@ -7,6 +7,7 @@ Cloud credentials must be configured (aws configure, gcloud auth, etc.)
 
 from __future__ import annotations
 
+import os
 import shlex
 import subprocess
 import tempfile
@@ -58,6 +59,38 @@ _OUTPUTS_MOUNT_PATH: str = "/outputs"
 # Conventional input mount path. Single-string workspace_source= maps here
 # for back-compat. Multi-mount callers can declare any path.
 _DEFAULT_INPUT_MOUNT_PATH: str = "/workspace"
+
+
+# Per-session workspace bucket cache (process-scope). Keyed by session_id
+# so a second compute_run / compute_exec in the same session re-uses the
+# same sky.Storage object instead of re-creating it. Survives only the
+# parent python process — Sky's persistent=True keeps the cloud bucket
+# alive across cluster teardown / agent crash / cross-day resume.
+_SESSION_WORKSPACE_CACHE: Dict[str, Any] = {}
+
+
+def _session_workspace_bucket_name(session_id: str) -> str:
+    """Bucket name for a session's durable workspace tier.
+
+    Derivable from session_id alone — no manifest entry, no new state
+    surface. Same shape the always-on output mount uses; the workspace is
+    the same bucket conceptually, just mounted RW at /workspace/ for
+    cross-step durable data.
+    """
+    return f"sciagent-workspace-{session_id}"
+
+
+def _build_workspace_uri(store: str, session_id: str) -> str:
+    """LLM-facing workspace_uri (e.g. ``s3://sciagent-workspace-<sid>/``).
+
+    Scheme follows the chosen store (s3/gs/az/r2/oci) so the URI round-trips
+    through compute_fetch.py's dispatch table without re-reading SkyPilot
+    config. Trailing slash matches sciagent's convention for "directory
+    URIs" (the bucket root).
+    """
+    scheme = _STORE_TO_URI_SCHEME.get(store, store)
+    bucket = _session_workspace_bucket_name(session_id)
+    return f"{scheme}://{bucket}/"
 
 
 # sky.jobs.ManagedJobStatus -> sciagent JobStatus (v4.1 §1, M1A deliverable).
@@ -203,14 +236,18 @@ def _pick_primary_input_mount(storage_mounts: Iterable["StorageMount"]):
     """Pick the run-CWD target from a list of storage mounts.
 
     Rules (image-agnostic):
-      - Skip the always-on output mount (kind="output").
+      - Only ``kind="input"`` mounts are eligible. ``kind="output"`` is
+        the auto-fetch target; ``kind="durable"`` is the auto-mounted
+        session workspace tier — RW like input, but the image's WORKDIR
+        must stay intact when the caller didn't ask for a specific cd.
+        /workspace/ is a *data* tier, not a code tier.
       - Prefer an input mount with path /workspace if present (the
         conventional default that string-form workspace_source= maps to).
       - Else, the first input mount in declaration order.
       - Else, None — no cd is prepended; CWD falls through to ship_workdir
         (~/sky_workdir/) if rsynced, else the image's WORKDIR.
     """
-    inputs = [m for m in storage_mounts if getattr(m, "kind", "input") != "output"]
+    inputs = [m for m in storage_mounts if getattr(m, "kind", "input") == "input"]
     if not inputs:
         return None
     for m in inputs:
@@ -422,6 +459,107 @@ class SkyPilotBackend:
                 )
             )
         return mounts
+
+    def resolve_workspace_store(self) -> str:
+        """Pick the cloud store for the session workspace bucket.
+
+        Precedence: ``SCIAGENT_WORKSPACE_STORE`` env (s3 / gcs / azure /
+        r2 / oci) > first enabled cloud from ``sky check`` > "s3" as the
+        ultimate fallback (handled inside ``get_enabled_store``). Cloud-
+        aware by design — the workspace lands wherever the user actually
+        runs compute, not on a hardcoded scheme.
+        """
+        env_val = os.environ.get("SCIAGENT_WORKSPACE_STORE")
+        if env_val:
+            normalized = env_val.strip().lower()
+            if normalized:
+                # Accept the URI scheme spelling too ("gs" -> "gcs", "az" ->
+                # "azure") so the env can carry either flavor.
+                alias = {"gs": "gcs", "az": "azure"}.get(normalized, normalized)
+                return alias
+        return self.get_enabled_store()
+
+    def get_or_create_session_workspace(
+        self,
+        session_id: str,
+        store: Optional[str] = None,
+    ):
+        """Return a cached ``sky.Storage`` for the session's durable workspace.
+
+        Creates the bucket on first call (``source=None`` — Sky auto-creates
+        it). On subsequent calls in the same process, re-attaches by passing
+        ``source=<existing-bucket-uri>`` so Sky binds the same backing bucket
+        without trying to re-create it. Cross-process / cross-day resume:
+        the bucket name is derived from session_id, so a fresh process with
+        the same session_id still hits the same bucket.
+
+        ``persistent=True`` and ``mode=MOUNT`` are non-negotiable here:
+          - persistent=True keeps the bucket after cluster teardown (the
+            whole point of a durable session tier).
+          - MOUNT (vs COPY) makes writes to /workspace/ stream back to the
+            object store instead of staying on the cluster's local disk —
+            otherwise compute_exec follow-ups can't see prior writes.
+
+        Returns:
+            sky.Storage instance ready to plug into ``task.set_storage_mounts``.
+        """
+        cached = _SESSION_WORKSPACE_CACHE.get(session_id)
+        if cached is not None:
+            return cached
+
+        sky = self._get_sky()
+        chosen_store = (store or self.resolve_workspace_store()).lower()
+        bucket = _session_workspace_bucket_name(session_id)
+
+        store_type = getattr(sky.StoreType, chosen_store.upper(), None)
+        stores = [store_type] if store_type is not None else None
+
+        # First-call vs re-attach: Sky's Storage constructor accepts source=
+        # as either None (auto-create) or an existing bucket URI (attach).
+        # A new sky.Storage with source=None and the bucket already existing
+        # in cloud also resolves cleanly — Sky reuses the bucket — so the
+        # cross-process resume path doesn't need a separate code branch.
+        storage = sky.Storage(
+            name=bucket,
+            source=None,
+            stores=stores,
+            persistent=True,
+            mode=sky.StorageMode.MOUNT,
+        )
+
+        _SESSION_WORKSPACE_CACHE[session_id] = storage
+        return storage
+
+    def build_session_workspace_mount(
+        self,
+        session_id: str,
+        store: Optional[str] = None,
+    ) -> "StorageMount":
+        """Build the StorageMount that pins /workspace/ to the session bucket.
+
+        Companion to ``get_or_create_session_workspace``: the Storage object
+        is the Sky-side primitive; this StorageMount is the sciagent-side
+        descriptor used by ``_build_storage_mounts`` and surfaced in tool
+        results. Both wind up referring to the same bucket; keeping them in
+        sync (same bucket name, same store, persistent=True) is the
+        backend's responsibility, not the caller's.
+        """
+        from ..job import StorageMount, StorageMode
+
+        chosen_store = (store or self.resolve_workspace_store()).lower()
+        return StorageMount(
+            path=_DEFAULT_INPUT_MOUNT_PATH,
+            bucket=_session_workspace_bucket_name(session_id),
+            store=chosen_store,
+            mode=StorageMode.MOUNT,
+            source=None,
+            persistent=True,
+            # "durable" so the cd picker skips it — auto-mounting /workspace/
+            # must not steal CWD from the image's own WORKDIR or from the
+            # ship_workdir rsync target. Caller-declared workspace_source
+            # entries are kind="input" and stay eligible for cd.
+            kind="durable",
+        )
 
     def get_workspace_mount(
         self,

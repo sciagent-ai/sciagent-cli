@@ -22,6 +22,8 @@ from sciagent.tools.atomic.compute import ComputeTool, ToolResult
 def _tool_with_mock_router(skypilot=True):
     """Build a ComputeTool whose router is mocked, with skypilot backend
     selected by default."""
+    from sciagent.compute.job import StorageMount, StorageMode
+
     tool = ComputeTool(working_dir=".")
 
     fake_router = MagicMock()
@@ -29,6 +31,16 @@ def _tool_with_mock_router(skypilot=True):
     fake_backend.name = "skypilot" if skypilot else "local"
     fake_backend.build_outputs_mount.return_value = None
     fake_backend.build_input_mounts.return_value = []
+    # P0.5 auto-mount stub: real StorageMount so storage_list stays string-typed.
+    fake_backend.build_session_workspace_mount.return_value = StorageMount(
+        path="/workspace",
+        bucket="sciagent-workspace-test",
+        store="s3",
+        mode=StorageMode.MOUNT,
+        source=None,
+        persistent=True,
+        kind="durable",
+    )
     fake_router.list_backends.return_value = (
         ["skypilot"] if skypilot else ["local"]
     )
