@@ -6,11 +6,11 @@ SciAgent is a modular agent framework for software engineering and scientific co
 
 ## How it works
 
-You give sciagent a goal — a paper to reproduce, a simulation to run, a question to answer. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — so the audit isn't a separate step, it's a byproduct of normal operation.
+You give sciagent a scientific task — a simulation to run, a hypothesis to test, a dataset to analyze, results to reproduce or extend. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — so the audit isn't a separate step, it's a byproduct of normal operation.
 
 ```mermaid
 flowchart TD
-    Goal["Your goal<br/>(paper · prompt · simulation request)"]
+    Goal["Your scientific task<br/>(simulation · analysis · hypothesis test · reproduction)"]
     Main["Main agent<br/>plans + delegates"]
     Compute["<b>compute</b> subagent<br/>SkyPilot cluster + per-session workspace bucket"]
     Analyze["<b>analyze</b> subagent<br/>plots · stats · fits · comparisons"]
@@ -35,6 +35,24 @@ What makes this distinctive:
 - **Independent verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning — only the log and the on-disk artifacts. Cross-LLM friendly: a different model in a different process can audit a session it didn't run.
 - **Containerized scientific services out of the box.** Twenty-plus registered images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
 - **Background sub-agents survive crashes.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
+
+## Levels of scientific automation
+
+The chemistry and materials community has formalised a Self-Driving Laboratory (SDL) autonomy framework analogous to SAE's autonomy levels for self-driving cars ([Chem Rev 2024](https://pubs.acs.org/doi/10.1021/acs.chemrev.4c00055), [Royal Society Open Sci 2025](https://royalsocietypublishing.org/rsos/article/12/7/250646/235354/Autonomous-self-driving-laboratories-a-review-of)). Systems are scored on two independent axes — software autonomy (planning, decisions, analysis) and hardware autonomy (the physical execution substrate) — each from category 0 (manual) to category 3 (fully unattended, diverse experiments). Levels 2-5 are derived from combinations of the two axes; **Level 2-3 is where the vast majority of demonstrated systems sit today, and a true Level 5 (cat 3 in both) remains unattained in the field.**
+
+Where sciagent fits:
+
+| Axis | Cat 0 | Cat 1 | Cat 2 | Cat 3 | sciagent |
+|------|-------|-------|-------|-------|----------|
+| **Software** — planning, dispatch, execution, analysis, verification | Human ideation | One-shot AI suggestion | AI plans + iterates | AI plans, executes, analyzes, verifies independently | **Cat 2-3** |
+| **Compute substrate** — provisioning, cluster lifecycle, workspace, fault tolerance | Manual | Single-task script | Workflow config | Diverse jobs, unattended | **Cat 2-3** |
+| **Wet-lab hardware** — physical robotics, liquid handling, instrumentation | — | — | — | — | **out of scope** |
+
+sciagent is **autonomous computational science**, not a wet-lab SDL — there are no liquid handlers, no robotic arms. For tasks where the substrate *is* compute (simulations, numerical experiments, data analysis, model fitting, design-space exploration), it covers the same end-to-end loop the SDL framework describes — plan → dispatch → run → observe → derive → verify — without the wet-lab dimension.
+
+The piece sciagent adds on the software-autonomy axis is the closed audit loop: durable provenance + independent fresh-context verifier. Most "AI for science" agents stop at *running* the work — they have no record an external party can audit, and any verification step shares context with the executor. SciAgent's verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run. This is the property that makes the loop trustworthy as you climb toward higher autonomy.
+
+For broader context: [Self-Driving Laboratories for Chemistry and Materials Science (Chem Rev 2024)](https://pubs.acs.org/doi/10.1021/acs.chemrev.4c00055), [Performance metrics to unleash the power of self-driving labs (Nat Comm 2024)](https://www.nature.com/articles/s41467-024-45569-5), [Self-driving Labs at Berkeley/LBNL (2025 workshop)](https://indico.physics.lbl.gov/event/3263/), [Autonomous Discovery at Argonne](https://www.anl.gov/autonomous-discovery).
 
 ## Features
 
