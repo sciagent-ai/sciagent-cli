@@ -65,14 +65,21 @@ def _find_safe_cut_point(self, start, forward=True):
 Tools extend `BaseTool` with `name`, `description`, `parameters` (JSON schema), and `execute()`.
 
 ### Atomic Tools
-Full-featured tools in `sciagent.tools.atomic`:
-- `bash` - Shell execution with timeouts
-- `file_ops` - Read/write/replace/list
-- `search` - Glob and grep
-- `web` - Search and fetch
-- `todo` - Task graph management
-- `skill` - Load workflow instructions
-- `ask_user` - User interaction
+Full-featured tools in `sciagent.tools.atomic`. Grouped by purpose:
+
+**Core** — `bash`, `file_ops`, `search`, `web`, `todo`, `ask_user`, `skill`.
+
+**Compute** — `compute_run`, `compute_exec`, `compute_cluster`, `materialize`, `materialize_workspace`. Filtered out of the main agent's registry; reachable via the `compute` and `analyze` subagents only.
+
+**Task & background** — `task_list`, `task_get`, `task_wait` (kind-agnostic registry); `bg_status`, `bg_output`, `bg_wait`, `bg_kill` (cloud-job runtime).
+
+**Service discovery** — `service_search`, `service_detail`.
+
+**Monitoring** — `monitor`, `monitor_stop` (push-style stdout-line events delivered as `<system-reminder>` on the next agent turn — no per-event LLM round-trip).
+
+**Verification** — `verify` / `verify_session` (snapshot read of the durable provenance log).
+
+See [Tools reference](../tools.md) for full signatures.
 
 ### Tool Registry
 `ToolRegistry` handles registration, lookup, and execution:
@@ -125,28 +132,132 @@ SubAgentConfig(
 )
 ```
 
-Built-in sub-agents:
+Built-in sub-agents (registered in `SubAgentRegistry._register_defaults`, `src/sciagent/subagent.py`):
+
 | Name | Model Tier | Purpose | Tools |
 |------|------------|---------|-------|
 | explore | Fast | Quick codebase searches | file_ops, search, bash |
 | debug | Coding | Error investigation | file_ops, search, bash, web, skill |
 | research | Coding | Web/doc research | web, file_ops, search |
 | plan | Scientific | Break down problems | file_ops, search, bash, web, skill, todo |
-| general | Coding | Multi-step tasks | all |
-| verifier | Verification | Independent validation | file_ops, search, bash |
+| compute | Coding | Cloud-job orchestration with token-isolated context | compute_run, compute_exec, compute_cluster, materialize, materialize_workspace, service_search, service_detail, bg_*, monitor, web, ask_user, todo, file_ops, search, bash |
+| analyze | Coding | Post-job derivation (plots, statistics, light fits, DSE) | materialize, compute_run/exec/cluster, service_search, file_ops, bash, search, web, monitor, bg_*, ask_user |
+| general | Coding | Multi-step implementation tasks | all |
+| verifier | Verification | Independent validation against the provenance log | file_ops, search, bash |
+
+**Why two compute-related kinds?** `compute` produces primary data (a simulation, a training run, a heavy fit). `analyze` consumes that data and produces derived artifacts (plots, comparisons, regressions). Same data tier, different prompts, different idioms — and they routinely run independently (re-analyze without re-simulating, or analyze across many sim runs for design-space exploration).
+
+The `compute` and `analyze` subagents see the cloud-compute tool surface; the **main agent does not**. This keeps cloud chatter (status polls, log tails, manifest writes) inside a per-subagent context bubble — the main agent sees only the subagent's bounded summary. Tool filtering happens via `ToolRegistry.clone(exclude={...})`.
 
 ### Orchestration
 
-`SubAgentOrchestrator` manages spawning and parallel execution:
+`SubAgentOrchestrator` manages spawning, parallel execution, and background runs:
 
 ```python
 orch = SubAgentOrchestrator(tools=registry, working_dir=".")
+
+# Foreground (synchronous)
 result = orch.spawn("explore", "Find API endpoints")
+
+# Parallel
 results = orch.spawn_parallel([
     {"agent_name": "research", "task": "Find documentation for S4 library"},
     {"agent_name": "debug", "task": "Investigate build error in logs"}
 ])
+
+# Background — returns a task_id, registers in task_index
+task_id = orch.spawn(
+    agent_name="analyze",
+    task="KDE plot of T field at z=0.1m",
+    background=True,
+    produces_uris=["./_outputs/kde_z01.png"],
+)
 ```
+
+When `produces_uris=` is declared, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 100). Failure lands the task in `blocked_produce_missing` state — explicit failure rather than silent "I claimed success but the file isn't there."
+
+## SkyPilot Integration & Cluster Lifecycle
+
+The compute layer (`src/sciagent/compute/`) routes scientific simulations between two backends — local Docker for small jobs, [SkyPilot](https://skypilot.readthedocs.io/) for cloud-scale work. Both produce the same `JobResult` shape so downstream tooling doesn't branch on backend.
+
+The router (`compute/router.py`) selects SkyPilot when GPUs are requested, memory > 16 GB, CPUs > 8, or `backend="skypilot"` is explicit. Two execution modes:
+
+- **Managed jobs** (`mode="job"`): Sky launches a transient cluster, runs the command, tears the cluster down on completion. One-shot.
+- **Cluster mode** (`mode="cluster"`): Sky launches a persistent cluster the agent can iterate against (`compute_exec` for follow-up commands, `compute_cluster(action="refresh_mounts")` to point it at new inputs).
+
+### Stop, not down
+
+The end-of-task lifecycle action is `stop` (preserves the disk and identity, restartable in seconds), **not** `down` (destructive). The agent prompt enforces this rule. `down` is reserved for explicit cleanup or quota-driven teardown.
+
+### Session workspace bucket
+
+Every cluster job auto-mounts a per-session durable bucket at `/workspace/`:
+
+```
+<cloud>://sciagent-workspace-<session_id>/
+```
+
+Where `<cloud>` is whichever provider the job runs on (`s3`, `gs`, `az`, `r2`, `oci`). The bucket survives cluster teardown — outputs persist beyond the cluster. This is the data tier that `compute` → `analyze` → `verifier` all share. `materialize_workspace(subpath=..., dest=...)` pulls (a slice of) it back to local; `materialize(uri=...)` is the cloud-agnostic equivalent for arbitrary URIs.
+
+For the user-facing guide see [Cloud Compute](../cloud-compute.md).
+
+## Task Index & State Surfaces
+
+Long-running work — cloud compute jobs and background subagents — is tracked in a single registry, the **task index**, at `~/.sciagent/tasks/<task_id>.json`. Two kinds today:
+
+| Kind | Tracks |
+|------|--------|
+| `compute_job` | Cloud job launched via `compute_run` |
+| `subagent` | Subagent run (background or foreground) |
+
+Future kinds (`watch`, `scheduled`) land additively. The state machine:
+
+```
+pending → running → {completed | failed | cancelled | blocked_produce_missing}
+                  → {crashed | blocked_resume}      ← resumable, subagent-only
+```
+
+The kind-agnostic `task_list` / `task_get` / `task_wait` tools query the registry across kinds. Cloud-job-specific operations (Sky status, logs, kill) stay on the `bg_*` tools. The split keeps the cross-kind surface compact while preserving per-cloud-job ergonomics.
+
+### Why a single registry
+
+Pre-consolidation, sciagent had separate stores for compute jobs, background bash, in-flight subagents, todo state, etc. — six overlapping state surfaces that drifted. The task index is the long-term consolidation: one on-disk format, one set of query tools, one state machine. The provenance log (next section) is the audit-trail companion; the task index is the runtime registry. They are layered, not duplicated.
+
+For the user-facing guide see [Task Orchestration](../task-orchestration.md).
+
+## Checkpoint & Resume
+
+Background subagents checkpoint per-iteration to:
+
+```
+~/.sciagent/sessions/<session_id>/subagents/<task_id>/
+├── checkpoint.jsonl   # per-iteration events (tool calls, hashes, previews)
+└── agent_state.json   # full state snapshot
+```
+
+Schema version: `1`. On crash before terminal state, the registry entry's `state` is set to `crashed` and the checkpoint persists. A subsequent `spawn(...)` for a subagent-kind task hashes the task description and checks for a prior `crashed` or `blocked_resume` entry with the same hash — on match, the orchestrator prompts the parent for a 3-way choice (`skip` / `use_prior` / `retry`).
+
+`blocked_resume` is the voluntary version: the subagent itself decides the work can't finish in the current process (token budget, mid-pipeline pause) and asks to be picked up later.
+
+## Provenance Log
+
+`src/sciagent/provenance_log.py` writes an append-only JSONL log per session at `~/.sciagent/sessions/<session_id>/provenance.jsonl`. Schema version `1`. Event kinds:
+
+| Event | Emitted by |
+|-------|------------|
+| `tool_call` | Agent before tool execution |
+| `tool_result` | Agent after tool completion |
+| `compute_job_launched` | `compute_run` |
+| `compute_job_status_changed` | `bg_status` polling |
+| `artifact_produced` | File observation |
+| `verification_result` | `verify` / `verify_session` |
+| `correction` | Manual override |
+
+Per-line cap 16 KB; per-field cap 4 KB (oversize fields are replaced with a truncation stub carrying a SHA-256 + preview). Thread-safe via `fcntl.flock` so concurrent writes from main thread + orchestrator threads + verify probes never interleave.
+
+The companion module `src/sciagent/provenance_lineage.py` builds a graph from these events — compute job → artifact → verification — for end-to-end traceability across sessions.
+
+For the schema see [Provenance Log Schema](../provenance_log_schema.md).
 
 ## Verification System
 

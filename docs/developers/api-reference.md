@@ -28,10 +28,10 @@ result = agent.run("Analyze this codebase")
 
 ```python
 from sciagent import DEFAULT_MODEL
-print(DEFAULT_MODEL)  # "anthropic/claude-opus-4-5-20251101"
+print(DEFAULT_MODEL)  # "anthropic/claude-sonnet-4-6"
 ```
 
-Change globally in `src/sciagent/defaults.py`.
+Resolves to the `SCIENTIFIC_MODEL` tier. Change globally in `src/sciagent/defaults.py`. The full tier set: `SCIENTIFIC_MODEL`, `CODING_MODEL`, `FAST_MODEL`, `VISION_MODEL`, `VERIFICATION_MODEL`.
 
 ## Core Classes
 
@@ -178,11 +178,152 @@ from sciagent.subagent import SubAgentOrchestrator
 orch = SubAgentOrchestrator(
     tools=registry,
     working_dir="./project",
-    parent_model="anthropic/claude-sonnet-4-20250514"
+    parent_model="anthropic/claude-sonnet-4-6"
 )
 
+# Foreground (synchronous) — returns SubAgentResult
 result = orch.spawn("researcher", "Find API endpoints")
+
+# Background — registers in task_index, returns task_id
+task_id = orch.spawn(
+    agent_name="analyze",
+    task="KDE plot of T field at z=0.1m",
+    background=True,
+    produces_uris=["./_outputs/kde_z01.png"],   # validated post-return
+    resume_task_id=None,                         # set to a prior task_id to resume
+)
+
+# Parallel
+results = orch.spawn_parallel([
+    {"agent_name": "research", "task": "Find S4 docs"},
+    {"agent_name": "debug", "task": "Investigate build error"},
+])
 ```
+
+When `produces_uris=` is declared, the orchestrator validates that each pattern resolves to at least one file with size ≥ `produces_min_bytes` (default 100). Failure transitions the task to state `blocked_produce_missing`.
+
+## Compute
+
+Cloud and local container job orchestration. See [Cloud Compute](../cloud-compute.md) for the user-facing guide.
+
+### Tools
+
+```python
+# Tools live in sciagent.tools.atomic and are registered automatically by
+# create_atomic_registry(). Direct Python use:
+from sciagent.tools.atomic.compute import ComputeTool
+from sciagent.tools.atomic.compute_exec import ComputeExecTool
+from sciagent.tools.atomic.compute_cluster import ComputeClusterTool
+from sciagent.tools.atomic.materialize import MaterializeTool
+from sciagent.tools.atomic.materialize_workspace import MaterializeWorkspaceTool
+
+run = ComputeTool(working_dir=".")
+result = run.execute(
+    service="openfoam-swak4foam-2012",
+    command="bash Allrun",
+    mode="cluster",
+    backend="skypilot",
+    cluster_name="cfd-run-1",
+    cpus=4,
+    memory_gb=32,
+)
+```
+
+### Compute router & job model
+
+```python
+from sciagent.compute.router import ComputeRouter
+from sciagent.compute.job import Job, JobResult, JobStatus, ComputeRequirements
+
+requirements = ComputeRequirements(cpus=4, memory_gb=32, gpus=0, gpu_type=None)
+job = Job(image="ghcr.io/sciagent-ai/openfoam-swak4foam-2012", command="bash Allrun",
+          requirements=requirements)
+
+router = ComputeRouter()
+result: JobResult = router.run(job)
+```
+
+### Task index
+
+```python
+from sciagent.compute.task_index import (
+    read_task, write_task, get_task, list_tasks, update_task_state,
+    delete_task, kind_of, manifest_dir, manifest_path,
+    KNOWN_KINDS, VALID_STATES, TERMINAL_STATES, RESUMABLE_STATES,
+)
+
+# Query
+running_jobs = list_tasks(kind="compute_job", state="running")
+record = get_task("sciagent-abc123")              # on-disk shape
+kind = kind_of("sciagent-abc123")                  # "compute_job" | "subagent" | "local"
+
+# Lifecycle
+update_task_state("sciagent-abc123", state="completed",
+                  result_summary="500 SIMPLE iterations")
+```
+
+`KNOWN_KINDS = ("compute_job", "subagent")`. `TERMINAL_STATES = ("completed", "failed", "cancelled", "blocked_produce_missing")`. `RESUMABLE_STATES = ("crashed", "blocked_resume")` — subagent-only.
+
+## Checkpoint
+
+```python
+from sciagent.checkpoint import SubagentCheckpoint
+
+# Subagent runs write checkpoints automatically when spawned via
+# SubAgentOrchestrator.spawn(...). The on-disk shape:
+#   ~/.sciagent/sessions/<session_id>/subagents/<task_id>/
+#       checkpoint.jsonl   # per-iteration events
+#       agent_state.json   # full state snapshot
+
+# To resume a crashed task, pass its task_id back into spawn:
+result = orch.spawn(
+    agent_name="analyze",
+    task="<same description as the crashed run>",
+    resume_task_id="<prior task_id>",
+)
+```
+
+When a fresh `spawn(...)` matches a prior `crashed` / `blocked_resume` entry by description hash, the orchestrator prompts the user with a 3-way choice (`skip` / `use_prior` / `retry`).
+
+## Provenance Log
+
+```python
+from sciagent.provenance_log import ProvenanceLog, get_provenance_log
+
+# Get-or-create the per-session log
+log = get_provenance_log(session_id="abc12345")
+
+# Emit events (called automatically by AgentLoop, ComputeTool, verify_session)
+log.append({
+    "event_kind": "tool_call",
+    "tool_name": "compute_run",
+    "arguments": {...},
+    "session_id": "abc12345",
+})
+
+# Snapshot read
+events = log.read_events()
+```
+
+Schema version `1`. Per-line cap 16 KB; per-field cap 4 KB. Thread-safe via `fcntl.flock`. See [Provenance Log Schema](../provenance_log_schema.md).
+
+### verify_session
+
+```python
+from sciagent.tools.atomic.verify import verify_session
+
+report = verify_session(session_id="abc12345")
+# {
+#   "session_id": "abc12345",
+#   "events_by_kind": {...},
+#   "compute_jobs": [...],
+#   "artifacts": [...],
+#   "verifications": [...],
+#   "summary_issues": [...],
+# }
+```
+
+Snapshot, non-blocking, one-shot. A second invocation on the same session produces a fresh snapshot.
 
 ## LLM Classes
 

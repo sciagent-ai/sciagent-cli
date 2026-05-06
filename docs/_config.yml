@@ -58,6 +58,12 @@ aux_links:
 # External navigation links open in new tab
 aux_links_new_tab: true
 
+# Aux nav also surfaces the v1.0 archive on GitHub for users who want the prior
+# release's docs (we don't republish them as HTML — source-only archive).
+aux_links_more:
+  "v1.0 docs (archive)":
+    - "https://github.com/sciagent-ai/sciagent-cli/tree/release/v1.0/docs"
+
 # Callouts (info boxes)
 callouts:
   warning:

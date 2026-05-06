@@ -1,10 +1,18 @@
 # SciAgent
 
-SciAgent is a modular agent framework for software engineering and scientific computing. It combines a standard agent loop with dependency-aware task orchestration, allowing the language model to plan and execute complex workflows by invoking external tools and containerised services.
+SciAgent is a modular agent framework for software engineering and scientific computing. It combines a standard agent loop with dependency-aware task orchestration, allowing the language model to plan and execute complex workflows by invoking external tools, containerised services, and cloud compute.
+
+> **v2.0 is current.** Highlights: cloud compute via SkyPilot, durable provenance log, task orchestration with background subagents and checkpoint/resume. See [What's New in v2.0](docs/whats-new-v2.md). v1.0 is preserved on branch `release/v1.0` and tag `v1.0`.
 
 ## Features
 
-- **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like scientific computing, code review, and service building. Skills auto-trigger based on user input patterns.
+- **Cloud compute** – Run scientific simulations on cloud clusters via SkyPilot, with a local Docker fallback for small jobs. Per-session workspace bucket persists outputs across cluster lifecycle. See [Cloud Compute](docs/cloud-compute.md).
+
+- **Durable provenance log** – Every tool call, compute job, artifact, and verification result lands in an append-only JSONL log per session — cross-LLM verifiable. See [Provenance Log Schema](docs/provenance_log_schema.md).
+
+- **Task orchestration** – Unified registry for in-flight work (`task_index`) covering cloud jobs and background subagents. Background subagents support checkpoint and 3-way resume. See [Task Orchestration](docs/task-orchestration.md).
+
+- **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like service building and code review. Skills auto-trigger based on user input patterns.
 
 - **Image & multimodal analysis** – Analyse scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
 
@@ -12,13 +20,13 @@ SciAgent is a modular agent framework for software engineering and scientific co
 
 - **Task DAG orchestration** – Define a graph of tasks with dependencies (`depends_on`), batch parallelisable steps and pass data between tasks via `result_key`.
 
-- **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria.
+- **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria; `produces_uris` validation on subagent outputs.
 
-- **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
+- **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM + swak4foam), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY), post-processing (ParaView), digital IC (OpenROAD, iic-osic-tools) and more.
 
 - **Multi-model support** – Choose between Anthropic Claude, OpenAI (GPT-4.1, o3, o4-mini), Google Gemini 3, xAI Grok 4, DeepSeek, or open-source models via LiteLLM. Caching reduces cost and latency.
 
-- **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning and general tasks. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
+- **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning, cloud compute, post-job analysis, general implementation, and verification. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
 
 ## Quick start
 
@@ -69,7 +77,7 @@ For more details on CLI flags see the [Configuration](docs/configuration.md) gui
 
 ## Image analysis examples
 
-SciAgent can analyse images including scientific plots, microscopy, diagrams, and data visualisations:
+SciAgent can analyze images including scientific plots, microscopy, diagrams, and data visualisations:
 
 ```bash
 # Analyse a scientific plot
@@ -131,11 +139,11 @@ SciAgent uses a skill-based workflow system for complex, multi-phase tasks. Skil
 
 | Skill | Purpose |
 |-------|---------|
-| `sci-compute` | Scientific simulations with research-first approach |
+| `use-service` | Look up a registered scientific service and run a simulation |
 | `build-service` | Build and publish Docker services to GHCR |
 | `code-review` | Comprehensive code review with security analysis |
 
-The `sci-compute` skill implements a five-phase workflow: Discovery → Research → Code Generation → Execution → Debug. This ensures correct API usage by researching official documentation before writing simulation code.
+The `use-service` skill implements a research-first workflow: discover the right service, read its docs, write the simulation code, run it in the container, debug. This ensures correct API usage by researching official documentation before writing simulation code.
 
 ## Sub-agents
 
@@ -147,8 +155,10 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 | `debug` | Coding | Error investigation with web research |
 | `research` | Coding | Web research, documentation, literature review |
 | `plan` | Scientific | Break down complex problems (needs deep reasoning) |
+| `compute` | Coding | Cloud-job orchestration with token-isolated context |
+| `analyze` | Coding | Post-job derivation (plots, statistics, light fits, DSE) |
 | `general` | Coding | Complex multi-step implementation tasks |
-| `verifier` | Verification | Independent validation of task outputs |
+| `verifier` | Verification | Independent validation against the provenance log |
 
 Model tiers are defined in `src/sciagent/defaults.py`:
 - **Scientific**: Main agent, planning 
@@ -188,14 +198,51 @@ SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed 
 └─────────────────────────────────────────────────┘
 ```
 
+The v2.0 cloud + audit layer sits underneath:
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Compute subagent                                     │
+│  compute_run / compute_exec / compute_cluster        │
+│  materialize / materialize_workspace                 │
+└──────────────┬───────────────────────────────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+  ┌──────────┐    ┌──────────────┐
+  │  Local   │    │  SkyPilot    │     ┌──────────────────────┐
+  │  Docker  │    │  managed     │◀────│ Workspace bucket     │
+  │          │    │  / cluster   │     │ <cloud>://...-<sid>/ │
+  └──────────┘    └──────┬───────┘     └──────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────────┐
+              │ Task index              │
+              │ ~/.sciagent/tasks/*.json│
+              │ kind=compute_job|sub…   │
+              └─────────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────────┐
+              │ Provenance log (JSONL)  │
+              │ tool_call/result        │
+              │ compute_job_*           │
+              │ artifact_produced       │
+              │ verification_result     │
+              └─────────────────────────┘
+```
+
 ## Documentation
 
 Comprehensive documentation is available in the `docs` folder. Start with the following pages:
 
+- **[What's New in v2.0](docs/whats-new-v2.md)** – migration notes from v1.0, headline features, link to v1.0 archive.
 - **[Getting Started](docs/getting-started.md)** – installation, running your first task and CLI basics.
-- **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry and sub-agents.
+- **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry, sub-agents, and cloud setup.
+- **[Cloud Compute](docs/cloud-compute.md)** – SkyPilot integration, cluster lifecycle, workspace bucket, materialize.
+- **[Task Orchestration](docs/task-orchestration.md)** – task index, background subagents, checkpoint and resume.
 - **[Use Cases](docs/use-cases.md)** – real-world examples of how to apply SciAgent to coding, research and simulation.
-- **[Architecture](docs/developers/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, and sub-agent system.
+- **[Architecture](docs/developers/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, sub-agents, SkyPilot integration, and the provenance log.
 - **[Comparison](docs/comparison.md)** – what sets SciAgent apart from other agent frameworks.
 
 ## Requirements

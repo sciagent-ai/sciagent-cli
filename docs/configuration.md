@@ -44,11 +44,11 @@ SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriA
 
 | Tier | Anthropic (tested) | OpenAI | Google | xAI |
 |------|-------------------|--------|--------|-----|
-| **Scientific** | `claude-sonnet-4-20250514` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
-| **Vision** | `claude-opus-4-5-20251101` | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
-| **Coding** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Verification** | `claude-sonnet-4-20250514` | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Fast** | `claude-haiku-4-5-20251001` | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
+| **Scientific** | `claude-sonnet-4-6` (default), `claude-opus-4-7` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
+| **Vision** | `claude-opus-4-7` (default) | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
+| **Coding** | `claude-sonnet-4-6` (default) | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Verification** | `claude-sonnet-4-6` (default) | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Fast** | `claude-haiku-4-5-20251001` (default) | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
 
 **Open-Source alternatives** (via Together AI, Groq, or self-hosted):
 
@@ -121,9 +121,32 @@ Built-in sub-agents (each uses a cost-optimised model tier):
 
 Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
 
+## Cloud Compute
+
+For cloud-scale simulations, install with the `cloud*` extras and configure SkyPilot:
+
+```bash
+pip install '.[cloud]'        # AWS
+pip install '.[cloud-gcp]'    # GCP
+pip install '.[cloud-azure]'  # Azure
+pip install '.[cloud-all]'    # All three
+```
+
+SciAgent inherits whatever credentials SkyPilot can find. Set up your provider once with the SkyPilot-supported flow (`aws configure`, `gcloud auth application-default login`, `az login`) and `sky check` will confirm.
+
+Tunables:
+
+| Knob | Default | Purpose |
+|------|---------|---------|
+| `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `5.0` | Estimated total ($) above which `compute_run` prompts before launching |
+| `~/.sciagent/config.yaml` `compute.commit_threshold_usd` | — | Same gate, persisted in config |
+| `compute_cluster(action="autostop", idle_minutes=N)` | provider default | How long a cluster sits idle before auto-stopping |
+
+See [Cloud Compute](cloud-compute.md) for the full guide.
+
 ## Image Analysis
 
-SciAgent can analyse images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.
+SciAgent can analyze images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.
 
 ```bash
 # Analyse a scientific plot

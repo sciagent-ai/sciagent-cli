@@ -57,7 +57,7 @@ from .orchestrator import (
 )
 from .defaults import DEFAULT_MODEL
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 __all__ = [
     # Config
     "DEFAULT_MODEL",

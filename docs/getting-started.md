@@ -8,6 +8,8 @@ nav_order: 2
 
 Install SciAgent and run your first task in minutes.
 
+> **New in v2.0**: cloud compute via SkyPilot, durable provenance log, background subagents with checkpoint/resume. See [What's New in v2.0](whats-new-v2.md) for the full list.
+
 ## Installation
 
 Requires Python 3.9+.
@@ -15,7 +17,9 @@ Requires Python 3.9+.
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -e .
+pip install -e .                # base install (local Docker compute)
+pip install -e '.[cloud]'       # optional: SkyPilot + AWS extras
+pip install -e '.[cloud-all]'   # optional: SkyPilot + AWS, GCP, Azure
 ```
 
 *PyPI package coming soon—for now, install from source.*
@@ -73,12 +77,14 @@ Common options (defaults from `AgentConfig`):
 | Option | Purpose | Default |
 |--------|---------|---------|
 | `--project-dir PATH` | Directory for reading/writing files | Required |
-| `--model NAME` | LLM to use (e.g. `openai/gpt-4o`) | `claude-opus-4-5` |
-| Fast model | Used for content processing (web extraction, summarization). See `defaults.py` | `claude-sonnet-4` |
+| `--model NAME` | LLM to use (e.g. `openai/gpt-4.1`) | `anthropic/claude-sonnet-4-6` |
+| Fast model | Used for `explore` subagent and content processing. See `defaults.py` | `anthropic/claude-haiku-4-5-20251001` |
 | `--interactive` | Multi-turn conversation mode | Off |
+| `--subagents` | Enable WorkflowTool for full DAG execution | Off |
 | `--max-iterations N` | Max agent loop cycles | 120 |
 | `--temperature T` | LLM randomness (0 = deterministic) | 0.0 |
 | `--resume ID` | Continue a previous session | — |
+| `--list-sessions` | Show available resumable sessions | — |
 | `--quiet` | Minimal output | Off |
 
 Run `sciagent --help` for all options.
