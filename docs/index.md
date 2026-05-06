@@ -25,6 +25,7 @@ sciagent --project-dir ~/my-project "Create a Python script that fetches weather
 | [Configuration](configuration.md) | Models, prompts, tools, sub-agents |
 | [Tools](tools.md) | Built-in tools reference |
 | [Use Cases](use-cases.md) | Examples for coding, research, and scientific computing |
+| [Case Studies](case-studies/) | Real-world reproductions of published research |
 | [Comparison](comparison.md) | How SciAgent compares to other frameworks |
 
 ## For Developers

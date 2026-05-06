@@ -22,3 +22,12 @@ These case studies demonstrate SciAgent's ability to autonomously:
 - **Validate results** against published data
 
 Each case study shows the prompt given, the autonomous workflow, and quantitative validation of results.
+
+## Available Studies
+
+| Study | Domain | Stack |
+|-------|--------|-------|
+| [AR Waveguide Metasurface](photonics.md) | Photonics / RCWA | S4 (Stanford RCWA) |
+| [BRCA1 Fitness-Structure Analysis](bioinformatics.md) | Bioinformatics | BioPython, SciPy |
+| [Datacenter Temperature with OpenFOAM](datacenter-cfd.md) | CFD / OpenFOAM | OpenFOAM v2012, SkyPilot |
+| [Digital IC Synthesis](digital-ic.md) | EDA *(coming soon)* | OpenROAD |

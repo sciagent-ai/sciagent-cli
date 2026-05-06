@@ -1,0 +1,307 @@
+<!-- SciAgent Case Study - Datacenter CFD - Embeddable HTML -->
+<style>
+.sciagent-case-study {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2rem;
+  color: #1a1a2e;
+  line-height: 1.6;
+}
+
+.sciagent-case-study h2 {
+  color: #0f3460;
+  border-bottom: 3px solid #e94560;
+  padding-bottom: 0.5rem;
+  margin-top: 2rem;
+}
+
+.sciagent-case-study h3 {
+  color: #16213e;
+  margin-top: 1.5rem;
+}
+
+.sciagent-case-study .paper-badge {
+  background: linear-gradient(135deg, #2193b0 0%, #6dd5ed 100%);
+  color: white;
+  padding: 0.3rem 0.8rem;
+  border-radius: 20px;
+  font-size: 0.85rem;
+  display: inline-block;
+  margin-bottom: 1rem;
+}
+
+.sciagent-case-study .prompt-box {
+  background: #1a1a2e;
+  color: #00ff88;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  font-family: 'Monaco', 'Menlo', monospace;
+  font-size: 0.9rem;
+  margin: 1rem 0;
+  border-left: 4px solid #00ff88;
+  white-space: pre-wrap;
+}
+
+.sciagent-case-study .workflow-diagram {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  font-family: monospace;
+  white-space: pre;
+  overflow-x: auto;
+  font-size: 0.85rem;
+  border: 1px solid #dee2e6;
+}
+
+.sciagent-case-study table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1rem 0;
+  font-size: 0.9rem;
+}
+
+.sciagent-case-study th {
+  background: #0f3460;
+  color: white;
+  padding: 0.75rem;
+  text-align: left;
+}
+
+.sciagent-case-study td {
+  padding: 0.75rem;
+  border-bottom: 1px solid #dee2e6;
+}
+
+.sciagent-case-study tr:nth-child(even) {
+  background: #f8f9fa;
+}
+
+.sciagent-case-study .results-image {
+  width: 100%;
+  max-width: 800px;
+  border-radius: 8px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+  margin: 1.5rem 0;
+}
+
+.sciagent-case-study .validation-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .validation-card {
+  background: #f8f9fa;
+  padding: 1rem;
+  border-radius: 8px;
+  border-left: 4px solid #28a745;
+}
+
+.sciagent-case-study .validation-card.pass {
+  border-left-color: #28a745;
+}
+
+.sciagent-case-study .status-pass {
+  color: #28a745;
+  font-weight: bold;
+}
+
+.sciagent-case-study .phase-list {
+  list-style: none;
+  padding: 0;
+}
+
+.sciagent-case-study .phase-list li {
+  padding: 0.75rem 1rem;
+  margin: 0.5rem 0;
+  background: #f8f9fa;
+  border-radius: 8px;
+  border-left: 4px solid #2193b0;
+}
+
+.sciagent-case-study .phase-list li strong {
+  color: #0f3460;
+}
+
+.sciagent-case-study .metrics-row {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+}
+
+.sciagent-case-study .metric-box {
+  background: linear-gradient(135deg, #0f3460 0%, #16213e 100%);
+  color: white;
+  padding: 1rem 1.5rem;
+  border-radius: 8px;
+  text-align: center;
+  min-width: 120px;
+}
+
+.sciagent-case-study .metric-box .value {
+  font-size: 1.5rem;
+  font-weight: bold;
+}
+
+.sciagent-case-study .metric-box .label {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.sciagent-case-study .highlight-box {
+  background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+  border-left: 4px solid #e94560;
+  padding: 1rem 1.5rem;
+  margin: 1rem 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.sciagent-case-study .highlight-box strong {
+  color: #e94560;
+}
+</style>
+
+<div class="sciagent-case-study">
+
+  <h2>Case Study: Simulating Datacenter Temperature Distribution with OpenFOAM</h2>
+
+  <span class="paper-badge">OpenFOAM Journal Vol. 3 (2021)</span>
+
+  <p><strong>Paper:</strong> Barestrand et al., "Datacenter CFD with OpenFOAM," <em>OpenFOAM Journal</em> v3 (2021), <a href="https://doi.org/10.51560/ofj.v3.59">doi:10.51560/ofj.v3.59</a>.</p>
+
+  <h3>The Challenge</h3>
+  <p>Reproduce Fig 3 of the paper, the room-temperature distribution in a datacenter, starting from the manuscript PDF and the author's OpenFOAM case bundle. Run the heavy CFD on a cloud cluster (not the laptop), then analyze the saved fields locally. Cap the SIMPLE solver at 500 iterations so cloud wall-clock stays under ~10 minutes; the KDE shape is the target, not residual convergence.</p>
+
+  <h3>Prompt Given to SciAgent</h3>
+  <div class="prompt-box">Quick reproduction of Fig 3 (typical Boussinesq, 62K grid). Cap the SIMPLE
+solver at 500 iterations so wallclock stays under ~10 min on a small
+instance. The KDE shape is what matters, not residual convergence.
+
+Identify the OpenFOAM environment and boundary conditions from
+Manuscript.pdf and the case files in the project folder.
+
+When the solver finishes, pull the final time-step T field, the solver
+log, and the KDE plot back into the project folder. Then sky down the
+cluster, do this even on error.</div>
+
+  <h3>What SciAgent Did Autonomously</h3>
+
+  <ul class="phase-list">
+    <li><strong>Phase 1: Paper Analysis</strong> - Read manuscript and case bundle, extracted solver (buoyantBoussinesqSimpleFoam), turbulence model (k-epsilon), rack boundary conditions, supply temperature (291.45 K), and the volume-weighted KDE bandwidth from the author's plotting script. No human walkthrough of the physics.</li>
+    <li><strong>Phase 2: Stage Modified Case</strong> - Wrote a coarse blockMeshDict (47x24x50, ~62k cells after snappy) and a 500-iteration controlDict; everything else preserved verbatim from the paper's steady_incompressible case.</li>
+    <li><strong>Phase 3: Cloud Compute</strong> - Stood up a fresh compute cluster on demand, ran the meshing and solver pipeline on rented CPUs, materialized the result fields back to the project folder, and tore the cluster down afterwards. ~2.5 min wall-clock for 500 SIMPLE iterations.</li>
+    <li><strong>Phase 4: Local KDE Analysis</strong> - Parsed the saved temperature and cell-volume fields (61,808 cells), computed the volume-weighted Gaussian KDE with the paper's bandwidth, and rendered the plot. Same fields can be re-analyzed without re-running the solver.</li>
+  </ul>
+
+  <div class="workflow-diagram">
+Paper + cases -> Stage local -> Cloud cluster
+                                     |
+            meshing -> solver (500 iter) -> T, V, logs
+                                     |
+                       materialize -> local KDE -> Fig 3</div>
+
+  <h3>Results</h3>
+
+  <img src="https://sciagent-ai.github.io/sciagent-cli/images/case-studies/datacenter_cfd_fig3_kde.png" alt="Fig 3 KDE Reproduction" class="results-image">
+
+  <h4>KDE Comparison vs. Paper Fig 3 ("c: 62k" curve)</h4>
+  <table>
+    <thead>
+      <tr>
+        <th>Metric</th>
+        <th>This run</th>
+        <th>Paper (c: 62k)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td>T range</td><td>291.08 to 302.89 K</td><td>~291 to 303 K</td></tr>
+      <tr><td>Supply T</td><td>291.45 K</td><td>291.45 K</td></tr>
+      <tr><td>KDE peak T</td><td>291.47 K</td><td>~292 K</td></tr>
+      <tr><td>KDE peak density</td><td>30.84 m^3</td><td>~30 m^3</td></tr>
+      <tr><td>T_mean (vol-weighted)</td><td>295.40 K</td><td>~295 to 296 K</td></tr>
+      <tr><td>Cell count</td><td>61,808</td><td>~62,000</td></tr>
+    </tbody>
+  </table>
+
+  <div class="highlight-box">
+    <strong>Key Finding:</strong> The KDE shape matches qualitatively: dominant peak at the supply temperature, broad tail to ~303 K from hot-aisle recirculation. The broadened intermediate-temperature volume is the numerical diffusion at this resolution that the paper describes.
+  </div>
+
+  <h4>Mesh Quality (checkMesh)</h4>
+  <table>
+    <thead>
+      <tr><th>Metric</th><th>Value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Cells</td><td>61,808</td></tr>
+      <tr><td>Max non-orthogonality</td><td>48.1 deg</td></tr>
+      <tr><td>Mean non-orthogonality</td><td>4.0 deg</td></tr>
+      <tr><td>Mesh OK</td><td>yes</td></tr>
+    </tbody>
+  </table>
+
+  <h3>Validation Summary</h3>
+
+  <div class="validation-grid">
+    <div class="validation-card pass">
+      <strong>Solver match</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Coarse grid ~62k</strong><br>
+      <span class="status-pass">PASS (61,808)</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>500-iter cap</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Boundary conditions</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>KDE shape vs Fig 3</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>Cluster torn down</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+  </div>
+
+  <h3>Execution Metrics</h3>
+
+  <div class="metrics-row">
+    <div class="metric-box">
+      <div class="value">14 min</div>
+      <div class="label">Total Time</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">64</div>
+      <div class="label">Agent Turns</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">200</div>
+      <div class="label">Lines of Code</div>
+    </div>
+    <div class="metric-box">
+      <div class="value">2</div>
+      <div class="label">Debug Iterations</div>
+    </div>
+  </div>
+
+  <h3>Generated Artifacts</h3>
+  <ul>
+    <li><code>_outputs/fig3_kde.png</code> - Fig 3 reproduction (volume-weighted KDE)</li>
+    <li><code>_outputs/fig3_kde_stats.json</code> - n_cells, T range, peak, T_mean</li>
+    <li><code>_outputs/case_staged/</code> - modified blockMeshDict and capped controlDict</li>
+    <li><code>_outputs/fig3_Tfield/T</code> - final temperature field</li>
+    <li><code>_outputs/fig3_Tfield/V</code> - cell volumes</li>
+    <li><code>_outputs/fig3_Tfield/solver.log</code> - SIMPLE solver log (500 iterations)</li>
+    <li><code>_outputs/fig3_Tfield/checkMesh.log</code> - mesh quality report</li>
+  </ul>
+
+</div>

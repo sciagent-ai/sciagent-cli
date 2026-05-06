@@ -2,7 +2,7 @@
 layout: default
 title: Digital IC Synthesis
 parent: Case Studies
-nav_order: 3
+nav_order: 4
 ---
 
 # Digital IC Synthesis
