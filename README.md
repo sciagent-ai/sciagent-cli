@@ -36,24 +36,6 @@ What makes this distinctive:
 - **Containerized scientific services out of the box.** Twenty-plus registered images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
 - **Background sub-agents survive crashes.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
 
-## Levels of scientific automation
-
-The chemistry and materials community has formalised a Self-Driving Laboratory (SDL) autonomy framework analogous to SAE's autonomy levels for self-driving cars ([Chem Rev 2024](https://pubs.acs.org/doi/10.1021/acs.chemrev.4c00055), [Royal Society Open Sci 2025](https://royalsocietypublishing.org/rsos/article/12/7/250646/235354/Autonomous-self-driving-laboratories-a-review-of)). Systems are scored on two independent axes — software autonomy (planning, decisions, analysis) and hardware autonomy (the physical execution substrate) — each from category 0 (manual) to category 3 (fully unattended, diverse experiments). Levels 2-5 are derived from combinations of the two axes; **Level 2-3 is where the vast majority of demonstrated systems sit today, and a true Level 5 (cat 3 in both) remains unattained in the field.**
-
-Where sciagent fits:
-
-| Axis | Cat 0 | Cat 1 | Cat 2 | Cat 3 | sciagent |
-|------|-------|-------|-------|-------|----------|
-| **Software** — planning, dispatch, execution, analysis, verification | Human ideation | One-shot AI suggestion | AI plans + iterates | AI plans, executes, analyzes, verifies independently | **Cat 2-3** |
-| **Compute substrate** — provisioning, cluster lifecycle, workspace, fault tolerance | Manual | Single-task script | Workflow config | Diverse jobs, unattended | **Cat 2-3** |
-| **Wet-lab hardware** — physical robotics, liquid handling, instrumentation | — | — | — | — | **out of scope** |
-
-sciagent is **autonomous computational science**, not a wet-lab SDL — there are no liquid handlers, no robotic arms. For tasks where the substrate *is* compute (simulations, numerical experiments, data analysis, model fitting, design-space exploration), it covers the same end-to-end loop the SDL framework describes — plan → dispatch → run → observe → derive → verify — without the wet-lab dimension.
-
-The piece sciagent adds on the software-autonomy axis is the closed audit loop: durable provenance + independent fresh-context verifier. Most "AI for science" agents stop at *running* the work — they have no record an external party can audit, and any verification step shares context with the executor. SciAgent's verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run. This is the property that makes the loop trustworthy as you climb toward higher autonomy.
-
-For broader context: [Self-Driving Laboratories for Chemistry and Materials Science (Chem Rev 2024)](https://pubs.acs.org/doi/10.1021/acs.chemrev.4c00055), [Performance metrics to unleash the power of self-driving labs (Nat Comm 2024)](https://www.nature.com/articles/s41467-024-45569-5), [Self-driving Labs at Berkeley/LBNL (2025 workshop)](https://indico.physics.lbl.gov/event/3263/), [Autonomous Discovery at Argonne](https://www.anl.gov/autonomous-discovery).
-
 ## Features
 
 - **Cloud compute** – Run scientific simulations on cloud clusters via SkyPilot, with a local Docker fallback for small jobs. Per-session workspace bucket persists outputs across cluster lifecycle. See [Cloud Compute](docs/cloud-compute.md).
