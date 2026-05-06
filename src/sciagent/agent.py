@@ -204,22 +204,19 @@ class AgentLoop:
         self._consecutive_external_failures = 0
         self._max_consecutive_external_failures = 3
 
-        # User interrupt handling - thread-safe for immediate response
-        self._paused = False
+        # User interrupt handling. Single Ctrl+C cancels the current run
+        # and unwinds back to the REPL `>` prompt; from there `exit` /
+        # Ctrl+D / Ctrl+C quits. No mid-run menu — same model as bash and
+        # the python REPL.
         self._cancelled = False
-        self._user_feedback = None
         self._original_sigint = signal.getsignal(signal.SIGINT)
         self._interrupt_event = threading.Event()  # Signals blocking ops to check
-        self._menu_lock = threading.Lock()  # Prevents multiple menus
-        self._menu_shown = False  # Track if menu is currently displayed
         self._parent_interrupt_event = None  # Set by parent for subagents
 
         # Plumb the agent's interrupt event into all tools (BaseTool
         # contract) so any tool that blocks on a poll loop, subprocess,
         # or RPC can wake on Ctrl+C instead of holding the agent hostage
-        # until the next tick or RPC timeout. Without this, a single
-        # Ctrl+C wouldn't reach the user-facing pause menu until the
-        # blocking tool decided to return on its own.
+        # until the blocking tool decides to return on its own.
         from .tools.registry import BaseTool
         BaseTool.set_shared_interrupt_event(self._interrupt_event)
 
@@ -228,80 +225,18 @@ class AgentLoop:
     # =========================================================================
 
     def _handle_interrupt(self, signum, frame):
-        """Handle Ctrl+C with immediate menu display.
+        """Handle Ctrl+C: cancel the current run and unwind to the REPL.
 
-        One press is enough now. The interrupt event is plumbed into all
-        blocking tools (bg_wait, task_wait, SkyPilot fail-fast budget),
-        so a Ctrl+C wakes them within milliseconds and the menu appears
-        right away. Pressing 's' (or Ctrl+C again inside the menu prompt)
-        stops cleanly. The previous 3x-Ctrl+C escape hatch was a
-        workaround for unresponsive blocking tools — no longer needed.
+        Sets _cancelled and the shared interrupt event so any blocking
+        tool (bg_wait, task_wait, SkyPilot budget poll, the interruptible
+        LLM wrapper) wakes within milliseconds. The agent loop sees
+        _is_cancelled() at its next check point and returns
+        "(Stopped by user)". Control then returns to run_interactive's
+        `>` prompt, where `exit` / Ctrl+D / Ctrl+C quits the program.
         """
-        self._paused = True
-        self._interrupt_event.set()  # Signal any blocking waits
-
-        # Show menu immediately in a thread (non-blocking)
-        if not self._menu_shown:
-            print("\n\n⏸ Paused.")
-            menu_thread = threading.Thread(target=self._show_menu_thread, daemon=True)
-            menu_thread.start()
-
-    def _show_menu_thread(self):
-        """Show pause menu in a separate thread for immediate response."""
-        with self._menu_lock:
-            if self._menu_shown:  # Another thread already showing
-                return
-            self._menu_shown = True
-
-        try:
-            self._handle_pause_menu()
-        finally:
-            with self._menu_lock:
-                self._menu_shown = False
-
-    def _handle_pause_menu(self):
-        """Display pause menu and get user choice."""
-        # Small delay to let any pending output settle
-        import time
-        time.sleep(0.1)
-
-        print("What would you like to do?")
-        print("  [c] Continue")
-        print("  [s] Stop")
-        print("  [f] Give feedback/redirect")
-
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                choice = pt_prompt("\nChoice [c/s/f]: ").strip().lower()
-
-                if choice == 's' or choice == 'stop':
-                    self._cancelled = True
-                    print("Stopping...")
-                    break
-                elif choice == 'f' or choice == 'feedback':
-                    feedback = pt_prompt("Your feedback: ").strip()
-                    if feedback:
-                        self._user_feedback = feedback
-                        print(f"Got it. Will incorporate: {feedback[:50]}...")
-                    break
-                elif choice == 'c' or choice == 'continue' or choice == '':
-                    print("Continuing...")
-                    break
-                else:
-                    # Unrecognized input - prompt again
-                    if attempt < max_attempts - 1:
-                        print(f"  Please enter 'c' to continue, 's' to stop, or 'f' for feedback.")
-                    else:
-                        print("  Defaulting to continue...")
-
-            except (EOFError, OSError, KeyboardInterrupt):
-                # EOFError: stdin closed, OSError: terminal issues
-                self._cancelled = True
-                break
-
-        self._paused = False
-        self._interrupt_event.clear()  # Reset for next interrupt
+        self._cancelled = True
+        self._interrupt_event.set()
+        print("\n⏹  Interrupted. Stopping current run…")
 
     def _prompt_user_for_input(self, request: Dict[str, Any]) -> str:
         """
@@ -432,7 +367,6 @@ class AgentLoop:
         signal handler - let parent handle signals and propagate via event.
         """
         self._interrupt_event.clear()
-        self._menu_shown = False
         # Only install signal handler if we're the top-level agent
         if self._parent_interrupt_event is None:
             signal.signal(signal.SIGINT, self._handle_interrupt)
@@ -443,7 +377,6 @@ class AgentLoop:
         if self._parent_interrupt_event is None:
             signal.signal(signal.SIGINT, self._original_sigint)
         self._interrupt_event.clear()
-        self._menu_shown = False
 
     def _is_cancelled(self) -> bool:
         """Check if this agent or parent was cancelled."""
@@ -453,27 +386,6 @@ class AgentLoop:
             self._cancelled = True  # Propagate to local state
             return True
         return False
-
-    def _wait_for_menu_if_paused(self) -> bool:
-        """Wait for any active menu interaction to complete.
-
-        Returns True if cancelled, False otherwise.
-        """
-        if not self._paused:
-            return self._is_cancelled()
-
-        # Wait for menu thread to finish (with timeout to avoid deadlock)
-        for _ in range(100):  # 10 second max wait
-            if not self._menu_shown:
-                break
-            import time
-            time.sleep(0.1)
-
-        # If menu wasn't shown in thread, show it now
-        if self._paused and not self._menu_shown:
-            self._handle_pause_menu()
-
-        return self._cancelled
 
     # =========================================================================
     # Interruptible LLM Calls
@@ -520,18 +432,12 @@ class AgentLoop:
 
             # Poll for completion while checking interrupt flag
             while not future.done():
-                # Check if user requested stop
-                if self._cancelled:
-                    # Can't actually cancel the HTTP request, but we can return early
-                    # The background thread will complete eventually but we ignore it
+                # Check if user requested stop (Ctrl+C). Can't actually
+                # cancel the in-flight HTTP request — the background
+                # thread will complete eventually, but we return early
+                # and let it be ignored.
+                if self._is_cancelled() or self._interrupt_event.is_set():
                     raise InterruptedError("LLM call cancelled by user")
-
-                # Check if user paused (Ctrl+C pressed)
-                if self._interrupt_event.is_set():
-                    # Wait for menu interaction to complete
-                    if self._wait_for_menu_if_paused():
-                        raise InterruptedError("LLM call cancelled by user")
-                    # User chose to continue - keep polling
 
                 # Wait briefly before next check
                 try:
@@ -1630,7 +1536,6 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         # Setup interrupt handling
         self._setup_interrupt_handler()
         self._cancelled = False
-        self._user_feedback = None
 
         max_iter = max_iterations or self.config.max_iterations
         self._iteration_limit_checked = False  # Track if we've already asked user
@@ -1652,11 +1557,6 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
             while self.iteration_count < max_iter:
                 # Check for user cancellation (including parent cancellation for subagents)
                 if self._is_cancelled():
-                    final_response = "(Stopped by user)"
-                    break
-
-                # Handle pause menu (user pressed Ctrl+C)
-                if self._wait_for_menu_if_paused():
                     final_response = "(Stopped by user)"
                     break
 
@@ -1692,11 +1592,6 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                             self.config.max_session_tokens = int(action)
                             self._token_limit_checked = False
                             print(f"   Raised token budget to {self.config.max_session_tokens:,}")
-
-                # Inject user feedback if provided
-                if self._user_feedback:
-                    self.state.context.add_user_message(f"[User feedback]: {self._user_feedback}")
-                    self._user_feedback = None
 
                 # Drain background monitor events (push-style notifications
                 # from the `monitor` tool). Each pending stdout line lands
@@ -1741,30 +1636,21 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
 
                 try:
                     response = self._single_step()
-                except InterruptedError:
-                    # LLM call was interrupted by user (via our interruptible wrapper)
-                    # Check if they want to stop or continue
-                    if self._cancelled:
-                        final_response = "(Stopped by user)"
-                        break
-                    # User chose to continue after pause - retry the LLM call
-                    continue
-                except KeyboardInterrupt:
-                    # Handle Ctrl+C that escaped signal handler
-                    self._paused = True
-                    self._interrupt_event.set()
-                    if self._wait_for_menu_if_paused():
-                        final_response = "(Stopped by user)"
-                        break
-                    continue  # Retry the LLM call
+                except (InterruptedError, KeyboardInterrupt):
+                    # Ctrl+C — either via the interruptible LLM wrapper
+                    # raising InterruptedError, or a raw KeyboardInterrupt
+                    # that escaped the signal handler. Either way: stop
+                    # this run and unwind to the REPL.
+                    self._cancelled = True
+                    final_response = "(Stopped by user)"
+                    break
                 except Exception as e:
                     error_msg = f"LLM Error: {str(e)}"
                     self.display.error(error_msg)
                     final_response = f"(Error: {str(e)})"
                     break
 
-                # Handle pause after LLM call
-                if self._wait_for_menu_if_paused():
+                if self._is_cancelled():
                     final_response = "(Stopped by user)"
                     break
 
@@ -1797,8 +1683,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                     # Execute tools
                     self._execute_tool_calls(response.tool_calls)
 
-                    # Handle pause after tool execution
-                    if self._wait_for_menu_if_paused():
+                    if self._is_cancelled():
                         final_response = "(Stopped by user)"
                         break
 
@@ -1832,7 +1717,8 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
     
     def run_interactive(self):
         """Run in interactive mode (REPL)"""
-        print("🤖 Ready! Enter your task or question.\n")
+        print("🤖 Ready! Enter your task or question.")
+        print("   Controls: Ctrl+C interrupts a running task · 'exit' or Ctrl+D quits\n")
         
         while True:
             try:

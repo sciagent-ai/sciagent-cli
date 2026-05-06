@@ -170,9 +170,10 @@ def show_startup_banner(
     # Tips section for interactive mode
     if interactive:
         print("Interactive Commands:")
-        print("  • exit     - Quit the session")
+        print("  • exit     - Quit the session (or press Ctrl+D)")
         print("  • status   - Show session stats")
         print("  • clear    - Clear conversation context")
+        print("  • Ctrl+C   - Interrupt the running task and return to prompt")
         print()
 
     # Tools info
