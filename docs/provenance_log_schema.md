@@ -80,7 +80,7 @@ Emitted right before an atomic tool dispatches. One per tool call.
   "tool_call_id": "call_018xY",
   "tool_name": "compute_run",
   "arguments": {
-    "service": "openfoam-swak4foam-2012",
+    "service": "openfoam-swak4foam",
     "command": "bash Allrun",
     "workspace_source": "s3://sciagent-b8-typical-c"
   },
@@ -160,8 +160,8 @@ SkyPilot backend; local-backend symmetry is deferred.
   "job_id": "sciagent-fe0e4e60",
   "managed_job_id": 4231,
   "backend": "skypilot",
-  "service": "openfoam-swak4foam-2012",
-  "image": "ghcr.io/sciagent-ai/openfoam-swak4foam-2012:latest",
+  "service": "openfoam-swak4foam",
+  "image": "ghcr.io/sciagent-ai/openfoam-swak4foam:latest",
   "command_original": "bash Allrun",
   "command_resolved": "timeout 3600 bash -c 'cd /workspace && bash Allrun'",
   "mount_path": "/workspace",

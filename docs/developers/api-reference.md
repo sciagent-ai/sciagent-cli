@@ -219,7 +219,7 @@ from sciagent.tools.atomic.materialize_workspace import MaterializeWorkspaceTool
 
 run = ComputeTool(working_dir=".")
 result = run.execute(
-    service="openfoam-swak4foam-2012",
+    service="openfoam-swak4foam",
     command="bash Allrun",
     mode="cluster",
     backend="skypilot",
@@ -236,7 +236,7 @@ from sciagent.compute.router import ComputeRouter
 from sciagent.compute.job import Job, JobResult, JobStatus, ComputeRequirements
 
 requirements = ComputeRequirements(cpus=4, memory_gb=32, gpus=0, gpu_type=None)
-job = Job(image="ghcr.io/sciagent-ai/openfoam-swak4foam-2012", command="bash Allrun",
+job = Job(image="ghcr.io/sciagent-ai/openfoam-swak4foam", command="bash Allrun",
           requirements=requirements)
 
 router = ComputeRouter()

@@ -149,7 +149,7 @@ See [Cloud Compute](cloud-compute.md) for the full guide.
 SciAgent can analyze images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.
 
 ```bash
-# Analyse a scientific plot
+# Analyze a scientific plot
 sciagent "Interpret the results in ./output/graph.png"
 
 # Review simulation output

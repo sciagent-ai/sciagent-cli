@@ -14,7 +14,7 @@ SciAgent is a modular agent framework for software engineering and scientific co
 
 - **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like service building and code review. Skills auto-trigger based on user input patterns.
 
-- **Image & multimodal analysis** – Analyse scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
+- **Image & multimodal analysis** – Analyze scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
 
 - **Service isolation** – Run all scientific computations inside isolated Docker containers for reproducibility, security, and portability.
 
@@ -37,8 +37,12 @@ SciAgent requires Python 3.9 or newer. We recommend installing it inside a virtu
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -e .  # install from source; alternatively use pip install sciagent when available
+pip install -e .                # base install (local Docker compute)
+pip install -e '.[cloud]'       # optional: SkyPilot + AWS extras
+pip install -e '.[cloud-all]'   # optional: SkyPilot + AWS, GCP, Azure
 ```
+
+PyPI package coming soon — for now, install from source.
 
 ### Set API keys
 
@@ -68,7 +72,7 @@ sciagent --interactive
 Select a different model or enable sub-agents when needed:
 
 ```bash
-sciagent -m openai/gpt-4.1 "Analyse this codebase"
+sciagent -m openai/gpt-4.1 "Analyze this codebase"
 sciagent -m gemini/gemini-3-pro-preview "Explain this diagram"
 sciagent --subagents "Research and refactor this module"
 ```
@@ -80,11 +84,11 @@ For more details on CLI flags see the [Configuration](docs/configuration.md) gui
 SciAgent can analyze images including scientific plots, microscopy, diagrams, and data visualisations:
 
 ```bash
-# Analyse a scientific plot
+# Analyze a scientific plot
 sciagent "Read and interpret the graph at ./results/figure1.png"
 
 # Examine microscopy images
-sciagent "Analyse the cell structure in ./data/microscopy.jpg"
+sciagent "Analyze the cell structure in ./data/microscopy.jpg"
 
 # Interpret simulation output
 sciagent "What does the CFD velocity field in ./output/velocity.png show?"
@@ -111,7 +115,12 @@ sciagent "Solve a portfolio optimisation problem using cvxpy"
 
 # Symbolic math (SymPy)
 sciagent "Derive equations of motion for a double pendulum using sympy"
+
+# Cloud-scale CFD (SkyPilot + OpenFOAM)
+sciagent "Reproduce Fig 3 of the datacenter CFD paper on a SkyPilot cluster"
 ```
+
+For an end-to-end cloud example, see the [Datacenter CFD case study](docs/case-studies/datacenter-cfd.md).
 
 See [Available Services](#available-services) below for the full list of containerised environments.
 
@@ -119,11 +128,12 @@ See [Available Services](#available-services) below for the full list of contain
 
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
-| **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
-| **Chemistry & Materials** | `rdkit`, `ase`, `lammps`, `dwsim` | Molecular analysis, atomistic simulations, MD, chemical process simulation |
-| **Molecular Dynamics** | `gromacs`, `lammps` | Biomolecular simulations, soft matter, solid-state materials |
+| **Math & Optimisation** | `scipy-base`, `sci-core`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
+| **Chemistry & Materials** | `rdkit`, `ase`, `dwsim` | Molecular analysis, atomistic simulations, chemical process simulation |
+| **Molecular Dynamics** | `gromacs` | Biomolecular simulations, soft matter |
 | **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
-| **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
+| **CFD & FEM** | `openfoam`, `openfoam-swak4foam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM; SWAK4Foam variant adds field-processing language on top of OpenFOAM |
+| **Post-processing & Visualisation** | `paraview` | Multi-arch (with EGL) — pairs with the OpenFOAM services |
 | **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
 | **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
 | **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |
@@ -160,16 +170,19 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 | `general` | Coding | Complex multi-step implementation tasks |
 | `verifier` | Verification | Independent validation against the provenance log |
 
-Model tiers are defined in `src/sciagent/defaults.py`:
-- **Scientific**: Main agent, planning 
-- **Vision**: Image and multimodal analysis 
-- **Coding**: Implementation, debugging, research 
-- **Verification**: Independent verifier subagent
-- **Fast**: Quick/cheap for exploration and extraction 
+Model tiers are defined in `src/sciagent/defaults.py`. Current Anthropic defaults:
+
+- **Scientific** — `claude-sonnet-4-6` (main agent, planning)
+- **Coding** — `claude-sonnet-4-6` (debug, research, compute, analyze, verifier, general subagents)
+- **Vision** — `claude-opus-4-7` (image and multimodal analysis)
+- **Verification** — `claude-sonnet-4-6` (independent verifier subagent, fresh context)
+- **Fast** — `claude-haiku-4-5-20251001` (explore subagent, web extraction, summarisation)
+
+All tiers are provider-agnostic via [LiteLLM](https://github.com/BerriAI/litellm) — substitute any tier with `openai/...`, `gemini/...`, `xai/...`, `deepseek/...`, etc. See [Configuration](docs/configuration.md#alternative-models-by-provider) for tested vs. untested options.
 
 ## Architecture
 
-SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call tools such as `bash`, `file_ops`, `search`, `web`, `todo`, `skill` and `ask_user` to interact with the file system, shell, web, containerised simulations and request user input when needed.
+SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call core tools (`bash`, `file_ops`, `search`, `web`, `todo`, `skill`, `ask_user`), compute tools (`compute_run`, `compute_exec`, `compute_cluster`, `materialize`, `materialize_workspace`), task-orchestration tools (`task_list`, `task_get`, `task_wait`, `bg_*`), and verification tools (`verify_session`) to interact with the file system, shell, web, containerised simulations, cloud clusters, and the durable provenance log.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -248,7 +261,9 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 ## Requirements
 
 - Python 3.9+
-- Docker (for containerised services)
+- Docker (for containerised services running locally)
+- SkyPilot extras (`pip install '.[cloud]'`) — only required for cloud compute
+- Cloud credentials (`aws configure` / `gcloud auth application-default login` / `az login`) — only required for cloud compute
 - API key for your chosen LLM provider (e.g. Anthropic, OpenAI, Google) and `BRAVE_SEARCH_API_KEY` for web search
 
 ## License

@@ -91,7 +91,7 @@ Launch a containerized compute job. Background by default; the agent picks SkyPi
 
 ```
 compute_run(
-    service="openfoam-swak4foam-2012",
+    service="openfoam-swak4foam",
     command="bash Allrun",
     mode="cluster",
     backend="skypilot",
@@ -217,7 +217,7 @@ service_search(keyword="bioinformatics")
 Full details for a service — Dockerfile path, example, extends-chain.
 
 ```
-service_detail(service="openfoam-swak4foam-2012")
+service_detail(service="openfoam-swak4foam")
 ```
 
 ---

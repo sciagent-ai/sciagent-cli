@@ -63,7 +63,7 @@ Launch a containerized compute job.
 
 ```
 compute_run(
-    service="openfoam-swak4foam-2012",
+    service="openfoam-swak4foam",
     command="bash Allrun",
     mode="cluster",
     backend="skypilot",

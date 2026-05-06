@@ -229,7 +229,7 @@ If, while auditing, you noticed something non-obvious about how claims of this s
   "scope": ["service:<name>"],      // service:<name> | backend:<name> | workflow:<shape>
   "trigger": "<command or situation that surfaced it>",
   "symptom": "<what went wrong, or what was non-obvious>",
-  "fix_shape": {"destination": "smoke_test",  // dockerfile_env | dockerfile_run | registry_quirks | registry_parallel | prompt_compute | prompt_analyse | smoke_test | none
+  "fix_shape": {"destination": "smoke_test",  // dockerfile_env | dockerfile_run | registry_quirks | registry_parallel | prompt_compute | prompt_analyze | smoke_test | none
                 "patch": "<one-line patch sketch>"},
   "confidence": "high"              // high | medium | low
 }]
