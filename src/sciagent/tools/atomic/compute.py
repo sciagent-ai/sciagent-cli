@@ -34,16 +34,23 @@ _logger = logging.getLogger(__name__)
 _DEFAULT_COMMIT_THRESHOLD_USD: float = 5.0
 
 
-def _load_commit_threshold_usd() -> float:
-    """Resolve the ask_user commit threshold ($). Env wins, then config file,
-    else the $5 default. Any parse failure falls back silently — the gate is
-    a safety rail, not a structural dependency.
+def _load_commit_threshold_usd(cloud_config=None) -> float:
+    """Resolve the ask_user commit threshold ($).
+
+    Precedence: env > CloudConfig.commit_threshold_usd > yaml > $5 default.
+    Any parse failure falls back silently — the gate is a safety rail, not
+    a structural dependency.
     """
     env_val = os.environ.get("SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD")
     if env_val is not None and env_val != "":
         try:
             return float(env_val)
         except ValueError:
+            pass
+    if cloud_config is not None and getattr(cloud_config, "commit_threshold_usd", None) is not None:
+        try:
+            return float(cloud_config.commit_threshold_usd)
+        except (TypeError, ValueError):
             pass
     cfg_path = Path.home() / ".sciagent" / "config.yaml"
     if cfg_path.exists():
@@ -519,10 +526,14 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
     # Class-level session ID for workspace sharing across jobs
     _shared_session_id: str = None
 
-    def __init__(self, working_dir: str = ".", session_id: str = None):
+    def __init__(self, working_dir: str = ".", session_id: str = None, cloud_config=None):
         self._working_dir = working_dir
         self._router = None  # Lazy init
         self._session_id = session_id
+        # Optional CloudConfig (sciagent.compute.CloudConfig). Used by the
+        # cost-gate resolver to honor a Python-API-set commit threshold
+        # when env / yaml don't override.
+        self._cloud_config = cloud_config
 
     def _get_router(self):
         """Lazy init router to avoid import at module load."""
@@ -792,9 +803,10 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         if gpus > 0 and gpu_type is None:
             gpu_type = "T4"
 
-        # Build compute requirements. timeout_sec keeps its existing default
-        # (3600s) when caller doesn't override; passing 0 disables the on-VM
-        # timeout wrapper (B6 / v4.2 §C2).
+        # Build compute requirements. timeout_sec resolution:
+        #   per-call timeout_sec → CloudConfig.default_timeout_sec →
+        #   ComputeRequirements default (3600s).
+        # Passing 0 disables the on-VM timeout wrapper (B6 / v4.2 §C2).
         requirements_kwargs: Dict[str, Any] = {
             "cpus": cpus,
             "memory_gb": memory_gb,
@@ -805,6 +817,11 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         }
         if timeout_sec is not None:
             requirements_kwargs["timeout_sec"] = int(timeout_sec)
+        elif (
+            self._cloud_config is not None
+            and getattr(self._cloud_config, "default_timeout_sec", None) is not None
+        ):
+            requirements_kwargs["timeout_sec"] = int(self._cloud_config.default_timeout_sec)
         requirements = ComputeRequirements(**requirements_kwargs)
 
         # New mount layout (cloud-agnostic):
@@ -1038,7 +1055,7 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
                     or (cost_estimate.get("estimated_hourly", 0.0) or 0.0)
                     * estimate_duration
                 )
-            threshold_usd = _load_commit_threshold_usd()
+            threshold_usd = _load_commit_threshold_usd(self._cloud_config)
             if (
                 selected_backend.name == "skypilot"
                 and estimated_total_usd > threshold_usd

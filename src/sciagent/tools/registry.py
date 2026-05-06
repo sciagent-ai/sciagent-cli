@@ -320,7 +320,7 @@ class ToolRegistry:
             return ToolResult(success=True, output=result)
 
 
-def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegistry:
+def create_atomic_registry(working_dir: str = ".", skills_dir=None, cloud_config=None) -> ToolRegistry:
     """
     Create registry with the atomic tools.
 
@@ -389,7 +389,7 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     registry.register(TaskWaitTool())
 
     # Compute tool
-    registry.register(ComputeTool(working_dir))
+    registry.register(ComputeTool(working_dir, cloud_config=cloud_config))
 
     # Cluster-mode follow-ups (sky.exec on a warm cluster) and lifecycle
     # surface (status / down / autostop / refresh_mounts). compute_run
@@ -434,9 +434,9 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None) -> ToolRegis
     return registry
 
 
-def create_default_registry(working_dir: str = ".", skills_dir=None) -> ToolRegistry:
+def create_default_registry(working_dir: str = ".", skills_dir=None, cloud_config=None) -> ToolRegistry:
     """Alias for create_atomic_registry - backward compatibility."""
-    return create_atomic_registry(working_dir, skills_dir)
+    return create_atomic_registry(working_dir, skills_dir, cloud_config=cloud_config)
 
 
 # For testing

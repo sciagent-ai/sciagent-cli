@@ -103,7 +103,7 @@ compute_run(
 
 Modes: `mode="job"` (managed job — Sky tears the cluster down) or `mode="cluster"` (persistent cluster you can iterate against).
 
-Cost gate: when the optimizer's estimated total exceeds `$5.00`, the tool prompts the user before launching. Override via `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`.
+Cost gate: when the optimizer's estimated total exceeds `$5.00`, the tool prompts the user before launching. Override via `CloudConfig(commit_threshold_usd=...)`, env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`, or `~/.sciagent/config.yaml`. See [Configuration → CloudConfig](configuration.md#cloudconfig-fields).
 
 ### compute_exec
 Run a follow-up command on a warm cluster.

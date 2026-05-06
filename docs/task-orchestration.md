@@ -151,7 +151,7 @@ Schema version: `1`. Every iteration appends a checkpoint event (tool calls, has
 
 ### Resume flow
 
-A fresh `spawn(...)` for a subagent-kind task hashes the task description and looks for a prior `crashed` or `blocked_resume` entry with the same hash. On match, the orchestrator prompts the parent for a 3-way choice:
+A fresh `spawn(...)` for a subagent-kind task hashes the task description and looks for a prior `crashed` or `blocked_resume` entry with the same hash. Within the warm-resume window (configurable via `CloudConfig.subagent_warm_resume_seconds`, env `SCIAGENT_SUBAGENT_WARM_RESUME_SECONDS`, or `~/.sciagent/config.yaml` `subagent.warm_resume_seconds`) the orchestrator prompts the parent for a 3-way choice:
 
 | Choice | Effect |
 |--------|--------|

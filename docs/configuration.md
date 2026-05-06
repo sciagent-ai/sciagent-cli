@@ -123,9 +123,41 @@ Built-in sub-agents (each uses a cost-optimised model tier):
 
 Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
 
-## Cloud Compute
+## Configuration layers
 
-For cloud-scale simulations, install with the `cloud*` extras and configure SkyPilot:
+SciAgent has two configuration surfaces, deliberately kept separate:
+
+- **`AgentConfig`** — agent-loop concerns: model, tokens, iterations, compaction. Lives in `sciagent.AgentConfig`.
+- **`CloudConfig`** — cloud / compute concerns: cost gate, workspace storage backend, cluster lifecycle defaults. Lives in `sciagent.compute.CloudConfig`.
+
+Both are passed independently to `AgentLoop`:
+
+```python
+from sciagent import AgentConfig, AgentLoop
+from sciagent.compute import CloudConfig
+
+agent = AgentLoop(
+    config=AgentConfig(model="anthropic/claude-sonnet-4-6", max_session_tokens=2_000_000),
+    cloud_config=CloudConfig(commit_threshold_usd=10.0),
+)
+```
+
+### AgentConfig fields
+
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `model` | from `defaults.py` | LLM identifier (LiteLLM format) |
+| `temperature` | `0.0` | Sampling temperature |
+| `max_tokens` | `16384` | Per-call output token cap |
+| `max_iterations` | `120` | Agent-loop iteration cap |
+| `max_session_tokens` | `4_000_000` | Cumulative soft budget; profile / `SCIAGENT_SESSION_SOFT_BUDGET` env override |
+| `compact_at_fraction` | `None` | Fraction of context window above which compaction triggers; `None` defers to profile (typically `0.6`); `SCIAGENT_COMPACT_AT_PCT` env wins |
+| `working_dir` | `"."` | Project directory |
+| `verbose`, `auto_save`, `state_dir`, `reasoning_effort` | various | See `AgentConfig` source |
+
+### CloudConfig fields
+
+For cloud-scale simulations, install with the `cloud*` extras:
 
 ```bash
 pip install '.[cloud]'        # AWS
@@ -136,15 +168,23 @@ pip install '.[cloud-all]'    # All three
 
 SciAgent inherits whatever credentials SkyPilot can find. Set up your provider once with the SkyPilot-supported flow (`aws configure`, `gcloud auth application-default login`, `az login`) and `sky check` will confirm.
 
-Tunables:
+| Field | Default | Purpose |
+|-------|---------|---------|
+| `commit_threshold_usd` | `None` (→ $5) | Estimated total ($) above which `compute_run` prompts before launching |
+| `workspace_store` | `None` (→ auto-detect) | Cloud provider for the per-session workspace bucket: `s3` / `gcs` / `az` / `r2` / `oci` |
+| `default_autostop_minutes` | `None` (→ provider default) | Default `idle_minutes` for cluster autostop |
+| `default_timeout_sec` | `None` (→ 3600) | Per-job wall-clock budget. The reaper terminates clusters whose runtime exceeds this. Per-call `compute_run(timeout_sec=...)` wins. Pass 0 to disable. |
+| `subagent_warm_resume_seconds` | `None` | Window during which a crashed subagent can be warm-resumed without prompting the parent |
 
-| Knob | Default | Purpose |
-|------|---------|---------|
-| `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `5.0` | Estimated total ($) above which `compute_run` prompts before launching |
-| `~/.sciagent/config.yaml` `compute.commit_threshold_usd` | — | Same gate, persisted in config |
-| `compute_cluster(action="autostop", idle_minutes=N)` | provider default | How long a cluster sits idle before auto-stopping |
+Each field also has an env var and (for some) a `~/.sciagent/config.yaml` key. Precedence per knob: **env > CloudConfig field > yaml > built-in default**.
 
-See [Cloud Compute](cloud-compute.md) for the full guide.
+| Field | Env var | YAML key |
+|-------|---------|----------|
+| `commit_threshold_usd` | `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `compute.commit_threshold_usd` |
+| `workspace_store` | `SCIAGENT_WORKSPACE_STORE` | — |
+| `subagent_warm_resume_seconds` | `SCIAGENT_SUBAGENT_WARM_RESUME_SECONDS` | `subagent.warm_resume_seconds` |
+
+See [Cloud Compute](cloud-compute.md) for the full cloud-compute guide.
 
 ## Image Analysis
 

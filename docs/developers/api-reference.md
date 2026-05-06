@@ -64,13 +64,20 @@ from sciagent import AgentConfig, DEFAULT_MODEL
 config = AgentConfig(
     model=DEFAULT_MODEL,
     temperature=0.0,
-    max_tokens=16384,
-    max_iterations=120,
+    max_tokens=16384,                # per-call output cap
+    max_iterations=120,              # agent-loop iteration cap
+    max_session_tokens=4_000_000,    # cumulative soft budget
+    compact_at_fraction=None,        # None = use profile default (0.6)
     working_dir=".",
     verbose=True,
-    auto_save=True
+    auto_save=True,
+    reasoning_effort="medium",
 )
 ```
+
+`max_session_tokens` is overridden by the active model's profile when `SCIAGENT_SESSION_SOFT_BUDGET` is set.
+
+`compact_at_fraction` overrides the profile's compaction trigger when set. Precedence: env `SCIAGENT_COMPACT_AT_PCT` > AgentConfig > profile default.
 
 ### ToolRegistry
 
@@ -205,6 +212,50 @@ When `produces_uris=` is declared, the orchestrator validates that each pattern 
 ## Compute
 
 Cloud and local container job orchestration. See [Cloud Compute](../cloud-compute.md) for the user-facing guide.
+
+### CloudConfig
+
+Cloud-side runtime configuration, kept separate from `AgentConfig`. Pass to `AgentLoop` alongside `AgentConfig`:
+
+```python
+from sciagent import AgentConfig, AgentLoop
+from sciagent.compute import CloudConfig
+
+agent = AgentLoop(
+    config=AgentConfig(),
+    cloud_config=CloudConfig(
+        commit_threshold_usd=10.0,           # cost gate ($)
+        workspace_store="s3",                # s3 / gcs / az / r2 / oci
+        default_autostop_minutes=10,
+        default_timeout_sec=3600,            # per-job wall-clock budget (s)
+        subagent_warm_resume_seconds=900,
+    ),
+)
+```
+
+All fields default to `None`, meaning "fall through to env / yaml / built-in default."
+
+Precedence per field: **env var > CloudConfig field > yaml (`~/.sciagent/config.yaml`) > built-in default.**
+
+| Field | Env var | YAML key | Built-in default |
+|-------|---------|----------|------------------|
+| `commit_threshold_usd` | `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `compute.commit_threshold_usd` | `5.0` |
+| `workspace_store` | `SCIAGENT_WORKSPACE_STORE` | — | auto-detect |
+| `default_autostop_minutes` | — | — | provider default |
+| `default_timeout_sec` | — | — | `3600` (1 hour) |
+| `subagent_warm_resume_seconds` | `SCIAGENT_SUBAGENT_WARM_RESUME_SECONDS` | `subagent.warm_resume_seconds` | — |
+
+Programmatic access via `create_atomic_registry`:
+
+```python
+from sciagent.tools.registry import create_atomic_registry
+from sciagent.compute import CloudConfig
+
+registry = create_atomic_registry(
+    working_dir=".",
+    cloud_config=CloudConfig(commit_threshold_usd=10.0),
+)
+```
 
 ### Tools
 

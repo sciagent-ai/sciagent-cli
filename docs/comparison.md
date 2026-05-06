@@ -179,7 +179,8 @@ See [Provenance Log Schema](provenance_log_schema.md) for the v1 schema; [Cloud 
 Defaults:
 
 - **Stop, not down.** End-of-task action is `stop` (preserves disk for fast restart in seconds), not `down` (destroys cluster). The agent's prompt enforces this.
-- **Cost gate at $5.** When the optimizer's estimated total exceeds $5, the tool prompts the user with the Sky-optimizer menu before launching. Tool-layer gate; the LLM cannot bypass it. Override via `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` or `~/.sciagent/config.yaml`.
+- **Cost gate at $5.** When the optimizer's estimated total exceeds $5, the tool prompts the user with the Sky-optimizer menu before launching. Tool-layer gate; the LLM cannot bypass it. Override via `CloudConfig(commit_threshold_usd=...)`, env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`, or `~/.sciagent/config.yaml` (`compute.commit_threshold_usd`).
+- **1-hour wall-clock cap per job.** Default `timeout_sec=3600`; the reaper kills clusters whose runtime exceeds this. Per-call `compute_run(timeout_sec=...)` overrides; the agent-level default is `CloudConfig.default_timeout_sec`.
 - **Workspace persistence.** The per-session bucket auto-mounts at `/workspace/` on every cluster job; outputs survive cluster teardown.
 
 See [Cloud Compute](cloud-compute.md) for the full guide and the [Datacenter CFD case study](case-studies/datacenter-cfd.md) for an end-to-end example.

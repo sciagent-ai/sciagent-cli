@@ -30,6 +30,19 @@ Both code paths produce the same `JobResult` shape, so downstream agents and ana
 
 For iterative scientific workflows, cluster mode is usually faster end-to-end: a `stopped` cluster restarts in seconds, while a fresh launch takes minutes.
 
+## Per-job wall-clock budget
+
+Every cloud job has a `timeout_sec` budget — defaults to **1 hour (3600 s)**. The reaper kills clusters whose runtime exceeds this so a runaway job doesn't sit billing forever.
+
+Set the budget per call:
+
+```
+compute_run(service="openfoam", command="bash Allrun", timeout_sec=7200)  # 2-hour cap
+compute_run(service="openfoam", command="bash Allrun", timeout_sec=0)     # disable wrapper
+```
+
+Or set the default once via `CloudConfig.default_timeout_sec` (see [Tunables](#tunables)).
+
 ## Cluster lifecycle: stop, not down
 
 Two ways a cluster can leave the active set:
@@ -79,7 +92,7 @@ Returns: `{job_id, cluster_name, cluster_job_id, backend, ...}`. Background by d
 
 **Service registry** — pass `service="<name>"` to use a registered scientific image (see `src/sciagent/services/registry.yaml`). Or pass a raw `image="..."` for an arbitrary container.
 
-**Commit gate** — when the optimizer's estimated total exceeds `$5.00` (override via `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` or `~/.sciagent/config.yaml`), the tool prompts the user with a Sky-optimizer menu before launching. Tool-layer gate; the LLM cannot bypass it.
+**Commit gate** — when the optimizer's estimated total exceeds `$5.00`, the tool prompts the user with a Sky-optimizer menu before launching. Tool-layer gate; the LLM cannot bypass it. Override via `CloudConfig(commit_threshold_usd=...)`, env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`, or `~/.sciagent/config.yaml` (`compute.commit_threshold_usd`).
 
 ### compute_exec
 
@@ -153,11 +166,36 @@ SciAgent inherits whatever credentials SkyPilot can find. Set up your provider o
 
 ### Tunables
 
-| Knob | Default | Purpose |
-|------|---------|---------|
-| `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `5.0` | Estimated total ($) above which `compute_run` prompts before launching |
-| `~/.sciagent/config.yaml` `compute.commit_threshold_usd` | — | Same gate, persisted in config |
-| `compute_cluster(action="autostop", idle_minutes=N)` | provider default | How long a cluster sits idle before auto-stopping |
+Cloud-side knobs are bundled in the `CloudConfig` dataclass (kept separate from `AgentConfig`, which carries agent-loop concerns like model and tokens):
+
+```python
+from sciagent import AgentConfig, AgentLoop
+from sciagent.compute import CloudConfig
+
+agent = AgentLoop(
+    config=AgentConfig(),
+    cloud_config=CloudConfig(
+        commit_threshold_usd=10.0,           # raise the cost gate to $10
+        workspace_store="s3",                # pin workspace bucket to AWS
+        default_autostop_minutes=10,         # cluster autostop after 10 min idle
+        default_timeout_sec=7200,            # raise per-job budget to 2 hours
+    ),
+)
+```
+
+| Knob | Env var | YAML key | Default |
+|------|---------|----------|---------|
+| `commit_threshold_usd` | `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `compute.commit_threshold_usd` | `5.0` |
+| `workspace_store` | `SCIAGENT_WORKSPACE_STORE` | — | auto-detect |
+| `default_autostop_minutes` | — | — | provider default |
+| `default_timeout_sec` | — | — | `3600` (1 hour) |
+| `subagent_warm_resume_seconds` | `SCIAGENT_SUBAGENT_WARM_RESUME_SECONDS` | `subagent.warm_resume_seconds` | — |
+
+Precedence per knob: **env > CloudConfig field > yaml > built-in default.**
+
+Per-cluster overrides via `compute_cluster(action="autostop", idle_minutes=N)` win over `default_autostop_minutes`.
+
+See [API Reference → CloudConfig](developers/api-reference.md#cloudconfig) for the full Python surface.
 
 ## End-to-end example
 

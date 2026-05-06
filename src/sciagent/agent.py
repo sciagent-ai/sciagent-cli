@@ -48,6 +48,11 @@ class AgentConfig:
     # pressure is handled independently by ``state.compress_token_threshold``,
     # which is itself derived from the model's context window.
     max_session_tokens: int = 4_000_000
+    # Fraction of the model's context window above which the agent triggers
+    # compaction. None means "use the profile default" (0.6 today, or whatever
+    # the active model's profile carries). Precedence: env
+    # ``SCIAGENT_COMPACT_AT_PCT`` > AgentConfig > profile default.
+    compact_at_fraction: Optional[float] = None
     working_dir: str = "."
     verbose: bool = True
     auto_save: bool = True
@@ -73,9 +78,18 @@ class AgentLoop:
         llm: Optional[LLMClient] = None,
         system_prompt: Optional[str] = None,
         display: Optional[Display] = None,
+        cloud_config=None,
     ):
         self.config = config or AgentConfig()
-        self.tools = tools or create_default_registry(self.config.working_dir)
+        # CloudConfig is intentionally separate from AgentConfig: agent-loop
+        # concerns (tokens, model, iterations) are distinct from cloud /
+        # compute concerns (cost gate, workspace store, autostop). Type left
+        # untyped here so importing CloudConfig stays optional for callers
+        # that never touch cloud compute.
+        self.cloud_config = cloud_config
+        self.tools = tools or create_default_registry(
+            self.config.working_dir, cloud_config=cloud_config
+        )
         self.llm = llm or LLMClient(
             model=self.config.model,
             temperature=self.config.temperature,
@@ -124,6 +138,17 @@ class AgentLoop:
         # profile carries it and we honor it here.
         if self.profile.session_soft_budget is not None:
             self.config.max_session_tokens = self.profile.session_soft_budget
+
+        # Optional override of the compaction-trigger fraction from
+        # AgentConfig. The profile already carries the env value
+        # (SCIAGENT_COMPACT_AT_PCT) when set, so we only apply the
+        # AgentConfig override when env is unset. Precedence:
+        # env > AgentConfig > profile default.
+        if (
+            self.config.compact_at_fraction is not None
+            and os.environ.get("SCIAGENT_COMPACT_AT_PCT") in (None, "")
+        ):
+            self.profile.compact_at_fraction = self.config.compact_at_fraction
 
         self.state = AgentState(
             session_id=generate_session_id(),
