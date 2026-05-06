@@ -28,7 +28,7 @@ CONFIDENCES = ("high", "medium", "low")
 DESTINATIONS = (
     "dockerfile_env", "dockerfile_run",
     "registry_quirks", "registry_parallel",
-    "prompt_compute", "prompt_analyse",
+    "prompt_compute", "prompt_analyze",
     "smoke_test", "none",
 )
 
@@ -213,7 +213,7 @@ mangles PATH). If anything fits, emit it in your final reply between
   "scope": ["service:<name>"],      // service:<name> | backend:<name> | workflow:<shape>
   "trigger": "<command or situation that surfaced it>",
   "symptom": "<what went wrong, or what was non-obvious>",
-  "fix_shape": {"destination": "dockerfile_env",  // dockerfile_env | dockerfile_run | registry_quirks | registry_parallel | prompt_compute | prompt_analyse | smoke_test | none
+  "fix_shape": {"destination": "dockerfile_env",  // dockerfile_env | dockerfile_run | registry_quirks | registry_parallel | prompt_compute | prompt_analyze | smoke_test | none
                 "patch": "<one-line patch sketch, e.g. 'ENV OMPI_ALLOW_RUN_AS_ROOT=1'>"},
   "confidence": "high"              // high (saw symptom AND saw fix work) | medium (implied, not verified) | low (guess)
 }]
