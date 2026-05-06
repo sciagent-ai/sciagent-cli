@@ -82,8 +82,30 @@ class BaseTool:
 
     @classmethod
     def set_shared_interrupt_event(cls, event):
-        """Wire the AgentLoop's interrupt event into all tools."""
-        cls._shared_interrupt_event = event
+        """Wire the *top-level* AgentLoop's interrupt event into all tools.
+
+        No-op if an event is already registered. This matters when
+        sub-agents are spawned: each AgentLoop calls this from __init__,
+        and without the guard the last sub-agent constructed clobbers the
+        parent's event. Python's SIGINT handler runs in the main thread
+        and sets the *top-level* event, so wait loops in sub-agent worker
+        threads must keep watching that event — not whichever sub-agent
+        was constructed last.
+        """
+        if cls._shared_interrupt_event is None:
+            cls._shared_interrupt_event = event
+
+    @classmethod
+    def clear_shared_interrupt_event(cls, event=None):
+        """Unwire on top-level AgentLoop teardown so a subsequent
+        in-process top-level AgentLoop can register fresh.
+
+        ``event``-keyed clear: only unwires if the currently registered
+        event matches the caller's, so a sub-agent's late teardown can't
+        accidentally unwire the parent's event.
+        """
+        if event is None or cls._shared_interrupt_event is event:
+            cls._shared_interrupt_event = None
 
     @classmethod
     def is_interrupted(cls) -> bool:

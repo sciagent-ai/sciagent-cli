@@ -7,6 +7,7 @@ Cloud credentials must be configured (aws configure, gcloud auth, etc.)
 
 from __future__ import annotations
 
+import sys
 import os
 import shlex
 import subprocess
@@ -1680,6 +1681,19 @@ class SkyPilotBackend:
         deadline = start + timeout
         last_status_name: Optional[str] = None
 
+        # Periodic stderr breadcrumb so a multi-minute wait doesn't look
+        # frozen to the human watching the terminal. Stderr only — does not
+        # enter LLM context. First emission at progress_interval seconds in;
+        # quick jobs stay silent.
+        progress_interval = 60.0
+        last_progress_at = start
+        # De-dup tail line: when the agent redirects solver output to a
+        # file (e.g. `solver | tee log.solve`), stdout's last line is the
+        # echo before the solver started — same line forever. Don't print
+        # it after the first occurrence; emit a "still running" elapsed
+        # marker instead.
+        last_tail_line: Optional[str] = None
+
         terminal_names = {
             "SUCCEEDED", "FAILED", "FAILED_SETUP", "FAILED_PRECHECKS",
             "FAILED_DRIVER", "CANCELLED",
@@ -1747,6 +1761,41 @@ class SkyPilotBackend:
                         "timed_out": False,
                         "summary": summary,
                     }
+
+            now = time.monotonic()
+            if now - last_progress_at >= progress_interval:
+                last_progress_at = now
+                elapsed = now - start
+                mins, secs = divmod(int(elapsed), 60)
+                tail_line = ""
+                try:
+                    log_text = self._fetch_cluster_job_log_text(
+                        cluster_name=cluster_name,
+                        cluster_job_id=int(cluster_job_id),
+                        tail_lines=1,
+                    )
+                    if log_text:
+                        for line in reversed(log_text.splitlines()):
+                            if line.strip():
+                                tail_line = line.strip()[:120]
+                                break
+                except Exception:
+                    pass
+                status_str = last_status_name or "unknown"
+                msg = (
+                    f"[wait_for_job] {cluster_name} job {cluster_job_id}: "
+                    f"{status_str}, elapsed {mins}m{secs:02d}s"
+                )
+                if tail_line and tail_line != last_tail_line:
+                    msg += f" — {tail_line}"
+                    last_tail_line = tail_line
+                elif tail_line:
+                    # Same tail as last emission — solver stdout is silent
+                    # (likely redirected to a log file). Skip the stale
+                    # text but still emit the elapsed marker so the user
+                    # knows the wait is alive.
+                    msg += " (stdout idle)"
+                print(msg, file=sys.stderr, flush=True)
 
             remaining = max(0.0, deadline - time.monotonic())
             interval = min(poll_interval, remaining)

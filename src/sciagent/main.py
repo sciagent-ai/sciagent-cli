@@ -11,6 +11,7 @@ Usage:
 # CRITICAL: Suppress pydantic serialization warnings BEFORE any imports
 # These warnings occur when litellm's pydantic models serialize LLM responses
 # and some fields (like thinking_blocks) don't match expected schema
+import signal
 import warnings
 
 # Filter by message content - catches the actual warning text
@@ -386,6 +387,21 @@ def main():
 
     agent = AgentLoop(config=config, tools=main_tools, system_prompt=final_system_prompt)
 
+    # SIGTERM cleanup. SIGINT is handled inside AgentLoop (interrupts the
+    # current run, drops back to the REPL); SIGTERM means the supervisor /
+    # init / a `kill <pid>` wants this process *gone*, so we down the
+    # session's clusters before exiting. SIGKILL is uncatchable — for that
+    # path the orphan sweep at the next sciagent startup is the safety net.
+    # Installed once, never restored: this is process-lifetime cleanup.
+    def _on_sigterm(signum, frame):
+        try:
+            agent.cleanup_session_clusters()
+        finally:
+            # Signal-style exit code (128 + signum) so a supervisor sees
+            # "killed by SIGTERM" rather than a clean 0.
+            sys.exit(128 + int(signum))
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
     # Connect parent's interrupt event to orchestrator for subagent cancellation
     orchestrator.parent_interrupt_event = agent._interrupt_event
 
@@ -398,13 +414,19 @@ def main():
             print(f"Error: Session not found: {args.resume}")
             sys.exit(1)
     
-    # Run the agent
+    # Run the agent. cleanup_session_clusters() runs on exit so any sky
+    # clusters launched during the session don't sit around billing while
+    # autostop counts down. run_interactive handles its own cleanup in a
+    # finally; for one-shot runs we wrap here.
     if args.interactive:
         agent.run_interactive()
     else:
-        result = agent.run(args.task)
-        print("\nResult:")
-        print(result)
+        try:
+            result = agent.run(args.task)
+            print("\nResult:")
+            print(result)
+        finally:
+            agent.cleanup_session_clusters()
 
 
 if __name__ == "__main__":

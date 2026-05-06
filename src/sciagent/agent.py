@@ -10,6 +10,7 @@ import os
 import json
 import signal
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -376,6 +377,13 @@ class AgentLoop:
         # Only restore if we installed a handler (top-level agent)
         if self._parent_interrupt_event is None:
             signal.signal(signal.SIGINT, self._original_sigint)
+            # Top-level: also unwire the shared interrupt event so a
+            # subsequent in-process top-level AgentLoop can register
+            # fresh. set_shared_interrupt_event is non-clobbering, so
+            # without this clear a re-run would silently bind to the
+            # stale event.
+            from .tools.registry import BaseTool
+            BaseTool.clear_shared_interrupt_event(self._interrupt_event)
         self._interrupt_event.clear()
 
     def _is_cancelled(self) -> bool:
@@ -1715,41 +1723,106 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
 
         return final_response
     
+    def cleanup_session_clusters(self) -> List[str]:
+        """Tear down any sky clusters launched in this session.
+
+        Reads ~/.sciagent/clusters/*.json, filters to records whose
+        session_id matches this agent's, and calls sky.down on each.
+        Best-effort: a failure to down one cluster doesn't abort the
+        rest. Returns the list of cluster names we attempted to down.
+
+        Called from the REPL exit path and from main() after a one-shot
+        run. The motivation is the autostop-orphan failure mode: when
+        sciagent quits without explicitly downing the clusters it
+        launched, the cluster keeps billing until the 60-min autostop
+        timer expires. Closing the loop at exit collapses that window.
+        """
+        try:
+            from .compute.cluster_manifest import list_clusters
+            from .compute.router import ComputeRouter
+        except Exception:
+            return []
+
+        try:
+            session_id = self.state.session_id
+        except Exception:
+            return []
+        if not session_id:
+            return []
+
+        try:
+            records = list_clusters(session_id=session_id)
+        except Exception:
+            return []
+        if not records:
+            return []
+
+        names = [r.get("cluster_name") for r in records if r.get("cluster_name")]
+        if not names:
+            return []
+
+        print(
+            f"\n🧹 Cleaning up {len(names)} session cluster(s): {', '.join(names)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        router = ComputeRouter()
+        downed: List[str] = []
+        for name in names:
+            try:
+                router.cluster_down(name, graceful=True)
+                downed.append(name)
+                print(f"   ✓ down: {name}", file=sys.stderr, flush=True)
+            except Exception as exc:
+                print(
+                    f"   ✗ failed to down {name}: {exc} "
+                    f"(autostop will catch it; run `sky down {name}` to force)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return downed
+
     def run_interactive(self):
         """Run in interactive mode (REPL)"""
         print("🤖 Ready! Enter your task or question.")
         print("   Controls: Ctrl+C interrupts a running task · 'exit' or Ctrl+D quits\n")
-        
-        while True:
-            try:
-                user_input = pt_prompt("\n> ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nGoodbye!")
-                break
-            
-            if not user_input:
-                continue
-            
-            if user_input.lower() == 'exit':
-                break
-            
-            if user_input.lower() == 'status':
-                print(f"\nSession: {self.state.session_id}")
-                print(f"Messages: {len(self.state.context.messages)}")
-                print(f"Iterations: {self.iteration_count}")
-                print(f"Tokens: ~{self.total_tokens}")
-                print(self.state.todos.to_string())
-                continue
-            
-            if user_input.lower() == 'clear':
-                self.state.context.clear()
-                self.iteration_count = 0
-                print("Context cleared.")
-                continue
-            
-            # Run the task
-            response = self.run(user_input)
-            print(f"\n{response}")
+
+        try:
+            while True:
+                try:
+                    user_input = pt_prompt("\n> ").strip()
+                except (EOFError, KeyboardInterrupt):
+                    print("\nGoodbye!")
+                    break
+
+                if not user_input:
+                    continue
+
+                if user_input.lower() == 'exit':
+                    break
+
+                if user_input.lower() == 'status':
+                    print(f"\nSession: {self.state.session_id}")
+                    print(f"Messages: {len(self.state.context.messages)}")
+                    print(f"Iterations: {self.iteration_count}")
+                    print(f"Tokens: ~{self.total_tokens}")
+                    print(self.state.todos.to_string())
+                    continue
+
+                if user_input.lower() == 'clear':
+                    self.state.context.clear()
+                    self.iteration_count = 0
+                    print("Context cleared.")
+                    continue
+
+                # Run the task
+                response = self.run(user_input)
+                print(f"\n{response}")
+        finally:
+            # Down any clusters this session launched. Runs on every exit
+            # path: `exit`, Ctrl+D, Ctrl+C-at-prompt, or an exception
+            # falling out of the loop.
+            self.cleanup_session_clusters()
     
     # =========================================================================
     # Session Management
