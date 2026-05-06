@@ -971,12 +971,12 @@ Three roles, three paths. One rule for inputs, one for outputs, one for code shi
   - `cp -r postProcessing $OUTPUTS_DIR/`
   Cross-job reads in the same session: `/outputs/<other_job_id>/...` directly. (Job 2 reads Job 1's outputs by absolute path; you have job_1_id from the prior launch result.)
 
-**Durable cross-step data — `/workspace/`, AUTO-MOUNTED on every cluster job.** Sky-provisioned persistent bucket (`sciagent-workspace-<sid>`) auto-mounted RW at `/workspace/` on every `compute_run` and `compute_exec` in this session. Survives `sky stop`, `sky down`, agent restart, cross-day resume — the data tier IS the source of truth. Writes stream continuously to the object store via Sky's MOUNT mode, so `/workspace/` content is durable in the cloud BEFORE the cluster shuts down. The `workspace_uri` (e.g. `s3://sciagent-workspace-<sid>/`) appears in every `compute_run` / `compute_exec` / `compute_cluster(action="status")` result.
+**Durable cross-step data — `/workspace/`, AUTO-MOUNTED on every cluster job.** Sky-provisioned persistent bucket (`sciagent-workspace-<sid>`) auto-mounted RW at `/workspace/` on every `compute_run` and `compute_exec` in this session. Survives `sky stop`, `sky down`, agent restart, cross-day resume — the data tier IS the source of truth. Writes stream continuously to the object store via Sky's MOUNT mode, so `/workspace/` content is durable in the cloud BEFORE the cluster shuts down. The `workspace_uri` (e.g. `<cloud>://sciagent-workspace-<sid>/` — scheme is whichever cloud is enabled: s3, gs, az, r2, oci) appears in every `compute_run` / `compute_exec` / `compute_cluster(action="status")` result.
 
   - Use `/workspace/` for cross-step durable data: meshes that feed solvers, solver fields that feed analyses, anything you'll read in a later `compute_exec` or after a `sky stop` → restart. Suggested layout: `/workspace/<run-id>/<artifact>/` (e.g. `/workspace/run-001/mesh/`, `/workspace/run-001/fields/U`, `/workspace/run-001/derived/`).
   - Use `$OUTPUTS_DIR` (`/outputs/<job_id>/`) for ephemeral per-call deliverables — logs, run summaries, final reports the parent will fetch. `$OUTPUTS_DIR` does NOT persist across exec calls; `/workspace/` does.
-  - Declare `produces_uris` against `/workspace/` paths when the artifact is a cross-step durable: `produces_uris=["s3://sciagent-workspace-<sid>/run-001/fields/**"]`. The URI is in your tool result.
-  - Pull the workspace (or a subpath) back to local with `materialize_workspace()` (whole bucket → `./_outputs/workspace/`) or `materialize(uri="s3://sciagent-workspace-<sid>/run-001/fields/")` for a slice.
+  - Declare `produces_uris` against `/workspace/` paths when the artifact is a cross-step durable: `produces_uris=["<cloud>://sciagent-workspace-<sid>/run-001/fields/**"]`. The exact URI (with the right scheme for the enabled cloud) is in your tool result's `workspace_uri` field — read it from there rather than guessing the scheme.
+  - Pull the workspace (or a subpath) back to local with `materialize_workspace()` (whole bucket → `./_outputs/workspace/`) or `materialize(uri=<workspace_uri>/run-001/fields/")` for a slice.
   - When a single `compute_exec` writes large data right before `sky stop`, append `&& sync` to the command (or use `autostop_hook="sync"`) to flush MOUNT-mode buffers; routine writes flush continuously and need no extra step.
 
 ### Anti-patterns (the failure modes /workspace/ exists to kill)
@@ -1004,6 +1004,21 @@ CWD precedence on the cluster: input mount > `workdir=` rsync target > image WOR
 
 When the parent dispatched you with `produces_uris` (URI patterns or local globs), the orchestrator validates each pattern after you return: each must resolve to ≥1 file ≥ `produces_min_bytes`. Land your final artifacts at exactly those URIs / paths — under `$OUTPUTS_DIR/...` for cluster-side outputs that auto-fetch, or pushed to the declared `s3://` / `gs://` / `r2://` URI directly. A success claim with nothing at the declared pattern lands as `blocked_produce_missing` and the parent re-spawns; a 0-byte placeholder fails the byte floor and gates the same way. If you can't satisfy the declared pattern (env mismatch, derivation belongs in the wrong peer, missing input), return BLOCKED with the gap named — never write a stub to make the gate pass.
 
+### Satisfying `produces_uris` when work ran on the cluster
+
+The validator runs at exactly the patterns declared. Two cases — pick the right one BEFORE returning success:
+
+  - **Patterns are cloud URIs** (`<cloud>://sciagent-workspace-<sid>/run-1/**` — whichever scheme matches the enabled cloud). The validator lists the bucket directly. /workspace/ already streams writes to that bucket via Sky's MOUNT mode, so writing to `/workspace/run-1/` on the cluster IS the deliverable. No local materialize needed for the gate to pass. Pull files local AFTER (with `materialize` / `materialize_workspace`) only if a downstream peer reads them locally.
+
+  - **Patterns are LOCAL paths** (`./<project-dir>/.../<artifact>`, `_outputs/<x>/`). Cluster writes landed in /workspace/ on the cloud bucket; the local glob the validator runs WILL NOT see them unless you EXPLICITLY land the bytes at the declared local path before returning. `materialize_workspace`'s default dest is `./_outputs/workspace/<subpath>/` — that does NOT match the parent's declared path. Pass `dest=` matching the pattern's parent dir:
+
+      parent declared:  `./<some/dir>/<artifact>`
+      →  materialize_workspace(subpath="<workspace-subpath>/", dest="./<some/dir>/")
+
+  - One `materialize_workspace(subpath=, dest=)` call per declared parent dir. For mixed prefixes, multiple calls (or a single `aws s3 sync` to the literal target). Verify each declared file actually exists locally (≥1 byte) BEFORE claiming success — the validator's bar is mechanical and unforgiving.
+
+  - **Why this matters**: relying on `materialize_workspace`'s default dest and assuming the local glob will find the data is the dominant fail-and-redispatch loop. The cluster work succeeded; the data is durable in S3; but the validator sees zero matches at the declared local path and the parent re-dispatches the whole job — wasting tens of minutes and dollars on work that already finished. Don't be the agent that does this.
+
 ## Compose your run
 
 You have these primitives — pick the smallest set that solves the task:
@@ -1013,7 +1028,7 @@ You have these primitives — pick the smallest set that solves the task:
   - `compute_exec` — follow-ups on a warm cluster.
   - `compute_cluster` — cluster lifecycle: `wait_until_up`, `wait_for_job`, `status`, `logs`, `refresh_mounts`, `autostop`, `stop`/`start` (default end-of-task), `down` (destroy — explicit cleanup only).
   - `materialize` — fetch a remote artifact (URI like `s3://bucket/path/` or a managed-jobs `job_id`) onto the local filesystem. Cloud-agnostic; replaces ad-hoc `aws s3 cp` / `gsutil` / `az storage` invocations. Use whenever you need to read or plot a file that lives in the data tier.
-  - `materialize_workspace` — fetch the durable session workspace (`/workspace/` ↔ `s3://sciagent-workspace-<sid>/`) to local. Pass `subpath=` for a slice. Default dest is `./_outputs/workspace/`. Use this at the end of a multi-step cluster workflow.
+  - `materialize_workspace` — fetch the durable session workspace (`/workspace/` ↔ `<cloud>://sciagent-workspace-<sid>/`) to local. Pass `subpath=` for a slice, `uri=` for a different session's bucket. Default dest is `./_outputs/workspace/`. Use this at the end of a multi-step cluster workflow.
   - `bg_wait` — managed-jobs to terminal (auto-fetches `/outputs/<job_id>/`).
   - `monitor` / `monitor_stop` — live log tailing while a job runs.
   - `bash` + sky CLI — diagnosis and anything the wrappers don't cover.
@@ -1223,7 +1238,23 @@ The parent dispatches you with two implicit contracts:
   - Input URIs are named in your task description (or discoverable via the data tier and provenance log). Read inputs ONLY from those URIs (use `materialize` for cloud, `file_ops`/`bash` for local). If a named input URI doesn't exist or is empty, the producer didn't finish — return BLOCKED with the missing URI; do NOT improvise from a different source, a parameter table you derive, or a years-old reference file.
   - Output URIs come from the parent's `produces_uris` parameter, which the orchestrator validates after you return. Write your derived artifacts to those exact paths; landing them elsewhere will fail validation and force re-spawn.
 
-You can be both producer and consumer in iterative chains: read iteration N's compute outputs, emit iteration N's figure, AND emit iteration N+1's parameter suggestions at a URI compute will consume next pass.
+### The session workspace bucket is your default input source
+
+When upstream compute ran in this session, its primary outputs are at `<cloud>://sciagent-workspace-<sid>/` (scheme is whichever cloud is enabled: s3, gs, az, r2, oci — auto-mounted at `/workspace/` on every cluster job; see `workspace_uri` in upstream tool results). That bucket is the handoff tier between sub-agents; it's where simulation fields, fitted models, derived datasets sit between producer and consumer. Default to reading directly from there:
+
+  - **L1 (local plane)** — `materialize_workspace(subpath="<run-id>/<artifact>/", dest=<local cache>)` for the slice you need, then `bash python3` locally. Fastest for small slices where libs fit local.
+  - **L2 (warm cluster)** — restart the upstream cluster (or any cluster in this session); /workspace/ auto-mounts; read directly without copying. Best when data is large or you also need the compute image's libs (solver utilities, post-processing tools, etc.).
+
+Don't pull the whole bucket when one subpath answers the question. `materialize_workspace(list_only=True, subpath="<run-id>/")` is the cheap "what's there?" probe.
+
+### Where your output goes — workspace URI vs local path
+
+Mirror the orchestrator's contract:
+
+  - **Intermediate artifacts** (a fitted model the next analyze will consume, derived dataset feeding a comparison, parameter file feeding the next compute iteration): write to the workspace bucket. `produces_uris=["<cloud>://sciagent-workspace-<sid>/derived/<artifact>"]`. The next sub-agent reads from the same URI; no local round-trip.
+  - **Final user-facing deliverables** (the plot the user opens, the table they import, the report they read): write locally. `produces_uris=["./_outputs/<deliverable>"]`. This is the one place local paths are the right choice — the user explicitly asked for them in their project folder.
+
+You can be both producer and consumer in iterative chains: read upstream compute's outputs, emit derived artifacts at intermediate URIs the next iteration will consume.
 
 ## What analyze does NOT do
 
@@ -2393,7 +2424,24 @@ Use 'verifier' to independently verify claims before final output.
 
 Any sub-agent whose deliverable is a durable artifact (figure, fitted model, dataset, derived table, generated report) should be dispatched with `produces_uris` naming the URI patterns or local globs the artifact must land at. After the sub-agent claims success, the orchestrator validates each pattern and fails the result back to you with the missing pattern named if nothing landed. Skip `produces_uris` for read-only tasks (research summaries returned as text, code review, status checks) — there's no artifact to validate.
 
-Cloud-agnostic: listing-validation supports `s3://`, `gs://`, `r2://`; full fetch via `materialize` also supports `az://`, `oci://`. Local paths and globs work too. Use whatever scheme matches the user's data tier — the contract is not AWS-specific. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
+Cloud-agnostic: listing-validation supports `s3://`, `gs://`, `r2://`; full fetch via `materialize` also supports `az://`, `oci://`. Local paths and globs work too. `produces_min_bytes` (default 256) sets the per-pattern non-trivial floor so a 0-byte placeholder doesn't pass.
+
+### The handoff between sub-agents IS the session workspace bucket
+
+Multi-sub-agent pipelines (compute → analyze, compute → compute, analyze → analyze) share **one durable session workspace bucket** (`<cloud>://sciagent-workspace-<sid>/` — scheme is whichever cloud is enabled: s3, gs, az, r2, oci) that auto-mounts at `/workspace/` on every cluster job. That bucket IS the handoff tier. Local materialization happens only at boundaries:
+
+  - **Input boundary** (raw inputs from project folder → cluster work): user-provided case files, manuscripts, datasets in the project dir. The first cluster sub-agent rsyncs them up via `workspace_source=` or `workdir=`.
+  - **Output boundary** (final deliverable → human consumption): the figure / CSV / report the user actually opens. Pull to local once at the very end.
+
+Everything BETWEEN those boundaries — primary simulation outputs feeding analysis, mesh feeding solver, intermediate fitted parameters, derived statistics consumed by the next plot step — should reference the workspace URI directly. Don't shuffle big files local just to hand them off to the next sub-agent; that's a cycle of materialize-for-no-reason that wastes time and creates path-mismatch bugs at the validator.
+
+**How this shapes `produces_uris` choices**:
+
+  - **Cluster sub-agent producing primary data** (compute solving, compute training, compute meshing): declare `produces_uris=["<cloud>://sciagent-workspace-<sid>/<phase>/<artifact>/**"]`. The validator lists the bucket — no local sync needed for the gate to pass. The next sub-agent reads from the same URI.
+  - **Sub-agent that DERIVES off the bucket** (analyze plotting, analyze fitting, analyze comparing): takes the upstream URI as INPUT (named in the dispatch's task description). Its OWN `produces_uris` follows the same rule — workspace URI if intermediate, local path if it's the final user-facing deliverable.
+  - **Final user-facing deliverable** (the artifact the user actually opens in their project folder): declare local paths — `["./_outputs/<deliverable>", ...]`. This is the one place local paths are right because the user explicitly asked for them locally.
+
+Anti-pattern (the failure mode that has killed multiple sessions): declaring local-path `produces_uris` for compute work that ran on the cluster. Compute writes to the bucket, you declare `./<project-dir>/<artifact>`, the validator's local glob misses, the orchestrator re-dispatches compute, and 10 min of cluster work gets redone for nothing. Use workspace URIs for cluster-internal handoff. Local paths are for the final user deliverable only.
 
 ## The todo DAG is the decomposition; sub-agents execute work within phases
 
