@@ -340,6 +340,10 @@ class ComputeClusterTool(BaseTool):
         try:
             ok = router.cluster_stop(cluster_name)
         except RuntimeError as exc:
+            # cluster_stop now raises with the actual sky-side cause
+            # (invalid name, auth, etc.) instead of returning a generic
+            # False. Surface verbatim so the agent doesn't have to fall
+            # back to bash to learn what went wrong.
             return ToolResult(success=False, output=None, error=str(exc))
         return ToolResult(
             success=ok,
@@ -347,11 +351,14 @@ class ComputeClusterTool(BaseTool):
                 "cluster_name": cluster_name,
                 "stopped": ok,
                 "note": (
-                    "Cluster preserved; data tier (S3 mount) intact. Use "
-                    "action='start' to resume."
+                    "Stop request submitted; cluster preserved with disk + "
+                    "data tier (workspace bucket) intact. The UP → STOPPED "
+                    "transition takes 1-5 min on AWS and runs asynchronously; "
+                    "use action='status' to confirm if needed. action='start' "
+                    "to resume."
                 ),
             },
-            error=None if ok else f"sky.stop failed for {cluster_name}",
+            error=None,
         )
 
     def _do_start(self, router, cluster_name: str) -> ToolResult:

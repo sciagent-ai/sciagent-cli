@@ -179,16 +179,26 @@ class SubAgent:
         # correlation uses the parent's session so verify_session(parent_id)
         # sees the full hierarchy. Top-level (non-nested) agents use their
         # own session as before.
-        from .tools.atomic.compute import ComputeTool
+        from .tools.atomic.compute import ComputeTool, session_context_block
         from .provenance_log import set_active_session, _active_session_id
 
         parent_shared_session = ComputeTool._shared_session_id if is_nested else None
         parent_active_session = _active_session_id if is_nested else None
 
+        # Inject the concrete session workspace URI at the top of the
+        # subagent's prompt. Closes the orchestrator-doesn't-know-bucket-
+        # name gap that caused produces_uris validation to fall back to
+        # wildcards (which AWS / GCS reject for bucket-name listing).
+        # Empty when no session is set (standalone callers, tests).
+        ctx = session_context_block()
+        composed_prompt = (
+            (ctx + "\n" + config.system_prompt) if ctx else config.system_prompt
+        )
+
         self.agent = AgentLoop(
             config=agent_config,
             tools=self.tools,
-            system_prompt=config.system_prompt
+            system_prompt=composed_prompt,
         )
 
         if is_nested and parent_shared_session:

@@ -1936,13 +1936,23 @@ class SkyPilotBackend:
         return success
 
     def cluster_stop(self, cluster_name: str) -> bool:
-        """Non-destructive stop: preserves cluster definition + disk so the
-        next ``cluster_start`` is fast and the data tier (mounted storage)
-        survives untouched. Prefer this over ``cluster_down`` as the
-        end-of-task default. ``cluster_down`` actually destroys the
-        cluster and should be reserved for explicit cleanup.
+        """Submit a non-destructive stop request; return True once the
+        controller acknowledges the submission. Don't block on the full
+        UP -> STOPPING -> STOPPED transition (which can take 1–5 min on
+        AWS); the cluster transitions asynchronously. Callers needing
+        confirmation: ``compute_cluster(action="status", cluster_name=...)``.
 
-        Best-effort. Returns True on success, False on error.
+        Returns True on submission success.
+        Raises RuntimeError when sky rejects the request inside the
+        fail-fast budget (invalid cluster name, auth, etc.) so the tool
+        wrapper surfaces the actual cause to the agent instead of a
+        generic "sky.stop failed".
+
+        ``stop`` preserves cluster definition + disk; the next
+        ``cluster_start`` is fast and the data tier survives untouched.
+        Prefer this over ``cluster_down`` as the end-of-task default.
+        ``cluster_down`` destroys the cluster and is reserved for
+        explicit cleanup.
         """
         from ..cluster_manifest import read_cluster
 
@@ -1954,7 +1964,25 @@ class SkyPilotBackend:
         reason: Optional[str] = None
         try:
             request_id = sky.stop(cluster_name)
-            sky.stream_and_get(request_id)
+            # Brief poll to surface fast rejections (auth errors, missing
+            # cluster, etc.) without blocking on the full stop transition.
+            # Reuses the launch-path's fail-fast contract: same ~15s
+            # budget the agent already tolerates for cluster ops. If the
+            # request reaches FAILED/CANCELLED inside the budget, raise.
+            # If it reaches SUCCEEDED, great. If it's still in flight
+            # after the budget, return — the cluster IS transitioning,
+            # we just don't wait for it to finish.
+            try:
+                self._await_launch_or_fail(
+                    request_id=request_id,
+                    cluster_name=cluster_name,
+                    budget_sec=15.0,
+                )
+            except LaunchError as exc:
+                # Reuse the launch-error machinery; rebrand for stop.
+                raise RuntimeError(
+                    f"sky.stop rejected for {cluster_name}: {exc}"
+                ) from exc
         except Exception as exc:
             success = False
             reason = f"{type(exc).__name__}: {exc}"
@@ -1971,14 +1999,23 @@ class SkyPilotBackend:
                     cluster_name=cluster_name,
                     graceful=True,
                     success=success,
-                    reason=reason or ("stopped (non-destructive)" if success else None),
+                    reason=reason or ("stop submitted (non-destructive)" if success else None),
                 )
             except Exception:
                 pass
 
+        if not success:
+            # Surface the real reason to the tool wrapper instead of
+            # returning a generic False. The wrapper's existing
+            # except-RuntimeError branch in compute_cluster._do_stop
+            # then propagates it to the agent verbatim.
+            raise RuntimeError(
+                f"sky.stop failed for {cluster_name}: {reason or 'unknown'}"
+            )
+
         # Manifest is preserved on stop — the cluster can be restarted, and
         # the manifest still describes it correctly.
-        return success
+        return True
 
     def cluster_start(self, cluster_name: str) -> bool:
         """Restart a stopped cluster, reusing its disk and identity. Use

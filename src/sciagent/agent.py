@@ -139,8 +139,21 @@ class AgentLoop:
 
         # Propagate session id so per-session SkyPilot workspace buckets
         # (sciagent-workspace-{session_id}) are scoped to this agent session.
-        from .tools.atomic.compute import ComputeTool
+        from .tools.atomic.compute import ComputeTool, session_context_block
         ComputeTool.set_shared_session(self.state.session_id)
+
+        # Inject the concrete workspace URI as a top-of-prompt session
+        # context block, NOW that ComputeTool knows the session id. The
+        # orchestrator (and any sub-agents it dispatches) needs the
+        # concrete URI in its prompt to declare it directly in
+        # produces_uris — without this, dispatches fall back to a
+        # wildcard URI which the cloud-CLI listing rejects (AWS doesn't
+        # allow * in bucket names).
+        ctx = session_context_block()
+        if ctx:
+            self.state.context.system_prompt = (
+                ctx + "\n" + self.state.context.system_prompt
+            )
 
         # M1B: register the active session so ProvenanceChecker / orchestrator
         # gates can find the right log without taking session_id as a

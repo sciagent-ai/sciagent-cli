@@ -1392,3 +1392,42 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
 def get_tool(working_dir: str = ".", session_id: str = None) -> ComputeTool:
     """Factory function for tool discovery."""
     return ComputeTool(working_dir, session_id=session_id)
+
+
+def session_context_block() -> str:
+    """One-paragraph 'session context' header for system prompts.
+
+    Pinpoints the concrete workspace URI for the current session so the
+    orchestrator (and every sub-agent) can name it directly in
+    `produces_uris` for cluster-internal handoff. Without this, the
+    orchestrator dispatches with a wildcard URI and the validator's
+    cloud-CLI list rejects it (AWS doesn't accept `*` in bucket names).
+
+    Empty when no session has been initialized yet, or when SkyPilot
+    isn't installed / configured (top-of-prompt composition skips it
+    cleanly in either case).
+    """
+    sid = ComputeTool._shared_session_id
+    if not sid:
+        return ""
+    try:
+        from sciagent.compute.backends.skypilot import (
+            SkyPilotBackend,
+            _build_workspace_uri,
+        )
+        store = SkyPilotBackend().resolve_workspace_store()
+        uri = _build_workspace_uri(store, sid)
+    except Exception:
+        return ""
+    return (
+        "## Session context\n\n"
+        f"This session's workspace URI: `{uri}`\n\n"
+        "The bucket auto-mounts at `/workspace/` on every cluster compute "
+        "job in this session, persists across `sky stop` / `sky down`, and "
+        "is shared by every sub-agent you dispatch. Use this exact URI "
+        "(not a wildcard, not a placeholder) in `produces_uris` for "
+        "cluster-internal artifact handoff between sub-agents — the "
+        "validator lists the bucket directly, no local sync needed for the "
+        "gate to pass. Local paths in `produces_uris` are only for the "
+        "final user-facing deliverables.\n"
+    )
