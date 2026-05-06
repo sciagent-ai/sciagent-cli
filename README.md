@@ -10,12 +10,12 @@ You give sciagent a scientific task — a simulation to run, a hypothesis to tes
 
 ```mermaid
 flowchart TD
-    Goal["Your scientific task<br/>(simulation · analysis · hypothesis test · reproduction)"]
+    Goal["Your scientific task<br/>(simulation, analysis,<br/>hypothesis test, reproduction)"]
     Main["Main agent<br/>plans + delegates"]
-    Compute["<b>compute</b> subagent<br/>SkyPilot cluster + per-session workspace bucket"]
-    Analyze["<b>analyze</b> subagent<br/>plots · stats · fits · comparisons"]
+    Compute["<b>compute</b> subagent<br/>SkyPilot cluster +<br/>workspace bucket"]
+    Analyze["<b>analyze</b> subagent<br/>plots, stats, fits, comparisons"]
     Verifier["<b>verifier</b> subagent<br/>fresh context, reads the log"]
-    Log[("Provenance log — durable per-session JSONL<br/>tool calls · cloud jobs · artifacts · verifications")]
+    Log[("Provenance log<br/>(durable per-session JSONL)<br/>tool calls, cloud jobs,<br/>artifacts, verifications")]
     Result["Verified result + audit trail"]
 
     Goal --> Main
