@@ -4,6 +4,38 @@ SciAgent is a modular agent framework for software engineering and scientific co
 
 > **v2.0 is current.** Highlights: cloud compute via SkyPilot, durable provenance log, task orchestration with background subagents and checkpoint/resume. See [What's New in v2.0](docs/whats-new-v2.md). v1.0 is preserved on branch `release/v1.0` and tag `v1.0`.
 
+## How it works
+
+You give sciagent a goal — a paper to reproduce, a simulation to run, a question to answer. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — so the audit isn't a separate step, it's a byproduct of normal operation.
+
+```mermaid
+flowchart TD
+    Goal["Your goal<br/>(paper · prompt · simulation request)"]
+    Main["Main agent<br/>plans + delegates"]
+    Compute["<b>compute</b> subagent<br/>SkyPilot cluster + per-session workspace bucket"]
+    Analyze["<b>analyze</b> subagent<br/>plots · stats · fits · comparisons"]
+    Verifier["<b>verifier</b> subagent<br/>fresh context, reads the log"]
+    Log[("Provenance log — durable per-session JSONL<br/>tool calls · cloud jobs · artifacts · verifications")]
+    Result["Verified result + audit trail"]
+
+    Goal --> Main
+    Main --> Compute
+    Main --> Analyze
+    Main --> Verifier
+    Compute --> Log
+    Analyze --> Log
+    Verifier -. reads .-> Log
+    Log --> Result
+```
+
+What makes this distinctive:
+
+- **Cloud-native compute, not local-only.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket — outputs survive cluster teardown.
+- **Durable provenance is the record.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail isn't an after-the-fact reconstruction; it's the normal output of the run.
+- **Independent verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning — only the log and the on-disk artifacts. Cross-LLM friendly: a different model in a different process can audit a session it didn't run.
+- **Containerized scientific services out of the box.** Twenty-plus registered images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
+- **Background sub-agents survive crashes.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
+
 ## Features
 
 - **Cloud compute** – Run scientific simulations on cloud clusters via SkyPilot, with a local Docker fallback for small jobs. Per-session workspace bucket persists outputs across cluster lifecycle. See [Cloud Compute](docs/cloud-compute.md).
