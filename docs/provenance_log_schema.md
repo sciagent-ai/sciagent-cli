@@ -278,7 +278,7 @@ to handle them.
 - **Load-bearing fields are never truncated.** `command_original`,
   `command_resolved`, `intent`, `expected_artifacts`, `path` — if any
   of these exceeds the cap the line is emitted slightly over budget
-  rather than corrupted. The cap is for honesty, not correctness.
+  rather than corrupted. The cap is for transparency, not correctness.
 
 | event_kind             | truncatable fields           |
 |------------------------|------------------------------|
@@ -308,4 +308,4 @@ The cross-LLM verification claim that this schema is built around: a
 verifier that reads the log this way, without any access to sciagent's
 runtime, can determine which tools ran, what commands actually executed
 on which clusters, where outputs landed, and whether the agent's earlier
-verification gates produced honest verdicts.
+verification gates produced unbiased verdicts.

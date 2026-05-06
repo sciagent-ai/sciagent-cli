@@ -163,7 +163,7 @@ The prompt is a real `ask_user` — no silent resumption. The user sees what cra
 
 ### When to use `blocked_resume`
 
-A subagent voluntarily lands in `blocked_resume` when it realizes the work can't finish in the current process — typically because the parent's token budget is about to run out, or because the subagent is mid-pipeline and the next step needs a different cluster that the parent should provision. It's a graceful pause, not a crash.
+A subagent voluntarily lands in `blocked_resume` when it realizes the work can't finish in the current process — typically because the parent's token budget is about to run out, or because the subagent is mid-pipeline and the next step needs a different cluster that the parent should provision. The work pauses cleanly and the parent can pick it up later.
 
 ## Storage layout
 

@@ -6,7 +6,7 @@ SciAgent is a modular agent framework for software engineering and scientific co
 
 ## How it works
 
-You give sciagent a scientific task — a simulation to run, a hypothesis to test, a dataset to analyze, results to reproduce or extend. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — so the audit isn't a separate step, it's a byproduct of normal operation.
+You give sciagent a scientific task — a simulation to run, a hypothesis to test, a dataset to analyze, results to reproduce or extend. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — the audit comes out of normal operation.
 
 ```mermaid
 flowchart TD
@@ -28,12 +28,12 @@ flowchart TD
     Log --> Result
 ```
 
-What makes this distinctive:
+What's different here:
 
-- **Cloud-native compute, not local-only.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket — outputs survive cluster teardown.
-- **Durable provenance is the record.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail isn't an after-the-fact reconstruction; it's the normal output of the run.
-- **Independent verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning — only the log and the on-disk artifacts. Cross-LLM friendly: a different model in a different process can audit a session it didn't run.
-- **Containerized scientific services out of the box.** Twenty-plus registered images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
+- **Cloud compute.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket — outputs survive cluster teardown.
+- **The log is the record.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail comes out of normal operation.
+- **Verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning — it reads only the log and the on-disk artifacts. A different model in a different process can audit a session it didn't run.
+- **Scientific services in registered containers.** Twenty-plus images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
 - **Background sub-agents survive crashes.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
 
 ## Features

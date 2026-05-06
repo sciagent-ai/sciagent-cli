@@ -11,7 +11,7 @@ The AI agent landscape in 2026 spans three categories: general-purpose coding ag
 This page positions SciAgent against the field on three lenses:
 
 1. [Levels of Scientific Automation](#levels-of-scientific-automation) — where SciAgent sits in the Self-Driving Laboratory autonomy hierarchy.
-2. [Capability Axes](#capability-axes) — the durable capability questions that differentiate systems in this space (these age more gracefully than tool-by-tool tables).
+2. [Capability Axes](#capability-axes) — the capability questions that differentiate systems in this space.
 3. [Feature Comparison by Category](#feature-comparison-by-category) — concrete tool-by-tool tables for the three categories.
 
 It closes with a [use-case decision table](#when-to-use-each-approach).
@@ -28,11 +28,10 @@ Where SciAgent fits:
 |------|-------|-------|-------|-------|----------|
 | **Software** — planning, dispatch, execution, analysis, verification | Human ideation | One-shot AI suggestion | AI plans + iterates | AI plans, executes, analyzes, verifies independently | **Cat 2-3** |
 | **Compute substrate** — provisioning, cluster lifecycle, workspace, fault tolerance | Manual | Single-task script | Workflow config | Diverse jobs, unattended | **Cat 2-3** |
-| **Wet-lab hardware** — physical robotics, liquid handling, instrumentation | — | — | — | — | **out of scope** |
 
-SciAgent is **autonomous computational science**, not a wet-lab SDL — there are no liquid handlers, no robotic arms. For tasks where the substrate *is* compute (simulations, numerical experiments, data analysis, model fitting, design-space exploration), it covers the same end-to-end loop the SDL framework describes — plan → dispatch → run → observe → derive → verify — without the wet-lab dimension.
+SciAgent automates the **design, computation, and optimization** half of scientific work — simulations, numerical experiments, data analysis, model fitting, design-space exploration. It sits in the AI-for-scientific-computing space, alongside emerging tools like [Dyad](https://juliahub.com/products/dyad) (JuliaHub) connecting simulation and CAE — automating and connecting that ecosystem from the AI side. For its substrate (compute), it covers the same end-to-end loop the SDL framework describes: plan → dispatch → run → observe → derive → verify.
 
-The piece SciAgent adds on the software-autonomy axis is the closed audit loop: durable provenance + independent fresh-context verifier (see [§ Closed audit loop](#1-closed-audit-loop-durable-provenance--fresh-context-verifier) below). Most "AI for science" agents stop at *running* the work — they have no record an external party can audit, and any verification step shares context with the executor. SciAgent's verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run. This is the property that makes the loop trustworthy as you climb toward higher autonomy [16].
+The piece SciAgent adds on the software-autonomy axis is the closed audit loop: durable provenance + independent fresh-context verifier (see [§ Closed audit loop](#1-closed-audit-loop-durable-provenance--fresh-context-verifier) below). Most "AI for science" agents stop at *running* the work — they have no record an external party can audit, and any verification step shares context with the executor. SciAgent's verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run. This is what lets the loop scale as autonomy increases [16].
 
 ---
 
@@ -64,7 +63,7 @@ The matrix below scores broad categories — individual tools within each catego
 | Background work + checkpointing | Partial | Build-it-yourself | ✗ | ✓ |
 | Software engineering | ✓ | ✓ | ✗ | ✓ |
 
-The "Build-it-yourself" cells in the multi-agent column are honest: frameworks like LangGraph or AutoGen *can* implement any of these — they give you primitives, not pre-built scientific infrastructure. The cost is the months of integration work between picking up the framework and running a verified simulation.
+"Build-it-yourself" in the multi-agent column means the frameworks *can* implement any of these — they give you primitives, not pre-built scientific infrastructure. The gap is the months of integration work between picking up the framework and running a verified simulation.
 
 ---
 
@@ -125,11 +124,11 @@ Domain-specific agents designed for scientific research and discovery.
 | Cloud compute orchestration | ✗ Mostly local or institutional HPC scripts | ✓ via SkyPilot, multi-cloud |
 | Durable provenance log | ✗ Mostly transcripts only | ✓ JSONL v1, cross-LLM verifiable |
 | Independent fresh-context verifier | Varies; often shares context with executor | ✓ Reads log + artifacts only |
-| Wet-lab automation | Some (Coscientist) | ✗ Computational only |
+| Workflow scope | Wet-lab synthesis + analysis (Coscientist) | Design, computation, optimization |
 
 **Representative tools:** ChemCrow [10], Coscientist [11], FORUM-AI [12], Google AI Co-Scientist [13]
 
-**Key insight:** Domain-specific scientific agents bring deep expertise but rarely cross domains, rarely orchestrate cloud compute, and rarely persist a verifiable record. SciAgent's strengths are cross-domain breadth, cloud-native execution, and the closed audit loop; its gap vs. wet-lab SDLs is real and explicit (computational only).
+**Key insight:** Domain-specific scientific agents bring deep expertise but rarely cross domains, rarely orchestrate cloud compute, and rarely persist a verifiable record. SciAgent's strengths are cross-domain breadth, cloud-native execution, and the closed audit loop. Its workflow scope is **design, computation, and optimization** — the AI-for-scientific-computing space, alongside tools like [Dyad](https://juliahub.com/products/dyad) (JuliaHub) connecting simulation and CAE.
 
 ---
 
@@ -161,10 +160,10 @@ LLM VERIFY   → Independent verifier subagent
   artifact_produced · verification_result · correction
 ```
 
-Two properties together make this trustworthy:
+Two properties together:
 
-- **Durable**. The log is the record — not a summary, not a transcript. A different model in a different process can read it and reach the same verdict. Per-line cap 16 KB; per-field cap 4 KB; thread-safe via `fcntl.flock`.
-- **Cross-LLM**. Because the verifier reads only the log + artifacts, you can run the executor on Claude Sonnet and the verifier on GPT-4 (or vice versa). Verification doesn't share priors with execution.
+- **Durable**. The log is an append-only event stream you can replay. A different model in a different process can read it and reach the same verdict. Per-line cap 16 KB; per-field cap 4 KB; thread-safe via `fcntl.flock`.
+- **Cross-LLM**. The verifier reads only the log + artifacts, so the executor can run on Claude Sonnet and the verifier on GPT-4 (or vice versa). Verification doesn't share priors with execution.
 
 See [Provenance Log Schema](provenance_log_schema.md) for the v1 schema; [Cloud Compute](cloud-compute.md) and [Task Orchestration](task-orchestration.md) for what gets logged.
 
@@ -216,7 +215,7 @@ Long-running scientific workflows (CFD reproducing a paper, GROMACS trajectory a
 | Network Analysis | networkx |
 | Scientific ML | sciml-julia |
 
-Cross-domain pipelines are first-class — e.g., RDKit → GROMACS → SciPy for molecular design → simulation → analysis. Service inheritance is registry-resolved (`extends:` chain); adding a new domain is a registry entry, not a new subagent kind. See [Architecture → Service Registry](developers/architecture.md#service-registry).
+Cross-domain pipelines are first-class — e.g., RDKit → GROMACS → SciPy for molecular design → simulation → analysis. Service inheritance is registry-resolved (`extends:` chain); adding a new domain means adding a registry entry, with subagent kinds staying generic. See [Architecture → Service Registry](developers/architecture.md#service-registry).
 
 ### 5. Research-first workflow
 
@@ -251,7 +250,7 @@ This mirrors the Coscientist approach [11] but generalises across all the regist
 |----------|---------------------|
 | Pure software engineering (no scientific computing) | Coding agents (Claude Code, Cursor, Aider, etc.) |
 | Custom multi-agent architectures, bespoke topology | Orchestration frameworks (AG2, LangChain) |
-| Chemistry with wet-lab automation (real robots) | ChemCrow, Coscientist |
+| Chemistry with wet-lab synthesis (real robots) | ChemCrow, Coscientist |
 | Materials science with institutional HPC clusters | FORUM-AI (institutional) |
 | Scientific computing + software engineering | SciAgent |
 | Cross-domain scientific pipelines (e.g. design → simulate → analyze) | SciAgent |
