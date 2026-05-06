@@ -31,13 +31,13 @@ Where SciAgent fits:
 
 SciAgent automates the **design, computation, and optimization** half of scientific work — simulations, numerical experiments, data analysis, model fitting, design-space exploration. It sits in the AI-for-scientific-computing space, alongside emerging tools like [Dyad](https://juliahub.com/products/dyad) (JuliaHub) connecting simulation and CAE — automating and connecting that ecosystem from the AI side. For its substrate (compute), it covers the same end-to-end loop the SDL framework describes: plan → dispatch → run → observe → derive → verify.
 
-The piece SciAgent adds on the software-autonomy axis is the closed audit loop: durable provenance + independent fresh-context verifier (see [§ Closed audit loop](#1-closed-audit-loop-durable-provenance--fresh-context-verifier) below). Most "AI for science" agents stop at *running* the work — they have no record an external party can audit, and any verification step shares context with the executor. SciAgent's verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run. This is what lets the loop scale as autonomy increases [16].
+On the software-autonomy axis, SciAgent adds a closed audit loop: durable provenance plus an independent fresh-context verifier (see [§ Closed audit loop](#1-closed-audit-loop-durable-provenance--fresh-context-verifier) below). The verifier reads the log and the on-disk artifacts only, so a different LLM in a different process can re-audit a session it didn't run [16].
 
 ---
 
 ## Capability Axes
 
-Tool-by-tool comparisons age fast — competitors ship updates, names change, services come and go. The more durable framing is to ask which **capabilities** a system actually offers. Eight axes that differentiate systems in the autonomous-computational-science space:
+Eight capability axes that differentiate systems in this space:
 
 | Axis | Question |
 |------|----------|
@@ -50,7 +50,7 @@ Tool-by-tool comparisons age fast — competitors ship updates, names change, se
 | **Background work + checkpointing** | Can long-running jobs survive crashes (per-iteration checkpoints, 3-way resume), or is failure terminal? |
 | **Software engineering** | Beyond running simulations, can the agent navigate code, debug, do git ops, refactor? |
 
-The matrix below scores broad categories — individual tools within each category vary, and a "✓" marks the typical case rather than a universal claim. The SciAgent column reflects v2.0 as released.
+The matrix below scores broad categories. Individual tools within a category vary; a "✓" marks the typical case for the category. The SciAgent column reflects v2.0 as released.
 
 | Axis | Coding agents | Multi-agent frameworks | Scientific agents | SciAgent v2.0 |
 |------|---------------|------------------------|-------------------|---------------|
@@ -63,7 +63,7 @@ The matrix below scores broad categories — individual tools within each catego
 | Background work + checkpointing | Partial | Build-it-yourself | ✗ | ✓ |
 | Software engineering | ✓ | ✓ | ✗ | ✓ |
 
-"Build-it-yourself" in the multi-agent column means the frameworks *can* implement any of these — they give you primitives, not pre-built scientific infrastructure. The gap is the months of integration work between picking up the framework and running a verified simulation.
+"Build-it-yourself" in the multi-agent column means the framework exposes primitives that can implement the axis; the user supplies the integration. SciAgent ships these axes pre-built.
 
 ---
 
@@ -86,7 +86,7 @@ Tools focused on software engineering tasks: code generation, debugging, refacto
 
 **Representative tools:** Claude Code [1], Cursor [2], Aider [3], OpenHands [4], SWE-Agent [5], Devin [6]
 
-**Key insight:** Coding agents excel at software engineering but stop at the codebase boundary — no scientific environments, no cloud-cluster lifecycle, no durable audit trail. SciAgent retains full SWE capabilities while adding containerized services, cloud compute, and a verifiable record of every run.
+Coding agents handle code generation, navigation, and git operations. SciAgent does the same and adds containerized scientific environments, cloud compute orchestration, and a durable provenance log.
 
 ---
 
@@ -107,7 +107,7 @@ Frameworks for building and orchestrating multiple AI agents working together.
 
 **Representative tools:** AG2 [7], Microsoft AutoGen/Semantic Kernel [8], LangChain/LangGraph [9]
 
-**Key insight:** Multi-agent frameworks give you primitives; SciAgent gives you a vertically-integrated scientific runtime. If you need bespoke agent topology, the frameworks win. If you want to run a verified CFD simulation tomorrow, SciAgent skips months of integration.
+Multi-agent frameworks expose orchestration primitives the user assembles into a runtime. SciAgent ships such a runtime preconfigured for scientific computing, with the cloud, registry, and provenance layers already wired up.
 
 ---
 
@@ -128,7 +128,7 @@ Domain-specific agents designed for scientific research and discovery.
 
 **Representative tools:** ChemCrow [10], Coscientist [11], FORUM-AI [12], Google AI Co-Scientist [13]
 
-**Key insight:** Domain-specific scientific agents bring deep expertise but rarely cross domains, rarely orchestrate cloud compute, and rarely persist a verifiable record. SciAgent's strengths are cross-domain breadth, cloud-native execution, and the closed audit loop. Its workflow scope is **design, computation, and optimization** — the AI-for-scientific-computing space, alongside tools like [Dyad](https://juliahub.com/products/dyad) (JuliaHub) connecting simulation and CAE.
+Domain-specific scientific agents typically focus on a single domain (chemistry, materials, biology) and ship deep tooling for it. SciAgent covers multiple computational domains, orchestrates cloud compute, and persists a durable record. Its workflow scope is design, computation, and optimization — the AI-for-scientific-computing space, alongside tools like [Dyad](https://juliahub.com/products/dyad) (JuliaHub) connecting simulation and CAE.
 
 ---
 
@@ -136,7 +136,7 @@ Domain-specific agents designed for scientific research and discovery.
 
 ### 1. Closed audit loop: durable provenance + fresh-context verifier
 
-The unique failure mode of LLM-driven scientific work is plausible-looking but fabricated results. SciAgent addresses this with a closed loop: every relevant event is appended to a durable per-session JSONL log, and an independent verifier with fresh context reads the log + artifacts to validate the claims.
+LLM-driven scientific work can produce plausible-looking but fabricated results. SciAgent's closed loop guards against this: every relevant event is appended to a durable per-session JSONL log, and an independent verifier with fresh context reads the log and artifacts to validate the claims.
 
 ```
 Task Execution
@@ -176,7 +176,7 @@ See [Provenance Log Schema](provenance_log_schema.md) for the v1 schema; [Cloud 
 - `compute_cluster(action="status"|"stop"|"start"|"down"|"autostop"|"refresh_mounts"|"wait_for_job"|...)` — full lifecycle
 - `materialize`, `materialize_workspace` — pull outputs back to local
 
-Defaults that matter:
+Defaults:
 
 - **Stop, not down.** End-of-task action is `stop` (preserves disk for fast restart in seconds), not `down` (destroys cluster). The agent's prompt enforces this.
 - **Cost gate at $5.** When the optimizer's estimated total exceeds $5, the tool prompts the user with the Sky-optimizer menu before launching. Tool-layer gate; the LLM cannot bypass it. Override via `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` or `~/.sciagent/config.yaml`.
@@ -215,7 +215,7 @@ Long-running scientific workflows (CFD reproducing a paper, GROMACS trajectory a
 | Network Analysis | networkx |
 | Scientific ML | sciml-julia |
 
-Cross-domain pipelines are first-class — e.g., RDKit → GROMACS → SciPy for molecular design → simulation → analysis. Service inheritance is registry-resolved (`extends:` chain); adding a new domain means adding a registry entry, with subagent kinds staying generic. See [Architecture → Service Registry](developers/architecture.md#service-registry).
+Cross-domain pipelines work directly — e.g., RDKit → GROMACS → SciPy for molecular design → simulation → analysis. Service inheritance is registry-resolved (`extends:` chain); adding a new domain means adding a registry entry, with subagent kinds staying generic. See [Architecture → Service Registry](developers/architecture.md#service-registry).
 
 ### 5. Research-first workflow
 
@@ -227,7 +227,7 @@ The `use-service` skill enforces documentation research before code generation:
 4. **Execute** – Run in isolated container (`compute_run`)
 5. **Debug** – Search for error solutions if needed (`web`, `bash`)
 
-This mirrors the Coscientist approach [11] but generalises across all the registered scientific domains rather than being chemistry-specific.
+The same workflow applies across every registered scientific domain. Coscientist [11] uses an analogous research-first pattern, scoped to chemistry.
 
 ### 6. SWE + science combined
 

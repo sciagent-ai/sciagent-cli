@@ -48,7 +48,7 @@ sciagent "Trace rays through a lens system using pyoptools"
 # Chemistry & Materials
 sciagent "Analyze molecular properties of this compound from SMILES"
 sciagent "Run a molecular dynamics simulation of a protein-ligand complex"
-sciagent "Simulate a Lennard-Jones fluid with LAMMPS"
+sciagent "Build a crystal structure with ASE and compute its lattice properties"
 
 # Math & Optimization
 sciagent "Solve this optimization problem using CVXPY"
@@ -80,11 +80,12 @@ sciagent "Solve this system of ODEs using Julia's DifferentialEquations.jl"
 
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
-| **Math & Optimization** | scipy-base, sympy, cvxpy, optuna | Numerical computing, symbolic math, convex optimization, hyperparameter tuning |
-| **Chemistry & Materials** | rdkit, ase, lammps, dwsim | Molecular analysis, atomistic simulations, MD, chemical process simulation |
-| **Molecular Dynamics** | gromacs, lammps | Biomolecular simulations, soft matter, solid-state materials |
+| **Math & Optimization** | scipy-base, sci-core, sympy, cvxpy, optuna | Numerical computing, symbolic math, convex optimization, hyperparameter tuning |
+| **Chemistry & Materials** | rdkit, ase, dwsim | Molecular analysis, atomistic simulations, chemical process simulation |
+| **Molecular Dynamics** | gromacs | Biomolecular simulations, soft matter |
 | **Photonics & Optics** | rcwa, meep, pyoptools | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
-| **CFD & FEM** | openfoam, gmsh, elmer | Fluid dynamics, mesh generation, multiphysics FEM |
+| **CFD & FEM** | openfoam, openfoam-swak4foam, gmsh, elmer | Fluid dynamics, mesh generation, multiphysics FEM |
+| **Post-processing & Visualisation** | paraview | Multi-arch (with EGL) — pairs with the OpenFOAM services |
 | **Circuits & EDA** | ngspice, openroad, iic-osic-tools | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
 | **Quantum Computing** | qiskit | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
 | **Bioinformatics** | biopython, blast | Sequence analysis, BLAST searching, phylogenetics |
@@ -116,9 +117,9 @@ sciagent "Find similar proteins to this sequence and run MD simulation"
 sciagent "Design a lens system and optimize for minimum aberration"
 # Uses: pyoptools (ray tracing) -> optuna (optimization) -> scipy-base (analysis)
 
-# Materials simulation pipeline
-sciagent "Build a crystal structure and run molecular dynamics"
-# Uses: ase (structure) -> lammps (MD) -> scipy-base (analysis)
+# Crystal structure + analysis pipeline
+sciagent "Build a crystal structure and analyze its lattice properties"
+# Uses: ase (structure) -> scipy-base (analysis)
 
 # Network-based drug discovery
 sciagent "Build protein interaction network and identify key drug targets"
@@ -142,7 +143,7 @@ sciagent "Calculate ground state energy using VQE algorithm"
 | IC design flow | openroad → scipy-base | Power/performance/area report |
 | Protein pipeline | blast → biopython → gromacs | MD trajectory from sequence |
 | Optical design | pyoptools → optuna → scipy-base | Optimized lens parameters |
-| Materials modeling | ase → lammps → scipy-base | Thermodynamic properties |
+| Crystal structure analysis | ase → scipy-base | Lattice properties |
 | Process engineering | dwsim → optuna | Optimal reactor conditions |
 
 See [Case Studies](case-studies/) for real-world examples of SciAgent in published research.

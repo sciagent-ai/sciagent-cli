@@ -116,8 +116,10 @@ Built-in sub-agents (each uses a cost-optimised model tier):
 | `debug` | Coding | Error investigation with web research |
 | `research` | Coding | Web research, documentation lookup |
 | `plan` | Scientific | Break down complex problems |
+| `compute` | Coding | Cloud-job orchestration with token-isolated context |
+| `analyze` | Coding | Post-job derivation (plots, statistics, light fits) |
 | `general` | Coding | Complex multi-step tasks |
-| `verifier` | Verification | Independent validation of task outputs |
+| `verifier` | Verification | Independent validation against the provenance log |
 
 Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
 
@@ -164,11 +166,12 @@ SciAgent runs simulations in Docker containers. Available services:
 
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
-| **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
-| **Chemistry & Materials** | `rdkit`, `ase`, `lammps`, `dwsim` | Molecular analysis, atomistic simulations, MD, chemical process simulation |
-| **Molecular Dynamics** | `gromacs`, `lammps` | Biomolecular simulations, soft matter, solid-state materials |
+| **Math & Optimisation** | `scipy-base`, `sci-core`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
+| **Chemistry & Materials** | `rdkit`, `ase`, `dwsim` | Molecular analysis, atomistic simulations, chemical process simulation |
+| **Molecular Dynamics** | `gromacs` | Biomolecular simulations, soft matter |
 | **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
-| **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
+| **CFD & FEM** | `openfoam`, `openfoam-swak4foam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM; SWAK4Foam variant adds field-processing language on top of OpenFOAM |
+| **Post-processing & Visualisation** | `paraview` | Multi-arch (with EGL) — pairs with the OpenFOAM services |
 | **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
 | **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
 | **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |

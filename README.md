@@ -28,13 +28,13 @@ flowchart TD
     Log --> Result
 ```
 
-What's different here:
+Properties of this loop:
 
-- **Cloud compute.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket — outputs survive cluster teardown.
-- **The log is the record.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail comes out of normal operation.
-- **Verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning — it reads only the log and the on-disk artifacts. A different model in a different process can audit a session it didn't run.
-- **Scientific services in registered containers.** Twenty-plus images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...) — no `pip install` dance, no host env management.
-- **Background sub-agents survive crashes.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
+- **Cloud compute.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket. Outputs survive cluster teardown.
+- **Durable log.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail comes out of normal operation.
+- **Verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning. It reads only the log and the on-disk artifacts. A different model in a different process can audit a session it didn't run.
+- **Scientific services in registered containers.** Twenty-plus images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...). The user does not manage container builds or host environments.
+- **Background sub-agents with checkpoints.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
 
 ## Features
 

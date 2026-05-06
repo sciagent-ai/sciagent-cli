@@ -13,15 +13,7 @@ Real-world examples of SciAgent reproducing scientific research from peer-review
 
 ## Overview
 
-These case studies demonstrate SciAgent's ability to autonomously:
-
-- **Read and understand** scientific papers (PDFs)
-- **Extract parameters** and methodology from publications
-- **Write working code** using domain-specific tools
-- **Debug and iterate** through multiple code revisions
-- **Validate results** against published data
-
-Each case study shows the prompt given, the autonomous workflow, and quantitative validation of results.
+Each study includes the prompt given to SciAgent, the workflow it followed (paper analysis → setup → run → validation), the artifacts produced, and a numerical comparison against the published values.
 
 ## Available Studies
 

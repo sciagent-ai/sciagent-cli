@@ -174,7 +174,7 @@ task_id = orch.spawn(
 )
 ```
 
-When `produces_uris=` is declared, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 100). Failure lands the task in `blocked_produce_missing` state — explicit failure rather than silent "I claimed success but the file isn't there."
+When `produces_uris=` is declared, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 100). Failure lands the task in `blocked_produce_missing` state, so the parent can detect missing artifacts even when the subagent reported success.
 
 ## SkyPilot Integration & Cluster Lifecycle
 
@@ -217,11 +217,11 @@ pending → running → {completed | failed | cancelled | blocked_produce_missin
                   → {crashed | blocked_resume}      ← resumable, subagent-only
 ```
 
-The kind-agnostic `task_list` / `task_get` / `task_wait` tools query the registry across kinds. Cloud-job-specific operations (Sky status, logs, kill) stay on the `bg_*` tools. The split keeps the cross-kind surface compact while preserving per-cloud-job ergonomics.
+The kind-agnostic `task_list` / `task_get` / `task_wait` tools query the registry across kinds. Cloud-job-specific operations (Sky status, logs, kill) stay on the `bg_*` tools.
 
 ### Why a single registry
 
-Pre-consolidation, sciagent had separate stores for compute jobs, background bash, in-flight subagents, todo state, etc. — six overlapping state surfaces that drifted. The task index is the long-term consolidation: one on-disk format, one set of query tools, one state machine. The provenance log (next section) is the audit-trail companion; the task index is the runtime registry. They are layered, not duplicated.
+Pre-consolidation, sciagent had separate stores for compute jobs, background bash, in-flight subagents, todo state, etc. — six overlapping state surfaces that drifted. The task index is the long-term consolidation target: one on-disk format, one set of query tools, one state machine. The provenance log (next section) handles the audit trail. The task index handles the runtime registry. The two layers do not duplicate each other.
 
 For the user-facing guide see [Task Orchestration](../task-orchestration.md).
 
@@ -237,7 +237,7 @@ Background subagents checkpoint per-iteration to:
 
 Schema version: `1`. On crash before terminal state, the registry entry's `state` is set to `crashed` and the checkpoint persists. A subsequent `spawn(...)` for a subagent-kind task hashes the task description and checks for a prior `crashed` or `blocked_resume` entry with the same hash — on match, the orchestrator prompts the parent for a 3-way choice (`skip` / `use_prior` / `retry`).
 
-`blocked_resume` is the voluntary version: the subagent itself decides the work can't finish in the current process (token budget, mid-pipeline pause) and asks to be picked up later.
+In `blocked_resume`, the subagent itself decides the work can't finish in the current process (token budget, mid-pipeline pause) and asks to be picked up later. The same resume flow applies.
 
 ## Provenance Log
 

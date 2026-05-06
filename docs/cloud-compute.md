@@ -28,7 +28,7 @@ Both code paths produce the same `JobResult` shape, so downstream agents and ana
 - **Managed jobs** (`mode="job"`, default) — Sky launches a transient cluster, runs the command, tears the cluster down on completion. One-shot. Use for "run this and I'll come back when it's done."
 - **Cluster mode** (`mode="cluster"`) — Sky launches a persistent cluster you can iterate against (`compute_exec` for follow-up commands, `compute_cluster(action="refresh_mounts")` to point it at new inputs). Use for case-file reproductions, multi-step pipelines, anything you'll probe interactively before the real run.
 
-Cluster mode is the right default for scientific workflows — the cost of a cluster restart usually outweighs the cost of leaving it `stopped` between iterations.
+For iterative scientific workflows, cluster mode is usually faster end-to-end: a `stopped` cluster restarts in seconds, while a fresh launch takes minutes.
 
 ## Cluster lifecycle: stop, not down
 

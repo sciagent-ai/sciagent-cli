@@ -278,7 +278,7 @@ to handle them.
 - **Load-bearing fields are never truncated.** `command_original`,
   `command_resolved`, `intent`, `expected_artifacts`, `path` — if any
   of these exceeds the cap the line is emitted slightly over budget
-  rather than corrupted. The cap is for transparency, not correctness.
+  so the field stays intact. The cap exists to make truncation visible; correctness of the underlying data is the writer's responsibility.
 
 | event_kind             | truncatable fields           |
 |------------------------|------------------------------|
