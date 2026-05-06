@@ -46,7 +46,7 @@ class AgentConfig:
     # ``SCIAGENT_SESSION_SOFT_BUDGET`` env var. Per-call context-size
     # pressure is handled independently by ``state.compress_token_threshold``,
     # which is itself derived from the model's context window.
-    max_session_tokens: int = 2_000_000
+    max_session_tokens: int = 4_000_000
     working_dir: str = "."
     verbose: bool = True
     auto_save: bool = True
@@ -118,7 +118,7 @@ class AgentLoop:
         self.profile = profile_for(self.config.model)
 
         # Optional per-deployment override of the cumulative session budget.
-        # The static AgentConfig default (2_000_000) is kept as a final
+        # The static AgentConfig default (4_000_000) is kept as a final
         # fallback, but if SCIAGENT_SESSION_SOFT_BUDGET is set in env, the
         # profile carries it and we honor it here.
         if self.profile.session_soft_budget is not None:

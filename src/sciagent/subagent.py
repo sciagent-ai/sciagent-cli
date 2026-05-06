@@ -1210,7 +1210,7 @@ The parent will dispatch `analyze`, which picks its own container with the right
             # the model profile's compaction threshold (60% of context
             # window by default) — long-running work compacts mid-flight
             # rather than trying to fit everything in one window.
-            max_session_tokens=2_000_000,
+            max_session_tokens=4_000_000,
         ))
 
         # Analyze agent - peer to compute. Reads from the data tier (S3
@@ -1335,7 +1335,7 @@ If you couldn't produce a real artifact (missing input data + couldn't get it; l
 """ + OBSERVATION_PROMPT_BLOCK,
             allowed_tools=["file_ops", "bash", "search", "materialize", "materialize_workspace", "compute_run", "compute_exec", "compute_cluster", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             max_iterations=80,
-            max_session_tokens=2_000_000,
+            max_session_tokens=4_000_000,
         ))
 
         # General agent - full capability for complex tasks
