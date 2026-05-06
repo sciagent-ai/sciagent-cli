@@ -19,7 +19,7 @@ v2.0 is a major release. The codebase grew from a single-process agent with file
 - **Background subagents with checkpoint & resume** — `spawn(background=True)` returns a `task_id`; per-iteration checkpoints survive crashes; the parent gets a 3-way resume prompt on the next spawn. See [Task Orchestration → Checkpoint & resume](task-orchestration.md#checkpoint--resume).
 - **Two new subagent kinds** — `compute` (cloud-job orchestration with token isolation) and `analyze` (post-job derivation: plots, statistics, light fits). The verifier subagent now reads the durable provenance log, so a different model can audit a session it didn't run. See [Architecture → Sub-agents](developers/architecture.md#sub-agents).
 - **Updated default models** — Sonnet 4.6 / Opus 4.7 / Haiku 4.5 across the tier system. Provider-agnostic via [LiteLLM](https://github.com/BerriAI/litellm).
-- **New scientific services** — `openfoam-swak4foam` (SWAK4Foam field-processing language on top of OpenFOAM) and `paraview` (multi-arch with EGL).
+- **New scientific service** — `paraview` (multi-arch with EGL) for post-processing OpenFOAM and other simulation outputs. The OpenFOAM image now also ships with a SWAK4Foam-extended variant for field-processing, used internally when a case needs it.
 - **First cloud-compute case study** — [Datacenter CFD with OpenFOAM](case-studies/datacenter-cfd.md) reproduces published results end-to-end on a SkyPilot cluster.
 
 ## Migrating from v1.0
@@ -42,7 +42,7 @@ If you have v1.0 sessions saved in `.agent_states/`, they remain loadable — th
 | Audit trail | Inline tool logs | Durable per-session JSONL log (`provenance.jsonl`) |
 | Verification | Three-tier gates (data/exec/LLM) | Same gates + cross-LLM verifier reading the provenance log |
 | Subagent kinds | explore, debug, research, plan, general, verifier | + compute, + analyze |
-| Service variants | openfoam | openfoam, openfoam-swak4foam, paraview |
+| Scientific services | openfoam, ... | openfoam (with SWAK4Foam-extended variant), paraview, ... |
 | Default scientific model | claude-opus-4-5 | claude-sonnet-4-6 |
 
 ## Where to read next

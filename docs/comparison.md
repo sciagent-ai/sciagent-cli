@@ -203,11 +203,11 @@ Long-running scientific workflows (CFD reproducing a paper, GROMACS trajectory a
 
 | Domain | Services |
 |--------|----------|
-| Math & Optimization | scipy-base, sci-core, sympy, cvxpy, optuna |
+| Math & Optimization | scipy-base, sympy, cvxpy, optuna |
 | Chemistry & Materials | rdkit, ase, dwsim |
 | Molecular Dynamics | gromacs |
 | Photonics & Optics | rcwa, meep, pyoptools |
-| CFD & FEM | openfoam, openfoam-swak4foam, gmsh, elmer |
+| CFD & FEM | openfoam, gmsh, elmer |
 | Post-processing & Visualisation | paraview |
 | Circuits & EDA | ngspice, openroad, iic-osic-tools |
 | Quantum Computing | qiskit |
