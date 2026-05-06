@@ -434,54 +434,70 @@ class LLMClient:
         """
         Format messages for Anthropic prompt caching.
 
-        Adds cache_control to system messages and long user messages to enable
-        Anthropic's prompt caching feature. This can reduce costs by ~90% on
-        cached tokens and improve response latency.
+        Adds cache_control breakpoints to enable Anthropic's prompt caching
+        (~90% cheaper on cached tokens). Anthropic caps cache_control markers
+        at 4 per request — exceeding the cap causes a hard 400 mid-run.
+
+        Strategy (max 2 markers, well under cap):
+          - System message: always marked (1 marker). Biggest static prefix.
+          - Last user message > 2000 chars: marked (1 marker). Anthropic's
+            cache is prefix-based, so a single marker at the LATEST stable
+            position caches everything before it — best hit rate on the
+            next turn, which only adds content after this marker.
+
+        Earlier "mark every long user message" produced N markers for N long
+        user turns; in a compute-subagent run with multiple big tool results
+        that's 5+ markers and the API rejects the request. This bug
+        surfaced as: "A maximum of 4 blocks with cache_control may be
+        provided. Found 5." mid-run.
 
         Only applies to Anthropic models.
         """
         if not self._is_anthropic_model():
             return messages
 
-        formatted = []
-        for msg in messages:
-            msg_copy = msg.copy()
+        formatted = [msg.copy() for msg in messages]
 
-            # Add cache_control to system messages (typically long, static prompts)
-            if msg_copy["role"] == "system":
-                content = msg_copy["content"]
-                # Convert string content to structured format with cache_control
-                if isinstance(content, str):
-                    msg_copy["content"] = [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-                elif isinstance(content, list):
-                    # Already structured, add cache_control to last block
-                    for i, block in enumerate(content):
-                        if isinstance(block, dict) and block.get("type") == "text":
-                            # Add cache_control to the last text block
-                            if i == len(content) - 1:
-                                block["cache_control"] = {"type": "ephemeral"}
-                    msg_copy["content"] = content
+        # Pass 1: cache the system message (always; biggest static prefix).
+        for msg_copy in formatted:
+            if msg_copy["role"] != "system":
+                continue
+            content = msg_copy["content"]
+            if isinstance(content, str):
+                msg_copy["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+            elif isinstance(content, list):
+                # Mark the last text block.
+                for i, block in enumerate(content):
+                    if (
+                        isinstance(block, dict)
+                        and block.get("type") == "text"
+                        and i == len(content) - 1
+                    ):
+                        block["cache_control"] = {"type": "ephemeral"}
+                msg_copy["content"] = content
 
-            # Optionally cache long user messages (e.g., large code files, documents)
-            elif msg_copy["role"] == "user":
-                content = msg_copy["content"]
-                # Cache user messages over 2000 chars (significant context)
-                if isinstance(content, str) and len(content) > 2000:
-                    msg_copy["content"] = [
-                        {
-                            "type": "text",
-                            "text": content,
-                            "cache_control": {"type": "ephemeral"}
-                        }
-                    ]
-
-            formatted.append(msg_copy)
+        # Pass 2: cache only the LAST user message > 2000 chars. Walking
+        # backwards and stopping at the first hit caps user-side markers
+        # at 1, total at 2.
+        for msg_copy in reversed(formatted):
+            if msg_copy["role"] != "user":
+                continue
+            content = msg_copy["content"]
+            if isinstance(content, str) and len(content) > 2000:
+                msg_copy["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                break  # Only mark the latest qualifying user message.
 
         return formatted
 

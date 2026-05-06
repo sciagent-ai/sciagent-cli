@@ -24,7 +24,10 @@ LiteLLM format: provider/model-name (e.g., openai/gpt-4.1, gemini/gemini-3-pro-p
 -----------------------------------------------------------------------------
 SCIENTIFIC TIER (Best quality, complex reasoning)
 -----------------------------------------------------------------------------
-Anthropic:    anthropic/claude-opus-4-5-20251101      [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-sonnet-4-6             [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-opus-4-7               [TESTED — bump for the heaviest scientific reasoning]
+Anthropic:    anthropic/claude-opus-4-5-20251101      [legacy snapshot]
+Anthropic:    anthropic/claude-sonnet-4-20250514      [legacy snapshot]
 OpenAI:       openai/gpt-4.1                          [untested]
 OpenAI:       openai/o3                               [untested - reasoning model]
 OpenAI:       openai/o3-pro                           [untested - max reasoning]
@@ -37,7 +40,8 @@ DeepSeek:     deepseek/deepseek-reasoner              [untested - V3.2 thinking]
 -----------------------------------------------------------------------------
 VISION TIER (Multimodal/image analysis)
 -----------------------------------------------------------------------------
-Anthropic:    anthropic/claude-opus-4-5-20251101      [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-opus-4-7               [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-opus-4-5-20251101      [legacy snapshot]
 OpenAI:       openai/gpt-4.1                          [untested - supports vision]
 OpenAI:       openai/o3                               [untested - visual reasoning]
 Google:       gemini/gemini-3-pro-preview             [untested - native multimodal]
@@ -55,7 +59,8 @@ Open-Source Vision Models (via Together AI / self-hosted):
 -----------------------------------------------------------------------------
 CODING TIER (Implementation, debugging, research)
 -----------------------------------------------------------------------------
-Anthropic:    anthropic/claude-sonnet-4-20250514      [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-sonnet-4-6             [DEFAULT - TESTED]
+Anthropic:    anthropic/claude-sonnet-4-20250514      [legacy snapshot]
 OpenAI:       openai/gpt-4.1-mini                     [untested]
 OpenAI:       openai/o4-mini                          [untested - fast reasoning]
 Google:       gemini/gemini-3-flash-preview           [untested]
@@ -90,15 +95,17 @@ Open-Source Fast Models (via Together AI / Groq / self-hosted):
 # ACTIVE MODEL CONFIGURATION
 # =============================================================================
 
-# Scientific computing model - Opus proven better for domain-specific code
+# Scientific computing model - Sonnet 4.6 (current). Auto-resolves to the
+# latest 4.6 snapshot via litellm/Anthropic; pin a date suffix here if a
+# specific paper-grade run needs reproducibility.
 # Use for: simulation code, numerical methods, scientific APIs (S4, GROMACS, etc.)
-#SCIENTIFIC_MODEL = "anthropic/claude-opus-4-5-20251101"
-SCIENTIFIC_MODEL = "anthropic/claude-sonnet-4-20250514"
+#SCIENTIFIC_MODEL = "anthropic/claude-opus-4-7"
+SCIENTIFIC_MODEL = "anthropic/claude-sonnet-4-6"
 #SCIENTIFIC_MODEL = "xai/grok-4-1-fast-reasoning"
 
-# General coding model - Sonnet for implementation, debugging, research
+# General coding model - Sonnet 4.6 for implementation, debugging, research
 # Use for: sub-agents, general coding tasks, web research
-CODING_MODEL = "anthropic/claude-sonnet-4-20250514"
+CODING_MODEL = "anthropic/claude-sonnet-4-6"
 #CODING_MODEL = "xai/grok-code-fast-1"
 
 # Fast model for simple tasks - Haiku for speed and cost
@@ -106,14 +113,14 @@ CODING_MODEL = "anthropic/claude-sonnet-4-20250514"
 FAST_MODEL = "anthropic/claude-haiku-4-5-20251001"
 #FAST_MODEL = "xai/grok-3-mini"
 
-# Vision/Multimodal model for image analysis
+# Vision/Multimodal model for image analysis - Opus 4.7 (current)
 # Use for: scientific plots, microscopy, diagrams, data visualization analysis
-VISION_MODEL = "anthropic/claude-opus-4-5-20251101"
+VISION_MODEL = "anthropic/claude-opus-4-7"
 
 # Verification model - Used by the independent verifier subagent
 # This model has FRESH CONTEXT (no conversation history) and acts as a skeptical auditor.
 # User can change this to a different model for provider/bias and cost/quality tradeoffs.
-VERIFICATION_MODEL = "anthropic/claude-sonnet-4-20250514"
+VERIFICATION_MODEL = "anthropic/claude-sonnet-4-6"
 
 # Default for main agent - Opus for scientific work quality
 DEFAULT_MODEL = SCIENTIFIC_MODEL
