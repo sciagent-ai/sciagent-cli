@@ -112,6 +112,6 @@ The KDE shows the multimodal structure expected from a hot-aisle/cold-aisle layo
 
 ## Execution
 
-- **Solver wall-clock**: 258 s (1000 SIMPLE iterations, 8-rank MPI)
-- **Cloud instance**: AWS m6i.2xlarge (us-east-1), torn down on completion
-- **Services**: `openfoam-swak4foam-2012` (containerized OpenFOAM v2012 + swak4Foam for groovyBC rack inlets)
+- **Time**: ~17 minutes (258 s solver wall-clock + meshing + materialization + KDE)
+- **Iterations**: 119 agent turns
+- **Services**: `openfoam-swak4foam-2012` (containerized OpenFOAM v2012 + swak4Foam, run on a SkyPilot AWS m6i.2xlarge cluster, 8-rank MPI)
