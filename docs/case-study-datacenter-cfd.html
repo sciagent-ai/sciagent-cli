@@ -170,36 +170,35 @@
 
   <span class="paper-badge">OpenFOAM Journal Vol. 3 (2021)</span>
 
-  <p><strong>Paper:</strong> Barestrand et al., "Datacenter CFD with OpenFOAM," <em>OpenFOAM Journal</em> v3 (2021), <a href="https://doi.org/10.51560/ofj.v3.59">doi:10.51560/ofj.v3.59</a>.</p>
+  <p><strong>Paper:</strong> Barestrand et al., "Modelling Convective Heat Transfer of Air in a Data Center using OpenFOAM — Evaluation of the Boussinesq Buoyancy Approximation," <em>OpenFOAM Journal</em> v3 (2021), <a href="https://doi.org/10.51560/ofj.v3.59">doi:10.51560/ofj.v3.59</a>.</p>
 
   <h3>The Challenge</h3>
-  <p>Reproduce Fig 3 of the paper, the room-temperature distribution in a datacenter, starting from the manuscript PDF and the author's OpenFOAM case bundle. Run the heavy CFD on a cloud cluster (not the laptop), then analyze the saved fields locally. Cap the SIMPLE solver at 500 iterations so cloud wall-clock stays under ~10 minutes; the KDE shape is the target, not residual convergence.</p>
+  <p>Reproduce Fig 3 of the paper, the volume-weighted KDE of room temperature in a datacenter, starting from the manuscript PDF and the author's OpenFOAM case bundle. Run the heavy CFD on a cloud cluster (not the laptop), then analyze the saved fields locally. Cap the SIMPLE solver at 1000 iterations so cloud wall-clock stays under ~60 minutes on a small instance; the KDE shape is the target, not residual convergence.</p>
 
   <h3>Prompt Given to SciAgent</h3>
-  <div class="prompt-box">Quick reproduction of Fig 3 (typical Boussinesq, 62K grid). Cap the SIMPLE
-solver at 500 iterations so wallclock stays under ~10 min on a small
-instance. The KDE shape is what matters, not residual convergence.
+  <div class="prompt-box">Reproduce Fig 3 (typical Boussinesq, 62K grid) from the manuscript on
+datacenter temperature distribution. Cap the solver at 1000 iterations
+so wall clock stays under ~60 min on a small instance. The KDE shape
+is what matters, not residual convergence.
 
 Identify the OpenFOAM environment and boundary conditions from
 Manuscript.pdf and the case files in the project folder.
 
-When the solver finishes, pull the final time-step T field, the solver
-log, and the KDE plot back into the project folder. Then sky down the
-cluster, do this even on error.</div>
+Pull all intermediate and final results back into the project folder.</div>
 
   <h3>What SciAgent Did Autonomously</h3>
 
   <ul class="phase-list">
-    <li><strong>Phase 1: Paper Analysis</strong> - Read manuscript and case bundle, extracted solver (buoyantBoussinesqSimpleFoam), turbulence model (k-epsilon), rack boundary conditions, supply temperature (291.45 K), and the volume-weighted KDE bandwidth from the author's plotting script. No human walkthrough of the physics.</li>
-    <li><strong>Phase 2: Stage Modified Case</strong> - Wrote a coarse blockMeshDict (47x24x50, ~62k cells after snappy) and a 500-iteration controlDict; everything else preserved verbatim from the paper's steady_incompressible case.</li>
-    <li><strong>Phase 3: Cloud Compute</strong> - Stood up a fresh compute cluster on demand, ran the meshing and solver pipeline on rented CPUs, materialized the result fields back to the project folder, and tore the cluster down afterwards. ~2.5 min wall-clock for 500 SIMPLE iterations.</li>
-    <li><strong>Phase 4: Local KDE Analysis</strong> - Parsed the saved temperature and cell-volume fields (61,808 cells), computed the volume-weighted Gaussian KDE with the paper's bandwidth, and rendered the plot. Same fields can be re-analyzed without re-running the solver.</li>
+    <li><strong>Phase 1: Paper Analysis</strong> - Read manuscript and case bundle, extracted solver (buoyantBoussinesqSimpleFoam), turbulence model (k-epsilon), rack boundary conditions, supply temperature (291.45 K / 18.3 C), the "c" coarse 140 mm grid (47x24x50), and the volume-weighted KDE bandwidth from the author's plotting script. No human walkthrough of the physics.</li>
+    <li><strong>Phase 2: Stage Modified Case</strong> - Wrote a coarse blockMeshDict (~56k background cells, ~62k after snappy) and a 1000-iteration controlDict; everything else preserved verbatim from the paper's steady_incompressible case.</li>
+    <li><strong>Phase 3: Cloud Compute</strong> - Stood up a fresh AWS m6i.2xlarge (8 vCPU, 32 GB) cluster on demand, ran the meshing and 8-rank MPI solver pipeline, materialized the result fields and logs back via S3-backed workspace, and tore the cluster down afterwards. 258 s wall-clock for 1000 SIMPLE iterations.</li>
+    <li><strong>Phase 4: Local KDE Analysis</strong> - Parsed the saved temperature and cell-volume fields (61,927 cells), computed the volume-weighted Gaussian KDE with the paper's bandwidth (covariance_factor = 0.1), and rendered the plot. Same fields can be re-analyzed without re-running the solver.</li>
   </ul>
 
   <div class="workflow-diagram">
-Paper + cases -> Stage local -> Cloud cluster
+Paper + cases -> Stage local -> AWS m6i.2xlarge
                                      |
-            meshing -> solver (500 iter) -> T, V, logs
+            meshing -> solver (1000 iter, 8-rank MPI) -> T, V, logs
                                      |
                        materialize -> local KDE -> Fig 3</div>
 
@@ -217,17 +216,17 @@ Paper + cases -> Stage local -> Cloud cluster
       </tr>
     </thead>
     <tbody>
-      <tr><td>T range</td><td>291.08 to 302.89 K</td><td>~291 to 303 K</td></tr>
+      <tr><td>Cell count</td><td>61,927</td><td>~62,000</td></tr>
+      <tr><td>T range</td><td>290.92 to 302.93 K</td><td>~291 to 303 K</td></tr>
       <tr><td>Supply T</td><td>291.45 K</td><td>291.45 K</td></tr>
-      <tr><td>KDE peak T</td><td>291.47 K</td><td>~292 K</td></tr>
-      <tr><td>KDE peak density</td><td>30.84 m^3</td><td>~30 m^3</td></tr>
-      <tr><td>T_mean (vol-weighted)</td><td>295.40 K</td><td>~295 to 296 K</td></tr>
-      <tr><td>Cell count</td><td>61,808</td><td>~62,000</td></tr>
+      <tr><td>T_mean (vol-weighted)</td><td>296.21 K (23.06 C)</td><td>~295 to 296 K</td></tr>
+      <tr><td>Total domain volume</td><td>117.59 m^3</td><td>117.6 m^3</td></tr>
+      <tr><td>KDE integral</td><td>117.59 m^3 (self-consistent)</td><td>—</td></tr>
     </tbody>
   </table>
 
   <div class="highlight-box">
-    <strong>Key Finding:</strong> The KDE shape matches qualitatively: dominant peak at the supply temperature, broad tail to ~303 K from hot-aisle recirculation. The broadened intermediate-temperature volume is the numerical diffusion at this resolution that the paper describes.
+    <strong>Key Finding:</strong> The KDE shows the multimodal structure expected from a hot-aisle/cold-aisle layout: a sharp cold-supply peak near 291.5 K, an intermediate mixing region, and a warm exhaust peak near 298 K. Qualitative agreement with the paper's "c: 62k" curve is what the figure tests; residual convergence is intentionally not the gate at this iteration cap.
   </div>
 
   <h4>Mesh Quality (checkMesh)</h4>
@@ -236,9 +235,11 @@ Paper + cases -> Stage local -> Cloud cluster
       <tr><th>Metric</th><th>Value</th></tr>
     </thead>
     <tbody>
-      <tr><td>Cells</td><td>61,808</td></tr>
+      <tr><td>Cells</td><td>61,927</td></tr>
+      <tr><td>Total volume</td><td>117.59 m^3</td></tr>
       <tr><td>Max non-orthogonality</td><td>48.1 deg</td></tr>
       <tr><td>Mean non-orthogonality</td><td>4.0 deg</td></tr>
+      <tr><td>Max skewness</td><td>2.75</td></tr>
       <tr><td>Mesh OK</td><td>yes</td></tr>
     </tbody>
   </table>
@@ -252,10 +253,10 @@ Paper + cases -> Stage local -> Cloud cluster
     </div>
     <div class="validation-card pass">
       <strong>Coarse grid ~62k</strong><br>
-      <span class="status-pass">PASS (61,808)</span>
+      <span class="status-pass">PASS (61,927)</span>
     </div>
     <div class="validation-card pass">
-      <strong>500-iter cap</strong><br>
+      <strong>1000-iter cap</strong><br>
       <span class="status-pass">PASS</span>
     </div>
     <div class="validation-card pass">
@@ -264,6 +265,10 @@ Paper + cases -> Stage local -> Cloud cluster
     </div>
     <div class="validation-card pass">
       <strong>KDE shape vs Fig 3</strong><br>
+      <span class="status-pass">PASS</span>
+    </div>
+    <div class="validation-card pass">
+      <strong>KDE integral = volume</strong><br>
       <span class="status-pass">PASS</span>
     </div>
     <div class="validation-card pass">
@@ -276,32 +281,31 @@ Paper + cases -> Stage local -> Cloud cluster
 
   <div class="metrics-row">
     <div class="metric-box">
-      <div class="value">14 min</div>
-      <div class="label">Total Time</div>
+      <div class="value">258 s</div>
+      <div class="label">Solver Wall-Clock</div>
     </div>
     <div class="metric-box">
-      <div class="value">64</div>
-      <div class="label">Agent Turns</div>
+      <div class="value">1000</div>
+      <div class="label">SIMPLE Iterations</div>
     </div>
     <div class="metric-box">
-      <div class="value">200</div>
-      <div class="label">Lines of Code</div>
+      <div class="value">8</div>
+      <div class="label">MPI Ranks</div>
     </div>
     <div class="metric-box">
-      <div class="value">2</div>
-      <div class="label">Debug Iterations</div>
+      <div class="value">m6i.2xlarge</div>
+      <div class="label">AWS Instance</div>
     </div>
   </div>
 
   <h3>Generated Artifacts</h3>
   <ul>
-    <li><code>_outputs/fig3_kde.png</code> - Fig 3 reproduction (volume-weighted KDE)</li>
-    <li><code>_outputs/fig3_kde_stats.json</code> - n_cells, T range, peak, T_mean</li>
-    <li><code>_outputs/case_staged/</code> - modified blockMeshDict and capped controlDict</li>
-    <li><code>_outputs/fig3_Tfield/T</code> - final temperature field</li>
-    <li><code>_outputs/fig3_Tfield/V</code> - cell volumes</li>
-    <li><code>_outputs/fig3_Tfield/solver.log</code> - SIMPLE solver log (500 iterations)</li>
-    <li><code>_outputs/fig3_Tfield/checkMesh.log</code> - mesh quality report</li>
+    <li><code>_outputs/fig3_kde.png</code> - Fig 3 reproduction, 150 dpi raster</li>
+    <li><code>_outputs/fig3_kde.pdf</code> - Fig 3 reproduction, vector</li>
+    <li><code>_outputs/fig3_metadata.json</code> - n_cells, T range, T_mean, KDE settings, solver, OF version, DOI</li>
+    <li><code>_outputs/workspace/fig3_run/T_V.csv</code> - 61,927-row table (T [K], V [m^3])</li>
+    <li><code>_outputs/workspace/fig3_run/fields/</code> - T, U, p_rgh, V, k, epsilon, nut, yPlus, turbulence fields</li>
+    <li><code>_outputs/workspace/fig3_run/logs/</code> - log_blockMesh, log_snappy, log_checkMesh, log_solver, log_postProcess</li>
   </ul>
 
 </div>

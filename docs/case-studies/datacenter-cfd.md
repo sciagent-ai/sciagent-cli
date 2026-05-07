@@ -7,28 +7,27 @@ nav_order: 3
 
 # Simulating Datacenter Temperature Distribution with OpenFOAM
 
-**Paper**: Barestrand et al., "Datacenter CFD with OpenFOAM"
+**Paper**: Barestrand et al., "Modelling Convective Heat Transfer of Air in a Data Center using OpenFOAM — Evaluation of the Boussinesq Buoyancy Approximation"
 **Published**: OpenFOAM Journal, Vol. 3 (2021), [doi:10.51560/ofj.v3.59](https://doi.org/10.51560/ofj.v3.59)
 
 ---
 
 ## The Challenge
 
-Reproduce Fig 3 of the paper, the room-temperature distribution in a datacenter, starting from the manuscript PDF and the author's OpenFOAM case bundle. Run the heavy CFD on a cloud cluster (not the laptop), then analyze the saved fields locally. Cap the SIMPLE solver at 500 iterations so cloud wall-clock stays under ~10 minutes; the KDE shape is the target, not residual convergence.
+Reproduce Fig 3 of the paper, the volume-weighted KDE of room temperature in a datacenter, starting from the manuscript PDF and the author's OpenFOAM case bundle. Run the heavy CFD on a cloud cluster (not the laptop), then analyze the saved fields locally. Cap the SIMPLE solver at 1000 iterations so cloud wall-clock stays under ~60 minutes on a small instance; the KDE shape is the target, not residual convergence.
 
 ## Prompt
 
 ```
-Quick reproduction of Fig 3 (typical Boussinesq, 62K grid). Cap the SIMPLE
-solver at 500 iterations so wallclock stays under ~10 min on a small
-instance. The KDE shape is what matters, not residual convergence.
+Reproduce Fig 3 (typical Boussinesq, 62K grid) from the manuscript on
+datacenter temperature distribution. Cap the solver at 1000 iterations
+so wall clock stays under ~60 min on a small instance. The KDE shape
+is what matters, not residual convergence.
 
 Identify the OpenFOAM environment and boundary conditions from
 Manuscript.pdf and the case files in the project folder.
 
-When the solver finishes, pull the final time-step T field, the solver
-log, and the KDE plot back into the project folder. Then sky down the
-cluster, do this even on error.
+Pull all intermediate and final results back into the project folder.
 ```
 
 ## What SciAgent Did
@@ -41,25 +40,26 @@ Read the manuscript and the author-provided case bundle to extract the simulatio
 | Solver | buoyantBoussinesqSimpleFoam | Manuscript + case files |
 | Turbulence | k-epsilon | constant/turbulenceProperties |
 | Rack BCs | outletMappedUniformInletHeatAddition | 0.org/T |
-| Supply T | 291.45 K | Manuscript Sec. 2 |
+| Supply T | 291.45 K (18.3 C) | Manuscript Sec. 2 |
+| Grid | "c" coarse, 140 mm, Nx=47 x Ny=24 x Nz=50 | Manuscript Table |
 | KDE bandwidth | covariance_factor = 0.1 | kdePlot.py |
 
 **Phase 2: Stage Modified Case**
-Wrote a coarse blockMeshDict (47x24x50, ~62k cells after snappyHexMesh) and a 500-iteration controlDict. Everything else preserved verbatim from the paper's steady_incompressible case.
+Wrote the coarse blockMeshDict (~56k background cells, ~62k after snappyHexMesh) and a 1000-iteration controlDict. Everything else preserved verbatim from the paper's steady_incompressible case.
 
 **Phase 3: Cloud Compute**
-Stood up a fresh compute cluster on demand and ran the meshing + solver pipeline there:
+Stood up a fresh AWS m6i.2xlarge (8 vCPU, 32 GB) cluster on demand and ran the meshing and solver pipeline there with 8-rank MPI:
 
 ```
-blockMesh -> snappyHexMesh -> checkMesh -> buoyantBoussinesqSimpleFoam
-                                                     |
-                                       writeCellVolumes -> T, V, logs
+blockMesh -> surfaceFeatureExtract -> snappyHexMesh -> checkMesh
+        -> decomposePar -> buoyantBoussinesqSimpleFoam (parallel)
+        -> reconstructPar -> writeCellVolumes -> T, V, logs
 ```
 
-500 SIMPLE iterations completed in ~2.5 min wall-clock. Result fields materialized to the local project folder; cluster torn down afterwards.
+1000 SIMPLE iterations completed in 258 s wall-clock. Result fields and logs materialized to the local project folder via S3-backed workspace; cluster torn down afterwards.
 
 **Phase 4: Local KDE Analysis**
-Parsed the saved temperature and cell-volume fields (61,808 cells), computed the volume-weighted Gaussian KDE with the paper's bandwidth, and rendered the plot. Sim and analysis as separate stages means the same fields can be re-analyzed (different bandwidth, different slice) without re-running the solver.
+Parsed the saved temperature and cell-volume fields (61,927 cells), computed the volume-weighted Gaussian KDE with the paper's bandwidth (covariance_factor = 0.1), and rendered the plot. Sim and analysis as separate stages means the same fields can be re-analyzed (different bandwidth, different slice) without re-running the solver.
 
 ## Results
 
@@ -69,22 +69,24 @@ Parsed the saved temperature and cell-volume fields (61,808 cells), computed the
 
 | Metric | This run | Paper (c: 62k) |
 |--------|----------|----------------|
-| T range | 291.08 to 302.89 K | ~291 to 303 K |
+| Cell count | 61,927 | ~62,000 |
+| T range | 290.92 to 302.93 K | ~291 to 303 K |
 | Supply T | 291.45 K | 291.45 K |
-| KDE peak T | 291.47 K | ~292 K |
-| KDE peak density | 30.84 m^3 | ~30 m^3 |
-| T_mean (vol-weighted) | 295.40 K | ~295 to 296 K |
-| Cell count | 61,808 | ~62,000 |
+| T_mean (vol-weighted) | 296.21 K (23.06 C) | ~295 to 296 K |
+| Total domain volume | 117.59 m^3 | 117.6 m^3 |
+| KDE integral | 117.59 m^3 (self-consistent) | - |
 
-**KDE shape matches qualitatively**: dominant peak at the supply temperature, broad tail to ~303 K from hot-aisle recirculation, with the broadened intermediate-temperature volume the paper attributes to numerical diffusion at this resolution.
+The KDE shows the multimodal structure expected from a hot-aisle/cold-aisle layout: a sharp cold-supply peak near 291.5 K, an intermediate mixing region, and a warm exhaust peak near 298 K. The qualitative agreement with the paper's "c: 62k" curve is what the figure tests; residual convergence is intentionally not the gate at this iteration cap.
 
 ### Mesh Quality (checkMesh)
 
 | Metric | Value |
 |--------|-------|
-| Cells | 61,808 |
+| Cells | 61,927 |
+| Total volume | 117.59 m^3 |
 | Max non-orthogonality | 48.1 deg |
 | Mean non-orthogonality | 4.0 deg |
+| Max skewness | 2.75 |
 | Mesh OK | yes |
 
 ## Validation
@@ -92,24 +94,24 @@ Parsed the saved temperature and cell-volume fields (61,808 cells), computed the
 | Check | Status |
 |-------|--------|
 | Solver matches paper | PASS |
-| Coarse grid ~62k cells | PASS (61,808) |
-| 500-iter cap honored | PASS |
+| Coarse grid ~62k cells | PASS (61,927) |
+| 1000-iter cap honored | PASS |
 | Boundary conditions match manuscript | PASS |
 | KDE shape vs Fig 3 | PASS |
+| KDE integral = total volume | PASS |
 | Cluster torn down on completion | PASS |
 
 ## Generated Artifacts
 
-- `_outputs/fig3_kde.png` - Fig 3 reproduction
-- `_outputs/fig3_kde_stats.json` - numerical summary (n_cells, T range, peak, T_mean)
-- `_outputs/case_staged/` - modified blockMeshDict and capped controlDict
-- `_outputs/fig3_Tfield/T` - final temperature field
-- `_outputs/fig3_Tfield/V` - cell volumes
-- `_outputs/fig3_Tfield/solver.log` - SIMPLE solver log (500 iterations)
-- `_outputs/fig3_Tfield/checkMesh.log` - mesh quality report
+- `_outputs/fig3_kde.png` - Fig 3 reproduction (150 dpi raster)
+- `_outputs/fig3_kde.pdf` - Fig 3 reproduction (vector)
+- `_outputs/fig3_metadata.json` - full provenance (n_cells, T range, peak, T_mean, KDE settings, solver, OF version, DOI)
+- `_outputs/workspace/fig3_run/T_V.csv` - 61,927-row table (T [K], V [m^3])
+- `_outputs/workspace/fig3_run/fields/` - T, U, p_rgh, V, k, epsilon, nut, yPlus, turbulence fields
+- `_outputs/workspace/fig3_run/logs/` - log_blockMesh, log_snappy, log_checkMesh, log_solver, log_postProcess
 
 ## Execution
 
-- **Time**: ~14 minutes
-- **Iterations**: 64 agent turns
-- **Services**: `openfoam-swak4foam-2012` (containerized OpenFOAM v2012 + swak4foam, run on a SkyPilot c6i.2xlarge cluster)
+- **Solver wall-clock**: 258 s (1000 SIMPLE iterations, 8-rank MPI)
+- **Cloud instance**: AWS m6i.2xlarge (us-east-1), torn down on completion
+- **Services**: `openfoam-swak4foam-2012` (containerized OpenFOAM v2012 + swak4Foam for groovyBC rack inlets)
