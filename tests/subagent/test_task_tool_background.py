@@ -133,7 +133,7 @@ def test_task_tool_schema_includes_background_param():
     """The LLM-facing schema must advertise the background parameter; the
     backgrounding feature is invisible to the LLM otherwise."""
     schema = TaskTool(SubAgentOrchestrator()).to_schema()
-    props = schema["input_schema"]["properties"]
+    props = schema["parameters"]["properties"]
     assert "background" in props
     assert props["background"]["type"] == "boolean"
     # Behavioral guidance lives in the top-level description, NOT in the

@@ -138,7 +138,7 @@ class BaseTool:
         return {
             "name": self.name,
             "description": self.description,
-            "input_schema": self.parameters
+            "parameters": self.parameters
         }
 
 
