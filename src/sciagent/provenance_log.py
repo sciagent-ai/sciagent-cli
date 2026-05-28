@@ -5,7 +5,12 @@ Writes session-scoped events to ~/.sciagent/sessions/<session_id>/provenance.jso
 so a verifier — including one driven by a different LLM provider — can audit
 a session after the fact using only the on-disk record.
 
-Schema (schema_version="1") is documented in docs/provenance_log_schema.md.
+Schema (schema_version="2") is documented in docs/provenance_log_schema.md.
+
+Schema v2 (H3) adds optional cost / token / model fields on ``tool_result``
+events and optional ``cost_usd`` on ``compute_job_status_changed`` events.
+Fields default to ``None`` so v1 readers continue to parse v2 lines; v2
+readers see ``None`` for cost on v1 lines.
 The seven event kinds are:
 
   - tool_call               (an atomic-tool invocation began)
@@ -44,7 +49,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"
 
 # Byte budgets. Documented in docs/provenance_log_schema.md alongside the
 # truncation envelope shape. The line cap is advisory — if a load-bearing
@@ -234,8 +239,18 @@ class ProvenanceLog:
         error: Optional[str],
         duration_ms: int,
         actor: Optional[str] = None,
+        cost_usd: Optional[float] = None,
+        tokens_in: Optional[int] = None,
+        tokens_out: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> str:
-        """Emit a tool_result event right after tool dispatch returns."""
+        """Emit a tool_result event right after tool dispatch returns.
+
+        The optional ``cost_usd`` / ``tokens_in`` / ``tokens_out`` / ``model``
+        fields (schema v2, H3) carry per-call LLM usage when the tool
+        wrapped a litellm.completion call. They are passed through verbatim;
+        missing values stay ``None`` so v1 readers see no shape change.
+        """
         body = {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
@@ -243,6 +258,10 @@ class ProvenanceLog:
             "output_summary": output_summary,
             "error": error,
             "duration_ms": int(duration_ms),
+            "cost_usd": cost_usd,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "model": model,
         }
         return self._write_event("tool_result", body, actor=actor)
 
@@ -350,6 +369,7 @@ class ProvenanceLog:
         sky_status_raw: Optional[str] = None,
         error_preview: Optional[str] = None,
         log_file: Optional[str] = None,
+        cost_usd: Optional[float] = None,
     ) -> Optional[str]:
         """Emit a status transition.
 
@@ -357,6 +377,11 @@ class ProvenanceLog:
         the status matches the last value emitted in this process for
         this job_id (dedup is process-local; restart will re-emit current
         status with status_previous=null per the schema).
+
+        ``cost_usd`` (schema v2, H3) carries realized cloud cost when the
+        backend exposes it (e.g., on a terminal transition). Missing →
+        ``None`` so v1 readers see no shape change. Live aggregation across
+        clusters arrives in H6.
         """
         prev = self._status_memo.get(job_id)
         if prev == status:
@@ -369,6 +394,7 @@ class ProvenanceLog:
             "sky_status_raw": sky_status_raw,
             "error_preview": error_preview,
             "log_file": log_file,
+            "cost_usd": cost_usd,
         }
         event_id = self._write_event("compute_job_status_changed", body)
         self._status_memo[job_id] = status

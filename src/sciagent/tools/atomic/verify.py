@@ -155,12 +155,17 @@ def _summarize_compute_jobs(events: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 "seq": ev.get("seq"),
             }
         elif kind == "compute_job_status_changed":
+            # cost_usd is schema-v2 (H3): None on v1 logs, populated on v2
+            # transitions where the backend reported realized cloud cost.
+            # ev.get returns None when the field is absent — v1 logs pass
+            # through cleanly with no shape change for downstream readers.
             entry["status_transitions"].append({
                 "status": ev.get("status"),
                 "status_previous": ev.get("status_previous"),
                 "sky_status_raw": ev.get("sky_status_raw"),
                 "error_preview": ev.get("error_preview"),
                 "log_file": ev.get("log_file"),
+                "cost_usd": ev.get("cost_usd"),
                 "ts": ev.get("ts"),
                 "seq": ev.get("seq"),
             })

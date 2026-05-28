@@ -230,6 +230,18 @@ class LLMClient:
         self.reasoning_effort = reasoning_effort  # Extended thinking (Claude, Gemini, OpenAI o-series)
         self.max_retries = max_retries
         self.retry_base_delay = retry_base_delay
+        # Per-call usage snapshot from the most recent litellm.completion call.
+        # H3 (schema v2): callers — typically AgentLoop emitting a tool_result
+        # for a tool that wrapped this LLM call — read this dict to copy
+        # cost_usd / tokens_in / tokens_out / model into the provenance log.
+        # Values come straight from litellm's response (usage + _hidden_params);
+        # provider-specific shaping is litellm's job, not ours.
+        self._last_usage: Dict[str, Any] = {
+            "tokens_in": None,
+            "tokens_out": None,
+            "cost_usd": None,
+            "model": None,
+        }
 
         # Set API key if provided
         if api_key:
@@ -370,6 +382,24 @@ class LLMClient:
                     f"retry ({rate_limit_attempts}/{self.max_retries})..."
                 )
                 time.sleep(wait_time)
+
+    def _capture_last_usage(self, response: Any, call_kwargs: Dict[str, Any]) -> None:
+        """Stash per-call tokens / cost / model on ``self._last_usage``.
+
+        litellm exposes prompt/completion tokens on ``response.usage`` and
+        the computed dollar cost on ``response._hidden_params["response_cost"]``
+        for providers it supports. Missing fields stay ``None`` — we do NOT
+        recompute cost from static token × price tables here. Provider
+        branching belongs in litellm, not in sciagent.
+        """
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        resp_usage = getattr(response, "usage", None)
+        self._last_usage = {
+            "tokens_in": getattr(resp_usage, "prompt_tokens", None) if resp_usage else None,
+            "tokens_out": getattr(resp_usage, "completion_tokens", None) if resp_usage else None,
+            "cost_usd": hidden_params.get("response_cost"),
+            "model": call_kwargs.get("model"),
+        }
 
     def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -606,6 +636,10 @@ class LLMClient:
                     hidden = response._hidden_params or {}
                     if hidden.get("cache_hit"):
                         cache_info["litellm_cache_hit"] = True
+
+            # H3: capture per-call usage + litellm-computed response cost so
+            # the provenance log can record schema-v2 tool_result fields.
+            self._capture_last_usage(response, call_kwargs)
 
             # Extract reasoning/thinking content (works for Claude, Gemini, OpenAI o-series)
             reasoning_content = None

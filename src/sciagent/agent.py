@@ -1317,6 +1317,12 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                     else:
                         output_summary = result.output
                     duration_ms = int((time.monotonic() - call_started_monotonic) * 1000)
+                    # H3: copy the LLMClient's per-call usage snapshot onto
+                    # the tool_result event. The snapshot is whatever the
+                    # most recent litellm.completion call populated — the
+                    # turn that produced this tool_call. cost_rollup.py
+                    # (and later H6's RunCostTracker) sum these.
+                    last_usage = getattr(self.llm, "_last_usage", None) or {}
                     plog.emit_tool_result(
                         tool_call_id=tc.id,
                         tool_name=tc.name,
@@ -1325,6 +1331,10 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         error=result.error,
                         duration_ms=duration_ms,
                         actor=self.config.model,
+                        cost_usd=last_usage.get("cost_usd"),
+                        tokens_in=last_usage.get("tokens_in"),
+                        tokens_out=last_usage.get("tokens_out"),
+                        model=last_usage.get("model"),
                     )
                 except Exception:
                     pass  # Best-effort.
