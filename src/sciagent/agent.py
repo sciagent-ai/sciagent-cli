@@ -42,12 +42,12 @@ class AgentConfig:
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
     # Cumulative prompt+completion tokens before the loop forces a wrap-up.
     # This is a sciagent-internal soft budget — not a provider hard limit.
-    # 0 disables the check entirely. The active model's profile
-    # (`session_soft_budget`) overrides this when set via the
+    # 0 disables the check entirely. The active model's profile carries the
+    # same field and overrides this when set via the
     # ``SCIAGENT_SESSION_SOFT_BUDGET`` env var. Per-call context-size
     # pressure is handled independently by ``state.compress_token_threshold``,
     # which is itself derived from the model's context window.
-    max_session_tokens: int = 4_000_000
+    session_soft_budget: int = 4_000_000
     # Fraction of the model's context window above which the agent triggers
     # compaction. None means "use the profile default" (0.6 today, or whatever
     # the active model's profile carries). Precedence: env
@@ -137,7 +137,7 @@ class AgentLoop:
         # fallback, but if SCIAGENT_SESSION_SOFT_BUDGET is set in env, the
         # profile carries it and we honor it here.
         if self.profile.session_soft_budget is not None:
-            self.config.max_session_tokens = self.profile.session_soft_budget
+            self.config.session_soft_budget = self.profile.session_soft_budget
 
         # Optional override of the compaction-trigger fraction from
         # AgentConfig. The profile already carries the env value
@@ -1455,7 +1455,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         the user wrap_up / continue / extend. Returns None to keep going,
         or an action string ('wrap_up', 'continue', or new budget as string).
         """
-        budget = self.config.max_session_tokens
+        budget = self.config.session_soft_budget
         if budget <= 0:
             return None  # Disabled
 
@@ -1622,9 +1622,9 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         elif action == 'continue':
                             pass
                         elif action.isdigit():
-                            self.config.max_session_tokens = int(action)
+                            self.config.session_soft_budget = int(action)
                             self._token_limit_checked = False
-                            print(f"   Raised token budget to {self.config.max_session_tokens:,}")
+                            print(f"   Raised token budget to {self.config.session_soft_budget:,}")
 
                 # Drain background monitor events (push-style notifications
                 # from the `monitor` tool). Each pending stdout line lands

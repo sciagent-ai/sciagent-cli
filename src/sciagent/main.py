@@ -27,7 +27,6 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pydantic.*")
 
 import os
 import sys
-import argparse
 
 # Strip macOS MallocStackLogging* env vars before any subprocess spawns.
 # These are often left in the user's shell by Xcode / Instruments / Activity
@@ -124,127 +123,6 @@ from .defaults import DEFAULT_MODEL
 from .startup import show_startup_banner, check_configuration_ready, check_optional_keys
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description="SciAgent - LLM-Agnostic Agent for Scientific and Engineering Workflows",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-    # Run a task in a specific project directory
-    sciagent --project-dir ~/my-project "Create a Python script that fetches weather data"
-
-    # Run in current directory (if not sciagent's own directory)
-    sciagent "Fix the bug in main.py"
-
-    # Interactive mode
-    sciagent --project-dir ~/my-project --interactive
-
-    # Use a different model
-    sciagent --project-dir ~/my-project --model openai/gpt-4o "Analyze this code"
-
-    # Load custom tools
-    sciagent --project-dir ~/my-project --load-tools ./my_tools.py "Use my custom tool"
-
-    # Enable sub-agents
-    sciagent --project-dir ~/my-project --subagents "Research this codebase and write tests"
-
-    # Resume a session
-    sciagent --resume abc123def456
-"""
-    )
-    
-    parser.add_argument(
-        "task",
-        nargs="?",
-        help="Task to execute (required unless --interactive or --resume)"
-    )
-    
-    parser.add_argument(
-        "-i", "--interactive",
-        action="store_true",
-        help="Run in interactive REPL mode"
-    )
-    
-    parser.add_argument(
-        "-m", "--model",
-        default=DEFAULT_MODEL,
-        help=f"Model to use (default: {DEFAULT_MODEL})"
-    )
-    
-    parser.add_argument(
-        "-p", "--project-dir",
-        default=None,
-        help="Project directory where generated code will be placed (required, or use current dir if safe)"
-    )
-    
-    parser.add_argument(
-        "-t", "--load-tools",
-        metavar="PATH",
-        help="Load additional tools from a Python module"
-    )
-    
-    parser.add_argument(
-        "-s", "--subagents",
-        action="store_true",
-        help="Enable workflow tool for full DAG execution (TaskTool is always available)"
-    )
-    
-    parser.add_argument(
-        "--resume",
-        metavar="SESSION_ID",
-        help="Resume a previous session"
-    )
-    
-    parser.add_argument(
-        "--list-sessions",
-        action="store_true",
-        help="List available sessions to resume"
-    )
-    
-    parser.add_argument(
-        "-v", "--verbose",
-        action="store_true",
-        default=True,
-        help="Verbose output (default: True)"
-    )
-    
-    parser.add_argument(
-        "-q", "--quiet",
-        action="store_true",
-        help="Quiet mode (minimal output)"
-    )
-    
-    parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=120,
-        help="Maximum agent loop iterations (default: 120)"
-    )
-    
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.0,
-        help="LLM temperature (default: 0.0)"
-    )
-    
-    parser.add_argument(
-        "--system-prompt",
-        metavar="PATH",
-        help="Path to custom system prompt file"
-    )
-
-    parser.add_argument(
-        "--skills-dir",
-        metavar="PATH",
-        type=Path,
-        default=None,
-        help="Directory containing skill definitions (SKILL.md files)"
-    )
-
-    return parser.parse_args()
-
-
 def get_package_dir() -> Path:
     """Get the directory where the sciagent package is installed."""
     return Path(__file__).parent.resolve()
@@ -278,10 +156,24 @@ def validate_project_dir(project_dir: str) -> Path:
 
 
 def main():
-    args = parse_args()
+    """Package entry-point. Delegates to the cli dispatcher (sciagent.cli)."""
+    from .cli import main as cli_main
+    sys.exit(cli_main())
+
+
+def run_from_cli(args):
+    """Execute a `sciagent run` invocation from the cli dispatcher.
+
+    ``args`` is the argparse Namespace produced by sciagent.cli's ``run``
+    subparser. Resolves the layered SciagentConfig, then applies the same
+    setup the pre-H1 main() did (project dir validation, banner, tools,
+    SubAgentOrchestrator + TaskTool, optional WorkflowTool, AgentLoop, signal
+    handlers, session resume).
+    """
+    from .config import ConfigError, load_config
 
     # Handle list sessions
-    if args.list_sessions:
+    if getattr(args, "list_sessions", False):
         manager = StateManager()
         sessions = manager.list_sessions()
         if not sessions:
@@ -291,46 +183,61 @@ def main():
             print("-" * 60)
             for s in sessions:
                 print(f"  {s['session_id']}  |  {s['updated_at'][:19]}  |  {s['task_count']} tasks")
-        return
-    
-    # Validate args
-    if not args.task and not args.interactive and not args.resume:
-        print("Error: Must provide a task, use --interactive, or --resume")
-        sys.exit(1)
-    
-    # Verbose setting
+        return 0
+
+    # Legacy: support both `--task TXT` and the bare positional form.
+    task = args.task or getattr(args, "task_positional", None)
+
+    if not task and not args.interactive and not args.resume:
+        print("Error: Must provide --task, --interactive, or --resume")
+        return 1
+
+    try:
+        sci_cfg = load_config(
+            explicit_path=args.config,
+            project_dir=Path(args.project_dir) if args.project_dir else None,
+            overrides=args.overrides,
+        )
+    except ConfigError as exc:
+        print(f"config error: {exc}", file=sys.stderr)
+        return 2
+
+    # Legacy CLI flags layer on top of the resolved config (None means
+    # "leave the config value alone"). Matches the documented contract that
+    # --config / --set are the new ablation surface; legacy flags still win
+    # when explicitly passed because they're the user's most-recent intent.
+    if args.model is not None:
+        sci_cfg.agent.model = args.model
+    if args.max_iterations is not None:
+        sci_cfg.agent.max_iterations = args.max_iterations
+    if args.temperature is not None:
+        sci_cfg.agent.temperature = args.temperature
+
     verbose = not args.quiet and args.verbose
+    sci_cfg.agent.verbose = verbose
 
     # Resolve and validate project directory
     project_dir_arg = args.project_dir or os.getcwd()
     project_dir = validate_project_dir(project_dir_arg)
-
-    # Create project directory if it doesn't exist
     project_dir.mkdir(parents=True, exist_ok=True)
-
-    # Project directory is shown in startup banner
+    sci_cfg.agent.working_dir = str(project_dir)
 
     # Load custom system prompt if provided
     system_prompt = None
     if args.system_prompt:
         system_prompt = Path(args.system_prompt).read_text()
 
-    # Validate skills directory if provided
     skills_dir = args.skills_dir
     if skills_dir and not skills_dir.exists():
         print(f"Warning: Skills directory not found: {skills_dir}")
         skills_dir = None
 
-    # Create tool registry (with skills if available)
     tools = create_default_registry(str(project_dir), skills_dir=skills_dir)
-    
-    # Load additional tools if specified
     if args.load_tools:
         tools.load_from_module(args.load_tools)
 
-    # Show startup banner with configuration status
     show_startup_banner(
-        model=args.model,
+        model=sci_cfg.agent.model,
         project_dir=project_dir,
         interactive=args.interactive,
         verbose=verbose,
@@ -338,41 +245,44 @@ def main():
         subagents=args.subagents,
     )
 
-    # Check configuration and warn about issues
-    is_ready, issues = check_configuration_ready(args.model)
+    is_ready, issues = check_configuration_ready(sci_cfg.agent.model)
     if not is_ready and not args.quiet:
         for issue in issues:
             print(f"Error: {issue}")
         print()
 
-    # Show optional key recommendations
     if verbose and not args.quiet:
-        recommendations = check_optional_keys()
-        # Only show on first run or interactive - don't spam every time
+        check_optional_keys()
 
-    # Always create orchestrator and register TaskTool (subagents always available)
     orchestrator = SubAgentOrchestrator(
         tools=tools,
-        working_dir=str(project_dir)
+        working_dir=str(project_dir),
     )
+
+    # Apply the verifier-model override to the SubAgentRegistry. The
+    # TaskOrchestrator (used by WorkflowTool) does the same mutation when it
+    # constructs, but the verifier subagent can also be spawned via TaskTool
+    # without a TaskOrchestrator in the loop — so mirror the mutation here so
+    # both code paths honor the configured verifier_model.
+    if sci_cfg.orchestrator.verifier_model:
+        verifier_cfg = orchestrator.registry.get("verifier")
+        if verifier_cfg is not None:
+            verifier_cfg.model = sci_cfg.orchestrator.verifier_model
+
     tools.register(TaskTool(orchestrator))
 
-    # --subagents flag adds WorkflowTool for full DAG execution
     if args.subagents:
-        tools.register(WorkflowTool(orchestrator, str(project_dir)))
+        tools.register(
+            WorkflowTool(
+                orchestrator,
+                str(project_dir),
+                orchestrator_config=sci_cfg.orchestrator,
+            )
+        )
 
-    # Build system prompt from modular files
     final_system_prompt = system_prompt or build_system_prompt(
         working_dir=str(project_dir),
         registry_path=str(Path(__file__).parent / "services" / "registry.yaml"),
-    )
-
-    config = AgentConfig(
-        model=args.model,
-        working_dir=str(project_dir),
-        verbose=verbose,
-        max_iterations=args.max_iterations,
-        temperature=args.temperature
     )
 
     # Main agent gets a trimmed view: compute_* tools are reachable only
@@ -385,48 +295,35 @@ def main():
         exclude={"compute_run", "compute_exec", "compute_cluster"}
     )
 
-    agent = AgentLoop(config=config, tools=main_tools, system_prompt=final_system_prompt)
+    agent = AgentLoop(config=sci_cfg.agent, tools=main_tools, system_prompt=final_system_prompt)
 
-    # SIGTERM cleanup. SIGINT is handled inside AgentLoop (interrupts the
-    # current run, drops back to the REPL); SIGTERM means the supervisor /
-    # init / a `kill <pid>` wants this process *gone*, so we down the
-    # session's clusters before exiting. SIGKILL is uncatchable — for that
-    # path the orphan sweep at the next sciagent startup is the safety net.
-    # Installed once, never restored: this is process-lifetime cleanup.
     def _on_sigterm(signum, frame):
         try:
             agent.cleanup_session_clusters()
         finally:
-            # Signal-style exit code (128 + signum) so a supervisor sees
-            # "killed by SIGTERM" rather than a clean 0.
             sys.exit(128 + int(signum))
     signal.signal(signal.SIGTERM, _on_sigterm)
 
-    # Connect parent's interrupt event to orchestrator for subagent cancellation
     orchestrator.parent_interrupt_event = agent._interrupt_event
 
-    # Resume session if specified
     if args.resume:
         if agent.load_session(args.resume):
             if verbose:
                 print(f"Resumed session: {args.resume}")
         else:
             print(f"Error: Session not found: {args.resume}")
-            sys.exit(1)
-    
-    # Run the agent. cleanup_session_clusters() runs on exit so any sky
-    # clusters launched during the session don't sit around billing while
-    # autostop counts down. run_interactive handles its own cleanup in a
-    # finally; for one-shot runs we wrap here.
+            return 1
+
     if args.interactive:
         agent.run_interactive()
     else:
         try:
-            result = agent.run(args.task)
+            result = agent.run(task)
             print("\nResult:")
             print(result)
         finally:
             agent.cleanup_session_clusters()
+    return 0
 
 
 if __name__ == "__main__":

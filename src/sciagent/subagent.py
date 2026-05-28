@@ -46,7 +46,7 @@ class SubAgentConfig:
     # Session token budget. Tighter than the AgentLoop default for compute-
     # heavy subagents whose tool results (sky logs, manifest snapshots) can
     # explode context per turn. 0 inherits AgentConfig default.
-    max_session_tokens: int = 0
+    session_soft_budget: int = 0
     allowed_tools: Optional[List[str]] = None  # None = all tools
     temperature: float = 0.0
 
@@ -57,7 +57,7 @@ class SubAgentConfig:
             "system_prompt": self.system_prompt,
             "model": self.model,
             "max_iterations": self.max_iterations,
-            "max_session_tokens": self.max_session_tokens,
+            "session_soft_budget": self.session_soft_budget,
             "allowed_tools": self.allowed_tools,
             "temperature": self.temperature
         }
@@ -165,8 +165,8 @@ class SubAgent:
         # Per-subagent token budget overrides AgentConfig's default. 0 means
         # inherit (e.g., the verifier with its 20-iter cap doesn't need a
         # tighter cap).
-        if config.max_session_tokens > 0:
-            agent_config.max_session_tokens = config.max_session_tokens
+        if config.session_soft_budget > 0:
+            agent_config.session_soft_budget = config.session_soft_budget
 
         # M1B provenance correlation: AgentLoop.__init__ calls
         # ComputeTool.set_shared_session(state.session_id) +
@@ -1211,7 +1211,7 @@ The parent will dispatch `analyze`, which picks its own container with the right
             # the model profile's compaction threshold (60% of context
             # window by default) — long-running work compacts mid-flight
             # rather than trying to fit everything in one window.
-            max_session_tokens=4_000_000,
+            session_soft_budget=4_000_000,
         ))
 
         # Analyze agent - peer to compute. Reads from the data tier (S3
@@ -1336,7 +1336,7 @@ If you couldn't produce a real artifact (missing input data + couldn't get it; l
 """ + OBSERVATION_PROMPT_BLOCK,
             allowed_tools=["file_ops", "bash", "search", "materialize", "materialize_workspace", "compute_run", "compute_exec", "compute_cluster", "service_search", "service_detail", "bg_status", "bg_output", "bg_wait", "bg_kill", "monitor", "monitor_stop", "web", "ask_user", "todo"],
             max_iterations=80,
-            max_session_tokens=4_000_000,
+            session_soft_budget=4_000_000,
         ))
 
         # General agent - full capability for complex tasks
@@ -2829,9 +2829,19 @@ Example workflow:
         "required": ["tasks"]
     }
 
-    def __init__(self, orchestrator: SubAgentOrchestrator, working_dir: str = "."):
+    def __init__(
+        self,
+        orchestrator: SubAgentOrchestrator,
+        working_dir: str = ".",
+        orchestrator_config=None,
+    ):
         self.subagent_orchestrator = orchestrator
         self.working_dir = working_dir
+        # Optional OrchestratorConfig from the CLI's resolved SciagentConfig.
+        # When None, WorkflowTool builds a default OrchestratorConfig at run
+        # time (legacy behavior). When set, --profile / --set selections at
+        # the CLI flow into workflow runs.
+        self.orchestrator_config = orchestrator_config
 
     def execute(self, tasks: List[Dict[str, Any]], execute: bool = False) -> ToolResult:
         from .tools.atomic.todo import TodoTool

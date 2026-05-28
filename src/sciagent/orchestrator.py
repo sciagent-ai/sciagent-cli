@@ -29,6 +29,16 @@ from .tools.atomic.todo import TodoTool, TodoGraph, TodoItem
 from .subagent import SubAgentOrchestrator, SubAgentResult, SubAgentConfig
 from .provenance import ProvenanceChecker, ProvenanceResult
 from .provenance_log import get_active_session_log
+from .defaults import VERIFICATION_MODEL
+
+
+class BudgetExceeded(RuntimeError):
+    """Raised when an orchestrator run crosses a configured wall-time or cost cap.
+
+    The orchestrator loop checks ``max_wall_seconds`` and ``max_cost_usd`` once
+    per batch turn. When either fires, this propagates out of ``execute_all``;
+    callers (CLI, bench) treat it as a clean shutdown signal, not a crash.
+    """
 
 
 @dataclass
@@ -71,6 +81,20 @@ class OrchestratorConfig:
     # OUTCOME VERIFICATION: Pass original goal to verifier for scientific validation
     original_request: Optional[str] = None  # Original user request/goal for outcome verification
 
+    # Verifier model override. None means "use defaults.VERIFICATION_MODEL".
+    # Set via config file, --profile, or --set orchestrator.verifier_model=...
+    verifier_model: Optional[str] = None
+
+    # Kill-switch caps. None on either field disables that check entirely.
+    # Wall-time is checked from the orchestrator's own _start_time.
+    # Cost is checked against self._cost_so_far when present (populated by H3).
+    max_wall_seconds: Optional[int] = None
+    max_cost_usd: Optional[float] = None
+
+    def resolve_verifier_model(self) -> str:
+        """Return the model id the verifier subagent should run on."""
+        return self.verifier_model or VERIFICATION_MODEL
+
 
 class TaskOrchestrator:
     """
@@ -110,6 +134,16 @@ class TaskOrchestrator:
         self.config = config or OrchestratorConfig()
         self._custom_executor = task_executor
         self.working_dir = working_dir
+
+        # Apply verifier-model override from config onto the registered
+        # verifier subagent. The SubAgentRegistry binds models at registration
+        # time (subagent.py:_register_defaults); we mutate the field here so
+        # spawn("verifier", ...) picks up the configured model without touching
+        # the registry's default constructor.
+        if self.config.verifier_model and self.subagent is not None:
+            verifier_cfg = self.subagent.registry.get("verifier")
+            if verifier_cfg is not None:
+                verifier_cfg.model = self.config.verifier_model
 
         # Execution state
         self._execution_log: List[Dict[str, Any]] = []
@@ -169,6 +203,11 @@ class TaskOrchestrator:
 
         # Execute batch by batch
         for batch_num, batch in enumerate(batches):
+            # Kill-switch: wall-time and (post-H3) cost caps. Checked once
+            # per batch turn before any task in the batch runs, so a
+            # cap that's already been crossed never spawns more work.
+            self._check_budgets()
+
             # DATA GATE CHECK: Before analysis tasks, verify data provenance
             if self.config.enable_data_gate and not self._data_gate_passed:
                 if self._batch_contains_analysis_tasks(batch):
@@ -325,6 +364,35 @@ class TaskOrchestrator:
             "exec_verification_results": self._exec_verification_results,
             "llm_verification_results": self._llm_verification_results,
         }
+
+    def _check_budgets(self) -> None:
+        """Raise BudgetExceeded if wall-time or cost has crossed the configured cap.
+
+        Wall-time is measured from ``self._start_time`` (set at the top of
+        ``execute_all``); cost reads ``self._cost_so_far`` if H3 has plumbed
+        it through. When ``_cost_so_far`` is not yet present, the cost branch
+        skips silently — the cap on the config still loads, it just doesn't
+        fire until H3 lands.
+        """
+        if self._start_time is None:
+            return
+        if self.config.max_wall_seconds is not None:
+            elapsed = time.time() - self._start_time
+            if elapsed > self.config.max_wall_seconds:
+                raise BudgetExceeded(
+                    f"max_wall_seconds={self.config.max_wall_seconds} exceeded "
+                    f"({elapsed:.0f}s)"
+                )
+        if self.config.max_cost_usd is not None:
+            # TODO(H3): self._cost_so_far is populated by the cost-tracking
+            # work in H3. Until then, the cap is loadable and the check is a
+            # no-op — exactly what the design doc (§3.5) calls for.
+            cost = getattr(self, "_cost_so_far", None)
+            if cost is not None and cost > self.config.max_cost_usd:
+                raise BudgetExceeded(
+                    f"max_cost_usd={self.config.max_cost_usd} exceeded "
+                    f"(${cost:.2f})"
+                )
 
     def execute_next(self) -> Optional[ExecutionResult]:
         """
