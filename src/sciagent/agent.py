@@ -83,8 +83,19 @@ class AgentLoop:
         system_prompt: Optional[str] = None,
         display: Optional[Display] = None,
         cloud_config=None,
+        orchestrator_config=None,
+        subagent_orchestrator=None,
     ):
         self.config = config or AgentConfig()
+        # Optional handles for the single-task verification gate at session
+        # close (DESIGN_BENCH.md §5.4.b / DESIGN_HARNESS.md §3.7). When both
+        # are present and orchestrator_config.enable_verification is true,
+        # run() dispatches _run_llm_verification_gate against a one-task
+        # TodoTool built from the final response. Leaving either None
+        # disables the gate — preserves the legacy AgentLoop entry shape
+        # tests + external callers depend on.
+        self.orchestrator_config = orchestrator_config
+        self.subagent_orchestrator = subagent_orchestrator
         # CloudConfig is intentionally separate from AgentConfig: agent-loop
         # concerns (tokens, model, iterations) are distinct from cloud /
         # compute concerns (cost gate, workspace store, autostop). Type left
@@ -221,6 +232,15 @@ class AgentLoop:
         self.total_cache_reads = 0      # sum of prompt_tokens served from cache
         self.total_cache_writes = 0     # sum of new tokens written into cache
         self.total_subagent_tokens = 0  # rolled up from completed subagent runs
+        # Session-level totals for the session_end event (DESIGN_BENCH.md
+        # §5.4.a). tokens_in / tokens_out are tracked separately from
+        # self.total_tokens (which is the sum). cost_usd accumulates the
+        # litellm-computed per-call response cost off self.llm._last_usage;
+        # missing per-call cost just stays at 0.0.
+        self.total_tokens_in = 0
+        self.total_tokens_out = 0
+        self.total_cost_usd = 0.0
+        self._session_start_time = time.monotonic()
 
         # Spiral detection - track repeated errors
         self._error_counts: Dict[str, int] = {}
@@ -1404,6 +1424,17 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         self.total_tokens += response.usage.get("prompt_tokens", 0)
         self.total_tokens += response.usage.get("completion_tokens", 0)
 
+        # Session-level in / out / cost rollup for session_end (§5.4.a).
+        # Per-call cost lands on self.llm._last_usage via _capture_last_usage
+        # in chat(); pull it the same way emit_tool_result does.
+        usage = getattr(self.llm, "_last_usage", None) or {}
+        if isinstance(usage.get("tokens_in"), int):
+            self.total_tokens_in += usage["tokens_in"]
+        if isinstance(usage.get("tokens_out"), int):
+            self.total_tokens_out += usage["tokens_out"]
+        if isinstance(usage.get("cost_usd"), (int, float)):
+            self.total_cost_usd += float(usage["cost_usd"])
+
         # Cache metrics — extracted but previously dropped on the floor.
         # Sum cache reads across the session; the budget UI displays the
         # ratio so the user knows their effective cost.
@@ -1594,6 +1625,13 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         max_iter = max_iterations or self.config.max_iterations
         self._iteration_limit_checked = False  # Track if we've already asked user
         self._token_limit_checked = False  # Same, for session token budget
+        # Reset session-level rollup so a single AgentLoop instance reused
+        # across multiple run() calls doesn't carry stale counts forward.
+        self.total_tokens_in = 0
+        self.total_tokens_out = 0
+        self.total_cost_usd = 0.0
+        self._session_start_time = time.monotonic()
+        exit_reason = "done"
 
         # Auto-inject matching skill workflow before the task
         skill_content = self._get_matching_skill_content(task)
@@ -1612,6 +1650,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 # Check for user cancellation (including parent cancellation for subagents)
                 if self._is_cancelled():
                     final_response = "(Stopped by user)"
+                    exit_reason = "error"
                     break
 
                 # Check if approaching limit with incomplete tasks (ask once)
@@ -1621,6 +1660,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         self._iteration_limit_checked = True
                         if action == 'wrap_up':
                             final_response = self._generate_wrap_up_result()
+                            exit_reason = "max_iter"
                             break
                         elif action == 'continue':
                             pass  # Keep going
@@ -1639,6 +1679,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         self._token_limit_checked = True
                         if action == 'wrap_up':
                             final_response = self._generate_wrap_up_result()
+                            exit_reason = "budget"
                             break
                         elif action == 'continue':
                             pass
@@ -1697,15 +1738,18 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                     # this run and unwind to the REPL.
                     self._cancelled = True
                     final_response = "(Stopped by user)"
+                    exit_reason = "error"
                     break
                 except Exception as e:
                     error_msg = f"LLM Error: {str(e)}"
                     self.display.error(error_msg)
                     final_response = f"(Error: {str(e)})"
+                    exit_reason = "error"
                     break
 
                 if self._is_cancelled():
                     final_response = "(Stopped by user)"
+                    exit_reason = "error"
                     break
 
                 # Handle assistant content (thinking)
@@ -1739,6 +1783,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
 
                     if self._is_cancelled():
                         final_response = "(Stopped by user)"
+                        exit_reason = "error"
                         break
 
                 else:
@@ -1753,10 +1798,37 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
             if self.iteration_count >= max_iter and not final_response:
                 print(f"\n⚠️  Reached maximum iterations ({max_iter})")
                 final_response = self._generate_wrap_up_result()
+                exit_reason = "max_iter"
 
+        except Exception:
+            exit_reason = "error"
+            raise
         finally:
             # Always restore original interrupt handler
             self._restore_interrupt_handler()
+
+            # Run the single-task LLM verification gate (DESIGN_BENCH.md
+            # §5.4.b) when wired in via main.py. Best-effort: a gate
+            # failure must never break the agent's return.
+            try:
+                self._run_single_task_verification_gate(task, final_response)
+            except Exception:
+                pass
+
+            # Emit session_end (DESIGN_BENCH.md §5.4.a). Best-effort so a
+            # provenance-log write failure doesn't bubble out of run().
+            try:
+                get_provenance_log(self.state.session_id).emit_session_end(
+                    model=self.config.model,
+                    iterations=self.iteration_count,
+                    tokens_in=self.total_tokens_in,
+                    tokens_out=self.total_tokens_out,
+                    cost_usd=self.total_cost_usd if self.total_cost_usd > 0 else None,
+                    wall_seconds=time.monotonic() - self._session_start_time,
+                    exit_reason=exit_reason,
+                )
+            except Exception:
+                pass
 
         # Auto-save state
         if self.config.auto_save:
@@ -1768,6 +1840,72 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         })
 
         return final_response
+
+    def _run_single_task_verification_gate(
+        self,
+        task: str,
+        final_response: str,
+    ) -> None:
+        """Run the LLM verification gate on a single-task ``run()`` result.
+
+        DESIGN_BENCH.md §5.4.b / DESIGN_HARNESS.md §3.7 — until this lands,
+        ``sciagent run "task"`` skips the verification gate that
+        ``OrchestratorConfig.enable_verification`` promises, because the
+        gate code only fires via ``TaskOrchestrator.execute_all()`` on
+        multi-task DAGs.
+
+        Builds a one-task ``TodoTool`` with the final response as the
+        task result, then calls ``TaskOrchestrator._run_llm_verification_gate``
+        directly. The existing ``verification_result`` event emission
+        path (orchestrator._emit_llm_verification_event) lands the result
+        in the active session log — no new event kind, no schema bump.
+
+        No-op when ``orchestrator_config`` or ``subagent_orchestrator``
+        was not passed at construction, or when ``enable_verification``
+        is false.
+        """
+        if self.orchestrator_config is None or self.subagent_orchestrator is None:
+            return
+        if not getattr(self.orchestrator_config, "enable_verification", False):
+            return
+        # An error / cancelled / empty final_response carries no claim worth
+        # verifying — the agent didn't produce an outcome. Skip the gate
+        # rather than ask the verifier to audit "(Stopped by user)".
+        if not final_response or final_response.startswith("(Stopped by user)") \
+                or final_response.startswith("(Error:"):
+            return
+
+        from dataclasses import replace as dc_replace
+        from .orchestrator import TaskOrchestrator
+        from .tools.atomic.todo import TodoTool, TodoItem
+
+        # Synthetic single-task graph the gate can audit. task_type="output"
+        # ensures _get_tasks_requiring_verification picks it up regardless
+        # of the original prompt's wording.
+        todo = TodoTool()
+        todo.graph.add(TodoItem(
+            id="t-single",
+            content=task,
+            status="completed",
+            task_type="output",
+            result=final_response,
+        ))
+
+        gate_cfg = dc_replace(
+            self.orchestrator_config,
+            original_request=task,
+            verbose=False,
+        )
+        orch = TaskOrchestrator(
+            todo_tool=todo,
+            subagent_orchestrator=self.subagent_orchestrator,
+            config=gate_cfg,
+            working_dir=self.config.working_dir,
+        )
+        tasks = orch._get_tasks_requiring_verification()
+        if not tasks:
+            return
+        orch._run_llm_verification_gate(tasks)
     
     def cleanup_session_clusters(self) -> List[str]:
         """Tear down any sky clusters launched in this session.

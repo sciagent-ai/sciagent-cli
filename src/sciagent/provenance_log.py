@@ -11,7 +11,7 @@ Schema v2 (H3) adds optional cost / token / model fields on ``tool_result``
 events and optional ``cost_usd`` on ``compute_job_status_changed`` events.
 Fields default to ``None`` so v1 readers continue to parse v2 lines; v2
 readers see ``None`` for cost on v1 lines.
-The seven event kinds are:
+The event kinds are:
 
   - tool_call               (an atomic-tool invocation began)
   - tool_result             (the invocation returned)
@@ -20,6 +20,7 @@ The seven event kinds are:
   - artifact_produced       (a file was observed on disk)
   - verification_result     (a DATA / EXEC / LLM gate produced a verdict)
   - correction              (an earlier event has been superseded)
+  - session_end             (AgentLoop.run() exited; session-level cost / tokens)
 
 Design constraints (carried from M1A's "three hard rules"):
 
@@ -584,6 +585,37 @@ class ProvenanceLog:
             "replacement": replacement,
         }
         return self._write_event("correction", body)
+
+    def emit_session_end(
+        self,
+        *,
+        model: str,
+        iterations: int,
+        tokens_in: int,
+        tokens_out: int,
+        cost_usd: Optional[float],
+        wall_seconds: float,
+        exit_reason: str,
+    ) -> str:
+        """Emit a session_end event when an AgentLoop run completes.
+
+        Fires unconditionally on session close — including tool-free runs
+        that never emitted a tool_call. For tool-using runs, the per-call
+        ``tool_result`` cost rows (schema v2, H3) remain authoritative;
+        this event adds a session-level total adapters can fall back on.
+
+        ``exit_reason`` ∈ {"done", "max_iter", "budget", "error"}.
+        """
+        body = {
+            "model": model,
+            "iterations": int(iterations),
+            "tokens_in": int(tokens_in),
+            "tokens_out": int(tokens_out),
+            "cost_usd": cost_usd,
+            "wall_seconds": float(wall_seconds),
+            "exit_reason": exit_reason,
+        }
+        return self._write_event("session_end", body)
 
     # ------------------------------------------------------------------
     # Public read path (used by verify_session)

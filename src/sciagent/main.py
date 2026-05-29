@@ -295,7 +295,18 @@ def run_from_cli(args):
         exclude={"compute_run", "compute_exec", "compute_cluster"}
     )
 
-    agent = AgentLoop(config=sci_cfg.agent, tools=main_tools, system_prompt=final_system_prompt)
+    # Thread the OrchestratorConfig + SubAgentOrchestrator through so
+    # AgentLoop can fire the LLM verification gate at session close on the
+    # single-task run path (DESIGN_BENCH.md §5.4.b / DESIGN_HARNESS.md §3.7).
+    # verifier_model is already applied to the registry above; passing the
+    # orchestrator here makes that override reachable from the gate.
+    agent = AgentLoop(
+        config=sci_cfg.agent,
+        tools=main_tools,
+        system_prompt=final_system_prompt,
+        orchestrator_config=sci_cfg.orchestrator,
+        subagent_orchestrator=orchestrator,
+    )
 
     def _on_sigterm(signum, frame):
         try:
