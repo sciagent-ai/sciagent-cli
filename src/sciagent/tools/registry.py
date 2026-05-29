@@ -320,7 +320,12 @@ class ToolRegistry:
             return ToolResult(success=True, output=result)
 
 
-def create_atomic_registry(working_dir: str = ".", skills_dir=None, cloud_config=None) -> ToolRegistry:
+def create_atomic_registry(
+    working_dir: str = ".",
+    skills_dir=None,
+    cloud_config=None,
+    fast_model: Optional[str] = None,
+) -> ToolRegistry:
     """
     Create registry with the atomic tools.
 
@@ -370,7 +375,10 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None, cloud_config
     registry.register(ShellTool(working_dir))
     registry.register(FileOpsTool(working_dir))
     registry.register(SearchTool(working_dir))
-    registry.register(WebTool())
+    # L3: thread the orchestrator-configured fast_model through so the
+    # web_fetch summarizer respects role-model overrides instead of
+    # hard-coding defaults.FAST_MODEL.
+    registry.register(WebTool(fast_model=fast_model))
     registry.register(TodoTool())
     registry.register(AskUserTool())
 
@@ -434,9 +442,16 @@ def create_atomic_registry(working_dir: str = ".", skills_dir=None, cloud_config
     return registry
 
 
-def create_default_registry(working_dir: str = ".", skills_dir=None, cloud_config=None) -> ToolRegistry:
+def create_default_registry(
+    working_dir: str = ".",
+    skills_dir=None,
+    cloud_config=None,
+    fast_model: Optional[str] = None,
+) -> ToolRegistry:
     """Alias for create_atomic_registry - backward compatibility."""
-    return create_atomic_registry(working_dir, skills_dir, cloud_config=cloud_config)
+    return create_atomic_registry(
+        working_dir, skills_dir, cloud_config=cloud_config, fast_model=fast_model
+    )
 
 
 # For testing

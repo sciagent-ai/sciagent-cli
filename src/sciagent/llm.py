@@ -32,6 +32,7 @@ def _suppress_pydantic_serializer_warnings():
         pass
 
 import json
+from functools import lru_cache
 from typing import List, Dict, Any, Optional, Generator, Union
 from dataclasses import dataclass, field
 
@@ -62,6 +63,116 @@ try:
 except ImportError:
     LITELLM_AVAILABLE = False
     print("Warning: litellm not installed. Run: pip install litellm")
+
+
+@lru_cache(maxsize=128)
+def _resolve_provider(model: str) -> str:
+    """Return the canonical litellm provider id for ``model``.
+
+    Wraps ``litellm.get_llm_provider`` which already handles ``provider/model``
+    parsing, router aliases, and api-base inference. Falls back to ``"unknown"``
+    so callers can stay neutral (skip cache_control, skip temp clamp, etc.)
+    when the id doesn't resolve — e.g. a bare model name or a custom router
+    alias litellm hasn't been told about.
+    """
+    if not LITELLM_AVAILABLE or not model:
+        return "unknown"
+    try:
+        _, provider, _, _ = litellm.get_llm_provider(model)
+        return provider or "unknown"
+    except Exception:
+        return "unknown"
+
+
+# Providers that accept Anthropic-shape ``cache_control: ephemeral`` markers
+# on input messages. Anthropic is native; Gemini's coverage comes from
+# litellm translating the marker into Google's cachedContents API
+# (litellm issue #4284, docs.litellm.ai/docs/completion/prompt_caching).
+# OpenAI auto-caches without client markers; xAI exposes no cache surface
+# today — both fall through unchanged.
+_CACHE_CONTROL_PROVIDERS = frozenset({"anthropic", "gemini"})
+
+
+# Providers that report cached input tokens *separately* from prompt_tokens.
+# For these, total input = prompt_tokens + cache_read_tokens. Everywhere
+# else the cache hit is already folded into prompt_tokens (OpenAI, Gemini,
+# vLLM/OpenAI-compat). The bench's cost rollup uses ``cache_hit_in_input``
+# to apply the right derivation per-row.
+_CACHE_SEPARATE_FROM_INPUT_PROVIDERS = frozenset({"anthropic", "bedrock", "vertex_ai"})
+
+
+def _extract_cache_metrics(response: Any, provider: str) -> Dict[str, Any]:
+    """Normalize cache-hit reporting across providers.
+
+    Returns a three-key dict — ``cache_read_tokens``, ``cache_write_tokens``,
+    ``cache_hit_in_input`` — populated from whichever shape the active
+    provider returns:
+
+      - Anthropic (direct / Bedrock / Vertex AI fronting Claude):
+        ``usage.cache_read_input_tokens`` and
+        ``usage.cache_creation_input_tokens`` are reported *separately*
+        from ``usage.prompt_tokens`` → ``cache_hit_in_input=False``.
+      - OpenAI: ``usage.prompt_tokens_details.cached_tokens`` is folded
+        into ``usage.prompt_tokens`` → ``cache_hit_in_input=True``.
+      - Gemini via OpenAI-compat: same shape as OpenAI.
+      - Gemini direct: ``usageMetadata.cachedContentTokenCount`` folded
+        into the total input → ``cache_hit_in_input=True``.
+      - xAI: no cache surface today; returns zeros.
+      - Unknown providers / missing fields: zeros; never raises.
+
+    Downstream consumers (provenance v2, cost rollup) branch on
+    ``cache_hit_in_input``, not on provider id.
+    """
+    zero = {"cache_read_tokens": 0, "cache_write_tokens": 0, "cache_hit_in_input": False}
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return zero
+
+    # Anthropic-shape fields (also surfaced when Bedrock/Vertex AI fronts
+    # an Anthropic model). Reported separately from prompt_tokens.
+    if provider in _CACHE_SEPARATE_FROM_INPUT_PROVIDERS:
+        read = getattr(usage, "cache_read_input_tokens", 0) or 0
+        write = getattr(usage, "cache_creation_input_tokens", 0) or 0
+        if read or write:
+            return {
+                "cache_read_tokens": int(read),
+                "cache_write_tokens": int(write),
+                "cache_hit_in_input": False,
+            }
+        # Vertex-AI fronting Gemini will not surface those fields; fall through.
+
+    # OpenAI / Gemini-OpenAI-compat / vLLM: cached_tokens under
+    # prompt_tokens_details, already inside prompt_tokens.
+    details = getattr(usage, "prompt_tokens_details", None)
+    if details is not None:
+        read = getattr(details, "cached_tokens", 0) or 0
+        if read:
+            return {
+                "cache_read_tokens": int(read),
+                "cache_write_tokens": 0,
+                "cache_hit_in_input": True,
+            }
+
+    # Gemini direct API: cachedContentTokenCount on usageMetadata (camelCase
+    # from the wire; snake_case alias guarded for SDK variation).
+    meta = (
+        getattr(response, "usageMetadata", None)
+        or getattr(response, "usage_metadata", None)
+    )
+    if meta is not None:
+        read = (
+            getattr(meta, "cachedContentTokenCount", 0)
+            or getattr(meta, "cached_content_token_count", 0)
+            or 0
+        )
+        if read:
+            return {
+                "cache_read_tokens": int(read),
+                "cache_write_tokens": 0,
+                "cache_hit_in_input": True,
+            }
+
+    return zero
 
 
 @dataclass
@@ -173,13 +284,29 @@ class ToolCall:
 
 @dataclass
 class LLMResponse:
-    """Structured response from LLM"""
+    """Structured response from LLM.
+
+    Cache metrics carry three normalized scalars on top of the legacy
+    free-form ``cache_info`` dict; downstream code (provenance log, cost
+    rollup, bench Pareto plot) reads the normalized fields and does not
+    branch on provider. See L2 in DESIGN_LLM_PORTABILITY.md.
+    """
     content: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     finish_reason: str = "stop"
     usage: Dict[str, int] = field(default_factory=dict)
-    cache_info: Dict[str, Any] = field(default_factory=dict)  # Cache metrics
+    cache_info: Dict[str, Any] = field(default_factory=dict)  # raw per-provider snapshot
     reasoning_content: Optional[str] = None  # Extended thinking/reasoning from model
+
+    # L2 normalized cache fields. Same shape regardless of provider:
+    #   - cache_read_tokens:  cached input tokens served this turn.
+    #   - cache_write_tokens: tokens added to cache this turn (Anthropic).
+    #   - cache_hit_in_input: True iff cache_read_tokens is already counted
+    #                         inside usage.prompt_tokens (OpenAI, Gemini);
+    #                         False when reported separately (Anthropic).
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    cache_hit_in_input: bool = False
 
     @property
     def has_tool_calls(self) -> bool:
@@ -192,18 +319,29 @@ class LLMResponse:
 
     @property
     def cache_hit(self) -> bool:
-        """Check if this response used cached tokens (Anthropic prompt caching)"""
-        return self.cache_info.get("cache_read_input_tokens", 0) > 0
+        """True iff any cached input tokens were served this turn."""
+        return self.cache_read_tokens > 0
 
     @property
     def tokens_cached(self) -> int:
-        """Number of tokens read from cache"""
-        return self.cache_info.get("cache_read_input_tokens", 0)
+        """Number of tokens read from cache (alias for cache_read_tokens)."""
+        return self.cache_read_tokens
 
     @property
     def tokens_written_to_cache(self) -> int:
-        """Number of tokens written to cache for future use"""
-        return self.cache_info.get("cache_creation_input_tokens", 0)
+        """Number of tokens written to cache (alias for cache_write_tokens)."""
+        return self.cache_write_tokens
+
+    # Deprecated Anthropic-named aliases. Kept for one release so bench
+    # code from before L2 still parses provenance v2 logs. Remove after
+    # bench v1.1 ships.
+    @property
+    def cache_read_input_tokens(self) -> int:
+        return self.cache_read_tokens
+
+    @property
+    def cache_creation_input_tokens(self) -> int:
+        return self.cache_write_tokens
 
 
 class LLMClient:
@@ -243,15 +381,21 @@ class LLMClient:
             "model": None,
         }
 
-        # Set API key if provided
+        # Set API key if provided. Provider id comes from litellm's resolver
+        # (L1) so router aliases and bedrock/vertex_ai-fronted models route
+        # to the right env var instead of accidentally hitting the Anthropic
+        # branch via substring match.
         if api_key:
-            # litellm auto-detects provider from model name
-            if "anthropic" in model.lower() or "claude" in model.lower():
-                os.environ["ANTHROPIC_API_KEY"] = api_key
-            elif "gpt" in model.lower() or "openai" in model.lower():
-                os.environ["OPENAI_API_KEY"] = api_key
-            elif "gemini" in model.lower():
-                os.environ["GEMINI_API_KEY"] = api_key
+            env_for_provider = {
+                "anthropic": "ANTHROPIC_API_KEY",
+                "openai": "OPENAI_API_KEY",
+                "gemini": "GEMINI_API_KEY",
+                "vertex_ai": "GEMINI_API_KEY",
+                "xai": "XAI_API_KEY",
+            }
+            key_var = env_for_provider.get(_resolve_provider(model))
+            if key_var:
+                os.environ[key_var] = api_key
 
         if base_url:
             self.base_url = base_url
@@ -262,32 +406,45 @@ class LLMClient:
         if LITELLM_AVAILABLE:
             litellm.drop_params = True  # Ignore unsupported params (safe for reasoning_effort)
             
-    def _is_anthropic_model(self) -> bool:
-        """Check if current model is an Anthropic model"""
-        model_lower = self.model.lower()
-        return "anthropic" in model_lower or "claude" in model_lower
+    def _provider(self) -> str:
+        """Canonical litellm provider id for the active model.
 
-    def _is_openai_model(self) -> bool:
-        """Check if current model is an OpenAI model"""
-        model_lower = self.model.lower()
-        return "gpt" in model_lower or "openai" in model_lower or "o1" in model_lower or "o3" in model_lower
-
-    def _is_xai_model(self) -> bool:
-        """Check if current model is an xAI/Grok model"""
-        model_lower = self.model.lower()
-        return "grok" in model_lower or "xai/" in model_lower
-
-    def _supports_reasoning_effort(self) -> bool:
+        Delegates to the module-level ``_resolve_provider`` (litellm-backed,
+        lru-cached) so a single source of truth handles ``provider/model``
+        parsing, router aliases, and api-base inference. Returns ``"unknown"``
+        when litellm can't classify the id — callers treat that as the
+        provider-neutral path.
         """
-        Check if the model supports reasoning_effort parameter.
+        return _resolve_provider(self.model)
 
-        Note: xAI/Grok models do NOT support reasoning_effort - they use model
-        naming conventions (e.g., grok-4-fast-reasoning) instead.
-        See: https://github.com/BerriAI/litellm/issues/16204
+    def _reasoning_call_kwargs(self) -> Dict[str, Any]:
+        """Return the kwargs delta to apply when reasoning is requested.
+
+        Returns ``{}`` when reasoning is off. Otherwise sends
+        ``reasoning_effort`` straight through and lets litellm sort out
+        per-provider quirks:
+
+          - **Anthropic** with extended thinking requires ``temperature=1``
+            (the API rejects anything else); litellm doesn't rewrite the
+            temperature for us, so we clamp here.
+          - **OpenAI o-series** rejects ``temperature``/``top_p``; litellm's
+            ``drop_params=True`` strips them at the wire.
+          - **Gemini 2.5/3** translates ``reasoning_effort`` to
+            ``thinking_budget`` natively.
+          - **xAI Grok 4 (non-4.3)** does not accept ``reasoning_effort``;
+            litellm PR #16265 (March 2026) drops it per-model.
+
+        We do not enumerate Grok variants here on purpose — that would
+        duplicate litellm's per-model knowledge and bit-rot the moment xAI
+        ships a new variant. The litellm-acceptance unit tests catch drift
+        if any provider regresses on its drop_params handling.
         """
-        if self._is_xai_model():
-            return False
-        return True
+        if not self.reasoning_effort:
+            return {}
+        kwargs: Dict[str, Any] = {"reasoning_effort": self.reasoning_effort}
+        if self._provider() == "anthropic":
+            kwargs["temperature"] = 1
+        return kwargs
 
     def _call_with_retry(self, call_kwargs: Dict[str, Any], is_stream: bool = False):
         """
@@ -462,33 +619,41 @@ class LLMClient:
 
     def _format_messages_with_prompt_caching(self, messages: List[Dict]) -> List[Dict]:
         """
-        Format messages for Anthropic prompt caching.
+        Format messages to opt into provider-side prompt caching.
 
-        Adds cache_control breakpoints to enable Anthropic's prompt caching
-        (~90% cheaper on cached tokens). Anthropic caps cache_control markers
-        at 4 per request — exceeding the cap causes a hard 400 mid-run.
+        Caching reduces input cost ~90% on Anthropic and ~75-90% on Gemini
+        when a stable prefix recurs across turns. We emit Anthropic-shape
+        ``cache_control: {"type": "ephemeral"}`` markers; litellm passes
+        them straight through to Anthropic and translates them to Google's
+        cachedContents API for Gemini (see litellm issue #4284,
+        docs.litellm.ai/docs/completion/prompt_caching).
 
-        Strategy (max 2 markers, well under cap):
-          - System message: always marked (1 marker). Biggest static prefix.
-          - Last user message > 2000 chars: marked (1 marker). Anthropic's
-            cache is prefix-based, so a single marker at the LATEST stable
-            position caches everything before it — best hit rate on the
-            next turn, which only adds content after this marker.
+        Per-provider marker placement:
 
-        Earlier "mark every long user message" produced N markers for N long
-        user turns; in a compute-subagent run with multiple big tool results
-        that's 5+ markers and the API rejects the request. This bug
-        surfaced as: "A maximum of 4 blocks with cache_control may be
-        provided. Found 5." mid-run.
+          - **Anthropic** — up to 2 markers (system + LAST long user
+            message). Anthropic caps cache_control markers at 4 per
+            request; staying at 2 leaves headroom. Earlier "mark every
+            long user message" produced 5+ markers in compute-subagent
+            runs and the API rejected the request mid-run:
+                "A maximum of 4 blocks with cache_control may be
+                 provided. Found 5."
+          - **Gemini** — 1 marker on the system prompt only. Gemini
+            caches one continuous block per request; the system prompt is
+            the biggest stable prefix. Multi-block coverage for Gemini is
+            a follow-up.
 
-        Only applies to Anthropic models.
+        Providers outside ``_CACHE_CONTROL_PROVIDERS`` (OpenAI, xAI,
+        vLLM, …) get messages back untouched: OpenAI auto-caches without
+        client markers, xAI has no cache surface, vLLM varies.
         """
-        if not self._is_anthropic_model():
+        provider = self._provider()
+        if provider not in _CACHE_CONTROL_PROVIDERS:
             return messages
 
         formatted = [msg.copy() for msg in messages]
 
         # Pass 1: cache the system message (always; biggest static prefix).
+        # Both Anthropic and Gemini benefit from this single marker.
         for msg_copy in formatted:
             if msg_copy["role"] != "system":
                 continue
@@ -512,22 +677,23 @@ class LLMClient:
                         block["cache_control"] = {"type": "ephemeral"}
                 msg_copy["content"] = content
 
-        # Pass 2: cache only the LAST user message > 2000 chars. Walking
-        # backwards and stopping at the first hit caps user-side markers
-        # at 1, total at 2.
-        for msg_copy in reversed(formatted):
-            if msg_copy["role"] != "user":
-                continue
-            content = msg_copy["content"]
-            if isinstance(content, str) and len(content) > 2000:
-                msg_copy["content"] = [
-                    {
-                        "type": "text",
-                        "text": content,
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ]
-                break  # Only mark the latest qualifying user message.
+        # Pass 2 (Anthropic only): cache the LAST user message > 2000 chars.
+        # Gemini caches one continuous block per request, so adding a second
+        # marker doesn't help — keep Gemini at the single system marker.
+        if provider == "anthropic":
+            for msg_copy in reversed(formatted):
+                if msg_copy["role"] != "user":
+                    continue
+                content = msg_copy["content"]
+                if isinstance(content, str) and len(content) > 2000:
+                    msg_copy["content"] = [
+                        {
+                            "type": "text",
+                            "text": content,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ]
+                    break  # Only mark the latest qualifying user message.
 
         return formatted
 
@@ -587,14 +753,12 @@ class LLMClient:
         if self.base_url:
             call_kwargs["base_url"] = self.base_url
 
-        # Add reasoning_effort for extended thinking (works on Claude, Gemini, OpenAI o-series)
-        # Note: xAI/Grok models don't support this param and litellm.drop_params doesn't
-        # work for them (see https://github.com/BerriAI/litellm/issues/16204)
-        if self.reasoning_effort and self._supports_reasoning_effort():
-            call_kwargs["reasoning_effort"] = self.reasoning_effort
-            # Anthropic requires temperature=1 when extended thinking is enabled
-            if self._is_anthropic_model():
-                call_kwargs["temperature"] = 1
+        # Reasoning kwargs delta. _reasoning_call_kwargs centralizes the
+        # per-provider quirks (Anthropic temp clamp); litellm's drop_params
+        # handles the rest at the wire (OpenAI o-series temp drop, xAI Grok
+        # variants that don't accept reasoning_effort, Gemini's
+        # reasoning_effort -> thinking_budget translation).
+        call_kwargs.update(self._reasoning_call_kwargs())
 
         # Add tools if provided
         if tools:
@@ -623,15 +787,20 @@ class LLMClient:
                 "completion_tokens": response.usage.completion_tokens if response.usage else 0,
             }
 
-            # Extract Anthropic prompt caching metrics if available
+            # L2: normalize cache-hit telemetry into provider-agnostic fields.
+            # Raw per-provider snapshot stays in cache_info for debugging /
+            # legacy readers; downstream code branches on the normalized
+            # cache_hit_in_input flag.
+            cache_metrics = _extract_cache_metrics(response, self._provider())
             cache_info = {}
             if response.usage:
-                # Anthropic returns these fields for prompt caching
+                # Keep the Anthropic-named raw fields in cache_info for any
+                # caller still inspecting them directly; remove after the
+                # bench v1.1 migration window closes.
                 if hasattr(response.usage, "cache_read_input_tokens"):
                     cache_info["cache_read_input_tokens"] = response.usage.cache_read_input_tokens or 0
                 if hasattr(response.usage, "cache_creation_input_tokens"):
                     cache_info["cache_creation_input_tokens"] = response.usage.cache_creation_input_tokens or 0
-                # Also check _hidden_params for litellm's cache info
                 if hasattr(response, "_hidden_params"):
                     hidden = response._hidden_params or {}
                     if hidden.get("cache_hit"):
@@ -652,7 +821,10 @@ class LLMClient:
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
             cache_info=cache_info,
-            reasoning_content=reasoning_content
+            reasoning_content=reasoning_content,
+            cache_read_tokens=cache_metrics["cache_read_tokens"],
+            cache_write_tokens=cache_metrics["cache_write_tokens"],
+            cache_hit_in_input=cache_metrics["cache_hit_in_input"],
         )
     
     def chat_stream(

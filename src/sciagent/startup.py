@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .defaults import DEFAULT_MODEL
+from .llm import _resolve_provider
 
 
 # API key environment variable names and their signup URLs
@@ -66,17 +67,14 @@ CLOUD_CREDENTIALS = {
 
 
 def detect_provider_from_model(model: str) -> str:
-    """Detect the provider from model name."""
-    model_lower = model.lower()
-    if "anthropic" in model_lower or "claude" in model_lower:
-        return "anthropic"
-    elif "gpt" in model_lower or "openai" in model_lower:
-        return "openai"
-    elif "gemini" in model_lower:
-        return "gemini"
-    elif "xai" in model_lower or "grok" in model_lower:
-        return "xai"
-    return "unknown"
+    """Detect the provider id for a litellm model string.
+
+    Thin shim over ``llm._resolve_provider`` (the single source of truth,
+    backed by ``litellm.get_llm_provider`` + an lru cache). Kept as a named
+    export because external callers / tests imported it before L1 landed.
+    Returns ``"unknown"`` when litellm can't classify the id.
+    """
+    return _resolve_provider(model)
 
 
 def check_api_key(env_var: str) -> bool:

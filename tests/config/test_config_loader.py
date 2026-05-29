@@ -30,7 +30,11 @@ def test_defaults_only(isolated_home, tmp_path, monkeypatch):
     assert cfg.orchestrator.enable_data_gate is True
     assert cfg.orchestrator.verifier_model is None
     assert cfg.orchestrator.max_wall_seconds is None
-    assert cfg.agent.session_soft_budget == 4_000_000
+    # L5: session_soft_budget on AgentConfig now defaults to None — the
+    # AgentLoop resolves the concrete value from the per-provider overlay
+    # in llm_profiles._OVERLAY at construction time (4M for Anthropic,
+    # 1.5M for OpenAI, 2M for Gemini/xAI). Explicit values still win.
+    assert cfg.agent.session_soft_budget is None
     assert cfg.sources == ["defaults"]
 
 

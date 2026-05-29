@@ -29,7 +29,13 @@ from .tools.atomic.todo import TodoTool, TodoGraph, TodoItem
 from .subagent import SubAgentOrchestrator, SubAgentResult, SubAgentConfig
 from .provenance import ProvenanceChecker, ProvenanceResult
 from .provenance_log import get_active_session_log
-from .defaults import VERIFICATION_MODEL
+from .defaults import (
+    CODING_MODEL,
+    FAST_MODEL,
+    SCIENTIFIC_MODEL,
+    VERIFICATION_MODEL,
+    VISION_MODEL,
+)
 
 
 class BudgetExceeded(RuntimeError):
@@ -81,9 +87,17 @@ class OrchestratorConfig:
     # OUTCOME VERIFICATION: Pass original goal to verifier for scientific validation
     original_request: Optional[str] = None  # Original user request/goal for outcome verification
 
-    # Verifier model override. None means "use defaults.VERIFICATION_MODEL".
-    # Set via config file, --profile, or --set orchestrator.verifier_model=...
+    # Role-model overrides. None means "fall back to the matching
+    # defaults.*_MODEL constant" — same pattern H1 introduced for
+    # verifier_model; L3 mirrors it for the other four roles so a bench
+    # ablation cell can swap any subset via --set or YAML without code.
+    # The recipe name (all-openai, cross-family-verifier, …) lives in the
+    # bench's ablations.yaml, not in sciagent.
     verifier_model: Optional[str] = None
+    scientific_model: Optional[str] = None  # None -> defaults.SCIENTIFIC_MODEL
+    coding_model: Optional[str] = None      # None -> defaults.CODING_MODEL
+    fast_model: Optional[str] = None        # None -> defaults.FAST_MODEL
+    vision_model: Optional[str] = None      # None -> defaults.VISION_MODEL
 
     # Kill-switch caps. None on either field disables that check entirely.
     # Wall-time is checked from the orchestrator's own _start_time.
@@ -94,6 +108,18 @@ class OrchestratorConfig:
     def resolve_verifier_model(self) -> str:
         """Return the model id the verifier subagent should run on."""
         return self.verifier_model or VERIFICATION_MODEL
+
+    def resolve_scientific_model(self) -> str:
+        return self.scientific_model or SCIENTIFIC_MODEL
+
+    def resolve_coding_model(self) -> str:
+        return self.coding_model or CODING_MODEL
+
+    def resolve_fast_model(self) -> str:
+        return self.fast_model or FAST_MODEL
+
+    def resolve_vision_model(self) -> str:
+        return self.vision_model or VISION_MODEL
 
 
 class TaskOrchestrator:
@@ -135,15 +161,48 @@ class TaskOrchestrator:
         self._custom_executor = task_executor
         self.working_dir = working_dir
 
-        # Apply verifier-model override from config onto the registered
-        # verifier subagent. The SubAgentRegistry binds models at registration
-        # time (subagent.py:_register_defaults); we mutate the field here so
-        # spawn("verifier", ...) picks up the configured model without touching
-        # the registry's default constructor.
-        if self.config.verifier_model and self.subagent is not None:
-            verifier_cfg = self.subagent.registry.get("verifier")
-            if verifier_cfg is not None:
-                verifier_cfg.model = self.config.verifier_model
+        # Apply role-model overrides from config onto the registered
+        # subagent kinds. The SubAgentRegistry binds models at registration
+        # time (subagent.py:_register_defaults); we mutate the fields here
+        # so spawn(...) picks up the configured model without touching the
+        # registry's default constructor. Pattern lifted verbatim from H1's
+        # verifier_model wiring; L3 extends to the other four roles.
+        #
+        # Subagent kind -> orchestrator role override (None = leave default).
+        # ``plan`` is the scientific subagent; the others map by the same
+        # role table the subagent docstrings describe (subagent.py:425+).
+        if self.subagent is not None:
+            kind_to_override = {
+                "verifier": self.config.verifier_model,
+                "plan":     self.config.scientific_model,
+                "explore":  self.config.fast_model,
+                "debug":    self.config.coding_model,
+                "research": self.config.coding_model,
+                "general":  self.config.coding_model,
+                "compute":  self.config.coding_model,
+                "analyze":  self.config.coding_model,
+            }
+            for kind, override in kind_to_override.items():
+                if not override:
+                    continue
+                cfg = self.subagent.registry.get(kind)
+                if cfg is not None:
+                    cfg.model = override
+
+            # The web_fetch summarizer is a tool, not a subagent kind; its
+            # model can't be patched via the registry above. Reconstruct
+            # WebTool with the configured fast_model so summarizations use
+            # the override the bench cell asked for. Skipped silently when
+            # WebTool isn't registered (custom tool sets, tests).
+            if self.config.fast_model:
+                try:
+                    from .tools.atomic.web import WebTool
+                    tools = self.subagent.tools
+                    if tools.get("web") is not None:
+                        tools.unregister("web")
+                        tools.register(WebTool(fast_model=self.config.fast_model))
+                except Exception:
+                    pass
 
         # Execution state
         self._execution_log: List[Dict[str, Any]] = []

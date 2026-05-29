@@ -98,26 +98,38 @@ _OVERLAY: Dict[str, Dict[str, Any]] = {
         # In chars: 1024 * 4 = 4096.
         "cache_min_input_chars": 4096,
         "cache_ttl": "5m",
+        # Anthropic-folklore ~4M cumulative-session disconnect. Not in any
+        # official doc but a steady empirical pattern; used as the soft cap.
+        "session_soft_budget_tokens": 4_000_000,
     },
     "openai": {
         # Caching is automatic and free; no cache_control to emit. Setting
         # cache_min_input_chars high effectively disables our (unused) gate.
         "cache_min_input_chars": 1_000_000,
         "cache_ttl": "5m",
+        # Cost-anchored. At gpt-4.1 input prices ($2/M, May 2026) a 1.5M soft
+        # cap is ~$3 of input before the wrap-up prompt fires — tight enough
+        # to surface mid-task budget overruns, loose enough to let normal
+        # tasks finish without nagging.
+        "session_soft_budget_tokens": 1_500_000,
     },
     "gemini": {
-        # Implicit caching auto-applies on 2.5+. Explicit caching needs
-        # ≥32k tokens — large; we don't emit it client-side here.
-        "cache_min_input_chars": 1_000_000,
+        # L2 + Gemini caching: litellm translates Anthropic-shape
+        # cache_control:ephemeral markers into Google's cachedContents API.
+        # Match the Anthropic threshold so the gate fires at the same size.
+        "cache_min_input_chars": 4096,
         "cache_ttl": "1h",
+        "session_soft_budget_tokens": 2_000_000,
     },
     "vertex_ai": {
         "cache_min_input_chars": 1_000_000,
         "cache_ttl": "1h",
+        "session_soft_budget_tokens": 2_000_000,
     },
     "xai": {
         "cache_min_input_chars": 1_000_000,
         "cache_ttl": "5m",
+        "session_soft_budget_tokens": 2_000_000,
     },
     "ollama": {
         # No remote caching. Don't emit cache_control.
@@ -244,6 +256,17 @@ def profile_for(model: str) -> LLMProfile:
     output_max = int(info.get("max_output_tokens") or _DEFAULT_OUTPUT_MAX)
     supports_caching = bool(info.get("supports_prompt_caching"))
 
+    # Session-budget precedence: env override > per-provider overlay default.
+    # The empirical 4M Anthropic disconnect was Anthropic-folklore; per-
+    # provider numbers in _OVERLAY anchor on cost (OpenAI) or token spend
+    # rates (Gemini, xAI) instead. Profile returning None means "no soft
+    # cap" — AgentConfig still wins if the caller set an explicit value.
+    session_budget = _env_int("SCIAGENT_SESSION_SOFT_BUDGET")
+    if session_budget is None:
+        overlay_budget = overlay.get("session_soft_budget_tokens")
+        if overlay_budget is not None:
+            session_budget = int(overlay_budget)
+
     return LLMProfile(
         model=model,
         provider=provider,
@@ -258,7 +281,7 @@ def profile_for(model: str) -> LLMProfile:
         cache_ttl=str(overlay.get("cache_ttl", "5m")),
         beta_headers=tuple(overlay.get("beta_headers", ())),
         compact_at_fraction=_env_float("SCIAGENT_COMPACT_AT_PCT", 0.6),
-        session_soft_budget=_env_int("SCIAGENT_SESSION_SOFT_BUDGET"),
+        session_soft_budget=session_budget,
     )
 
 

@@ -366,7 +366,12 @@ TIPS:
         'web': '🌐',
     }
 
-    def __init__(self):
+    def __init__(self, fast_model: Optional[str] = None):
+        # ``fast_model`` overrides the defaults.FAST_MODEL constant used by
+        # the web_fetch summarizer (L3). None falls back to the constant so
+        # this tool stays usable when constructed without an orchestrator
+        # (tests, ad-hoc scripts, the default tool registry).
+        self._fast_model = fast_model
         self._html2text_converter = None
         if HTML2TEXT_AVAILABLE:
             self._html2text_converter = html2text.HTML2Text()
@@ -959,9 +964,11 @@ TIPS:
             # Import here to avoid circular imports
             from ...llm import LLMClient, Message
 
-            # Create client with fast model
+            # Create client with the configured fast model (L3) — falls
+            # back to defaults.FAST_MODEL when WebTool was constructed
+            # without an explicit override.
             client = LLMClient(
-                model=FAST_MODEL,
+                model=self._fast_model or FAST_MODEL,
                 temperature=0.0,
                 max_tokens=2000
             )

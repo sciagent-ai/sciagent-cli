@@ -41,13 +41,17 @@ class AgentConfig:
     max_tokens: int =  16384 # 32768  # Large limit for thorough code generation
     max_iterations: int = 120  # Default for complex tasks (simple tasks typically finish in <10)
     # Cumulative prompt+completion tokens before the loop forces a wrap-up.
-    # This is a sciagent-internal soft budget — not a provider hard limit.
-    # 0 disables the check entirely. The active model's profile carries the
-    # same field and overrides this when set via the
-    # ``SCIAGENT_SESSION_SOFT_BUDGET`` env var. Per-call context-size
-    # pressure is handled independently by ``state.compress_token_threshold``,
-    # which is itself derived from the model's context window.
-    session_soft_budget: int = 4_000_000
+    # Sciagent-internal soft budget; not a provider hard limit. Resolution
+    # order (last-writer-wins at AgentLoop construction):
+    #   1. None (default) -> per-provider overlay in llm_profiles._OVERLAY.
+    #      Anthropic=4M (folklore), OpenAI=1.5M (~$3 on gpt-4.1), Gemini=2M,
+    #      xAI=2M. None on overlay too -> no soft cap.
+    #   2. SCIAGENT_SESSION_SOFT_BUDGET env var (read by profile_for).
+    #   3. Explicit int on AgentConfig (--set agent.session_soft_budget=N).
+    #   4. 0 disables the check entirely.
+    # Per-call context-size pressure is handled independently by
+    # ``state.compress_token_threshold`` (derived from the model's window).
+    session_soft_budget: Optional[int] = None
     # Fraction of the model's context window above which the agent triggers
     # compaction. None means "use the profile default" (0.6 today, or whatever
     # the active model's profile carries). Precedence: env
@@ -132,12 +136,19 @@ class AgentLoop:
         from .llm_profiles import profile_for
         self.profile = profile_for(self.config.model)
 
-        # Optional per-deployment override of the cumulative session budget.
-        # The static AgentConfig default (4_000_000) is kept as a final
-        # fallback, but if SCIAGENT_SESSION_SOFT_BUDGET is set in env, the
-        # profile carries it and we honor it here.
-        if self.profile.session_soft_budget is not None:
-            self.config.session_soft_budget = self.profile.session_soft_budget
+        # Resolve the cumulative session budget. ``None`` on AgentConfig
+        # means "use the per-provider overlay default" (L5); profile carries
+        # the env-override and overlay values. An explicit int on
+        # AgentConfig wins outright — that's the --set / programmatic path.
+        if self.config.session_soft_budget is None:
+            # Profile may also be None when the overlay has no entry for
+            # this provider; falls through to 0 so the soft cap is disabled
+            # for unknown providers rather than silently using stale 4M.
+            self.config.session_soft_budget = (
+                self.profile.session_soft_budget
+                if self.profile.session_soft_budget is not None
+                else 0
+            )
 
         # Optional override of the compaction-trigger fraction from
         # AgentConfig. The profile already carries the env value
