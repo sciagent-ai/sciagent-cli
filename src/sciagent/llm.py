@@ -51,14 +51,23 @@ try:
     # Apply pydantic warning suppression after litellm loads
     _suppress_pydantic_serializer_warnings()
 
-    # Initialize LiteLLM's built-in response caching (cross-provider)
-    # This caches entire LLM responses based on input hash
-    # Options: "local" (in-memory), "redis", "disk"
-    litellm.cache = Cache(
-        type="local",           # In-memory cache (use "redis" or "disk" for persistence)
-        ttl=3600,               # Cache TTL in seconds (1 hour)
-    )
-    litellm.enable_cache = True
+    # LiteLLM's built-in response cache is intentionally DISABLED.
+    #
+    # Disabled 2026-05-29 after the DBAASP cross-provider smoke surfaced a
+    # litellm internal bug on the OpenAI path:
+    #     Cache._set_preset_cache_key_in_kwargs() got multiple values for
+    #     keyword argument 'preset_cache_key'
+    # The error spammed once per OpenAI call but was non-fatal — completions
+    # still returned correctly, only the cache write failed. Sciagent gets
+    # negligible benefit from response-level caching within a single session
+    # (identical prompts don't typically repeat back-to-back), so disabling
+    # is cleaner than working around the upstream bug.
+    #
+    # Prompt-level caching (Anthropic cache_control markers + OpenAI/Gemini
+    # implicit cache) is separate and still active — see
+    # _format_messages_with_prompt_caching and llm_profiles.py:_OVERLAY.
+    litellm.cache = None
+    litellm.enable_cache = False
 
 except ImportError:
     LITELLM_AVAILABLE = False
@@ -85,12 +94,20 @@ def _resolve_provider(model: str) -> str:
 
 
 # Providers that accept Anthropic-shape ``cache_control: ephemeral`` markers
-# on input messages. Anthropic is native; Gemini's coverage comes from
-# litellm translating the marker into Google's cachedContents API
-# (litellm issue #4284, docs.litellm.ai/docs/completion/prompt_caching).
+# on input messages. Anthropic only.
+#
+# Gemini was tried (litellm issue #4284 documents the translation), but
+# Google's `cachedContents` API rejects calls that ALSO carry
+# `system_instruction`, `tools`, or `tool_config` in the same request —
+# they have to live INSIDE the cached content. sciagent's tool surface is
+# dynamic per call, so any sciagent run hits the 400:
+#     "CachedContent can not be used with GenerateContent request setting
+#      system_instruction, tools or tool_config."
+# Implicit Gemini cache (auto on 2.5+) still yields the 90% discount on
+# repeated prefixes, so we lose nothing material by skipping markers.
 # OpenAI auto-caches without client markers; xAI exposes no cache surface
 # today — both fall through unchanged.
-_CACHE_CONTROL_PROVIDERS = frozenset({"anthropic", "gemini"})
+_CACHE_CONTROL_PROVIDERS = frozenset({"anthropic"})
 
 
 # Providers that report cached input tokens *separately* from prompt_tokens.
@@ -619,32 +636,31 @@ class LLMClient:
 
     def _format_messages_with_prompt_caching(self, messages: List[Dict]) -> List[Dict]:
         """
-        Format messages to opt into provider-side prompt caching.
+        Format messages to opt into Anthropic prompt caching.
 
-        Caching reduces input cost ~90% on Anthropic and ~75-90% on Gemini
-        when a stable prefix recurs across turns. We emit Anthropic-shape
-        ``cache_control: {"type": "ephemeral"}`` markers; litellm passes
-        them straight through to Anthropic and translates them to Google's
-        cachedContents API for Gemini (see litellm issue #4284,
-        docs.litellm.ai/docs/completion/prompt_caching).
+        Caching reduces input cost ~90% on Anthropic when a stable prefix
+        recurs across turns. We emit ``cache_control: {"type": "ephemeral"}``
+        markers and litellm passes them straight through.
 
-        Per-provider marker placement:
+        Anthropic marker placement: up to 2 markers (system + LAST long user
+        message). Anthropic caps cache_control markers at 4 per request;
+        staying at 2 leaves headroom. Earlier "mark every long user message"
+        produced 5+ markers in compute-subagent runs and the API rejected
+        the request mid-run:
+            "A maximum of 4 blocks with cache_control may be
+             provided. Found 5."
 
-          - **Anthropic** — up to 2 markers (system + LAST long user
-            message). Anthropic caps cache_control markers at 4 per
-            request; staying at 2 leaves headroom. Earlier "mark every
-            long user message" produced 5+ markers in compute-subagent
-            runs and the API rejected the request mid-run:
-                "A maximum of 4 blocks with cache_control may be
-                 provided. Found 5."
-          - **Gemini** — 1 marker on the system prompt only. Gemini
-            caches one continuous block per request; the system prompt is
-            the biggest stable prefix. Multi-block coverage for Gemini is
-            a follow-up.
-
-        Providers outside ``_CACHE_CONTROL_PROVIDERS`` (OpenAI, xAI,
-        vLLM, …) get messages back untouched: OpenAI auto-caches without
-        client markers, xAI has no cache surface, vLLM varies.
+        Other providers fall through unchanged:
+          - **OpenAI** auto-caches without client markers (≥1024 tokens, in
+            128-token increments).
+          - **Gemini** was tried (litellm issue #4284 supports the
+            translation), but Google's cachedContents API rejects calls that
+            also carry tools / tool_config / system_instruction — sciagent's
+            tool surface is dynamic, so the combination 400s. Gemini's
+            implicit cache (auto on 2.5+) still yields the 90% discount on
+            repeated prefixes.
+          - **xAI** has no cache surface today.
+          - **vLLM** varies.
         """
         provider = self._provider()
         if provider not in _CACHE_CONTROL_PROVIDERS:

@@ -221,12 +221,18 @@ def test_l2_llmresponse_exposes_normalized_fields():
     assert r.cache_creation_input_tokens == 128
 
 
-def test_l2_cache_control_gate_includes_gemini():
-    """litellm translates Anthropic-shape cache_control:ephemeral into
-    Google's cachedContents API; we gate the marker emitter on both
-    providers. OpenAI and xAI stay opted out."""
+def test_l2_cache_control_gate_anthropic_only():
+    """cache_control:ephemeral emission is Anthropic-only.
+
+    Gemini was tried (litellm issue #4284 supports the translation), but
+    Google's cachedContents API rejects calls that ALSO carry
+    system_instruction / tools / tool_config in the same request — exactly
+    what sciagent sends. Implicit Gemini cache (auto on 2.5+) still yields
+    the 90% discount on repeated prefixes, so we lose nothing material.
+    See memory `feedback_gemini_explicit_cache_incompatible_with_tools.md`.
+    """
     assert "anthropic" in _CACHE_CONTROL_PROVIDERS
-    assert "gemini" in _CACHE_CONTROL_PROVIDERS
+    assert "gemini" not in _CACHE_CONTROL_PROVIDERS
     assert "openai" not in _CACHE_CONTROL_PROVIDERS
     assert "xai" not in _CACHE_CONTROL_PROVIDERS
 
@@ -242,19 +248,18 @@ def _count_cache_markers(formatted):
     return n
 
 
-def test_l2_gemini_gets_single_system_marker_only():
-    """Gemini caches one continuous block per request — we emit one
-    marker on the system prompt, never on user messages. Anthropic's
-    two-marker (system + last long user) path stays Anthropic-only."""
+def test_l2_gemini_emits_no_cache_markers():
+    """Gemini falls through ``_format_messages_with_prompt_caching``
+    untouched; messages reach litellm without any cache_control fields."""
     client = LLMClient(model="gemini/gemini-2.5-flash", api_key="test-noop")
     msgs = [
         {"role": "system", "content": "sys " * 200},
         {"role": "user", "content": "x" * 5000},
     ]
     out = client._format_messages_with_prompt_caching(msgs)
-    assert _count_cache_markers(out) == 1
-    # The marker is on the system block; the long user message is left as a str.
-    assert isinstance(out[0]["content"], list)
+    assert _count_cache_markers(out) == 0
+    # Messages pass through with string content intact.
+    assert out[0]["content"] == "sys " * 200
     assert out[1]["content"] == "x" * 5000
 
 
@@ -283,10 +288,12 @@ def test_l2_openai_skips_cache_control():
     assert _count_cache_markers(out) == 0
 
 
-def test_l2_gemini_cache_control_marker_round_trips_through_litellm():
-    """Acceptance check: a Gemini call with the cache_control marker
-    we emit must not raise InvalidRequestError / UnsupportedParamsError.
-    Routes through real litellm request shaping via mock_response."""
+def test_l2_gemini_call_with_tools_round_trips_through_litellm():
+    """Regression check: a Gemini call carrying tools (sciagent's
+    standard shape) must not raise when we go through litellm. Previously
+    the cache_control emission caused a 400 from Google's cachedContents
+    API ("CachedContent can not be used with GenerateContent request
+    setting system_instruction, tools or tool_config")."""
     client = LLMClient(model="gemini/gemini-2.5-flash", api_key="test-noop")
     msgs = [
         {"role": "system", "content": "sys " * 200},
@@ -298,6 +305,17 @@ def test_l2_gemini_cache_control_marker_round_trips_through_litellm():
         model="gemini/gemini-2.5-flash",
         messages=formatted,
         mock_response="ok",
+        tools=[{
+            "type": "function",
+            "function": {
+                "name": "echo",
+                "description": "Echo input",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                },
+            },
+        }],
     )
 
 

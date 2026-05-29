@@ -114,10 +114,16 @@ _OVERLAY: Dict[str, Dict[str, Any]] = {
         "session_soft_budget_tokens": 1_500_000,
     },
     "gemini": {
-        # L2 + Gemini caching: litellm translates Anthropic-shape
-        # cache_control:ephemeral markers into Google's cachedContents API.
-        # Match the Anthropic threshold so the gate fires at the same size.
-        "cache_min_input_chars": 4096,
+        # Gemini caching: client-side cache_control markers were tried (litellm
+        # issue #4284 documents the translation to Google's cachedContents
+        # API), but Google rejects calls that ALSO carry tools / tool_config /
+        # system_instruction in the same generateContent request — they must
+        # live inside the cached content. sciagent's tool surface is dynamic
+        # per call, so any sciagent run with tools enabled hits a 400.
+        # Implicit cache (auto on Gemini 2.5+) still yields the 90% discount on
+        # repeated prefixes, so the 1M threshold here just disables the
+        # outbound emission gate; inbound cache-metric normalization stays.
+        "cache_min_input_chars": 1_000_000,
         "cache_ttl": "1h",
         "session_soft_budget_tokens": 2_000_000,
     },
