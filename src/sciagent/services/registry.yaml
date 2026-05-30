@@ -305,13 +305,15 @@ services:
       min_memory_gb: 8
       recommended_memory_gb: 32
       min_cpus: 4
-      gpu_beneficial: false
+      # Algorithm benefits from GPU; image rebuild may be needed for full speedup.
+      gpu_beneficial: true
       gpu_required: false
     capabilities:
       - "Time-domain electromagnetic simulations"
       - "Waveguide design and analysis"
       - "Resonator modeling"
       - "Near-to-far-field transformations"
+      - "GPU acceleration available (CUDA)"
     example: |
       import meep as mp
       cell = mp.Vector3(16, 8, 0)
@@ -538,6 +540,7 @@ services:
       min_memory_gb: 8
       recommended_memory_gb: 32
       min_cpus: 4
+      # Algorithm benefits from GPU; image rebuild may be needed for full speedup.
       gpu_beneficial: true
       gpu_required: false
     capabilities:
@@ -547,6 +550,7 @@ services:
       - "Protein and membrane simulations"
       - "Trajectory analysis with MDAnalysis"
       - "Force field support (AMBER, CHARMM, OPLS, etc.)"
+      - "GPU acceleration available (CUDA)"
     example: |
       # GROMACS workflow example
       # 1. Generate topology from PDB
@@ -714,6 +718,7 @@ services:
       min_memory_gb: 8
       recommended_memory_gb: 16
       min_cpus: 4
+      # Algorithm benefits from GPU; image rebuild may be needed for full speedup.
       gpu_beneficial: true
       gpu_required: false
     capabilities:
@@ -724,6 +729,7 @@ services:
       - "Quantum error correction"
       - "Circuit visualization and analysis"
       - "Transpilation and optimization for hardware"
+      - "GPU acceleration available (CUDA)"
     example: |
       from qiskit import QuantumCircuit
       from qiskit_aer import AerSimulator
@@ -986,6 +992,7 @@ services:
       min_memory_gb: 8
       recommended_memory_gb: 32
       min_cpus: 4
+      # Algorithm benefits from GPU; image rebuild may be needed for full speedup.
       gpu_beneficial: true
       gpu_required: false
     capabilities:
@@ -998,6 +1005,7 @@ services:
       - "Energy minimization and geometry optimization"
       - "Non-equilibrium molecular dynamics (NEMD)"
       - "KIM interatomic models support"
+      - "GPU acceleration available (CUDA)"
     example: |
       from lammps import lammps
 
@@ -1088,6 +1096,7 @@ services:
       min_memory_gb: 8
       recommended_memory_gb: 16
       min_cpus: 2
+      # Algorithm benefits from GPU; image rebuild may be needed for full speedup.
       gpu_beneficial: true
       gpu_required: false
     capabilities:
@@ -1099,6 +1108,7 @@ services:
       - "Batch rendering for HPC workflows"
       - "ParaView server (pvserver) for remote visualization"
       - "Filters: slice, contour, streamlines, glyphs"
+      - "GPU acceleration available (CUDA)"
     example: |
       # Python scripting with pvpython
       pvpython render_script.py
@@ -1123,3 +1133,50 @@ services:
       Show(slice1)
       view = GetActiveViewOrCreate('RenderView')
       SaveScreenshot("output.png", view)
+
+  pytorch:
+    description: "Generic GPU ML base: PyTorch 2.x + CUDA 12 + transformers + accelerate + peft + numpy/scipy/pandas. Training and inference both supported. Domain extensions (bio, vision, RL) compose on top via their own FROM ghcr.io/sciagent-ai/pytorch."
+    image: ghcr.io/sciagent-ai/pytorch
+    dockerfile: services/pytorch/Dockerfile
+    license: MIT
+    runtime: python3
+    workdir: /workspace
+    packages:
+      - torch
+      - transformers
+      - accelerate
+      - peft
+      - numpy
+      - scipy
+      - pandas
+      - matplotlib
+    extends: null
+    # pytorch/pytorch base image ships linux/amd64 only.
+    architectures:
+      - linux/amd64
+    resources:
+      min_memory_gb: 16
+      recommended_memory_gb: 24
+      min_cpus: 4
+      gpu_beneficial: true
+      gpu_required: true
+    capabilities:
+      - "PyTorch training and inference on GPU"
+      - "HuggingFace Transformers (pretrained load + fine-tune)"
+      - "Parameter-efficient fine-tuning (PEFT, LoRA, QLoRA)"
+      - "HuggingFace Accelerate (multi-GPU + mixed precision)"
+      - "numpy / scipy / pandas data prep for ML workflows"
+    example: |
+      import torch
+      from transformers import AutoTokenizer, AutoModel
+
+      assert torch.cuda.is_available(), "GPU required for this service"
+      print(f"Device: {torch.cuda.get_device_name(0)}")
+
+      tok = AutoTokenizer.from_pretrained("gpt2")
+      model = AutoModel.from_pretrained("gpt2").to("cuda")
+
+      ids = tok("hello world", return_tensors="pt").input_ids.to("cuda")
+      with torch.no_grad():
+          out = model(ids)
+      print(f"Hidden state shape: {tuple(out.last_hidden_state.shape)}")
