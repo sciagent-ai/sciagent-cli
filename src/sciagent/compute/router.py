@@ -323,6 +323,21 @@ class ComputeRouter:
         """Restart a previously stopped cluster, reusing its disk."""
         return self._require_skypilot().cluster_start(cluster_name)
 
+    def cost_report(
+        self,
+        cluster_names: Optional[list] = None,
+    ) -> list:
+        """Return Sky's realized cost rows, optionally filtered. Empty list
+        when SkyPilot isn't available.
+
+        Thin pass-through used by ``RunCostTracker.poll_active_clusters`` so
+        cost polling stays best-effort across environments where Sky isn't
+        installed (local-only setups).
+        """
+        if "skypilot" not in self._backends:
+            return []
+        return self._backends["skypilot"].cost_report(cluster_names=cluster_names)
+
     def set_cluster_autostop(
         self,
         cluster_name: str,

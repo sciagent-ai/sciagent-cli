@@ -11,12 +11,21 @@ Schema v2 (H3) adds optional cost / token / model fields on ``tool_result``
 events and optional ``cost_usd`` on ``compute_job_status_changed`` events.
 Fields default to ``None`` so v1 readers continue to parse v2 lines; v2
 readers see ``None`` for cost on v1 lines.
+
+H6 extends v2 (no schema_version bump) with:
+  - ``tool_result.cost_kind`` ∈ {"llm", "compute", "storage"} — required
+    when ``cost_usd`` is set, optional otherwise. Lets cost_rollup group
+    per-axis without re-deriving from tool_name.
+  - ``compute_cost_observed`` — new event kind emitted by RunCostTracker
+    when it learns of realized (or fallback-estimated) cluster cost.
+
 The event kinds are:
 
   - tool_call               (an atomic-tool invocation began)
   - tool_result             (the invocation returned)
   - compute_job_launched    (a cloud job was submitted)
   - compute_job_status_changed (the mapped status moved; one per transition)
+  - compute_cost_observed   (RunCostTracker recorded realized/estimated cluster cost)
   - artifact_produced       (a file was observed on disk)
   - verification_result     (a DATA / EXEC / LLM gate produced a verdict)
   - correction              (an earlier event has been superseded)
@@ -244,6 +253,7 @@ class ProvenanceLog:
         tokens_in: Optional[int] = None,
         tokens_out: Optional[int] = None,
         model: Optional[str] = None,
+        cost_kind: Optional[str] = None,
     ) -> str:
         """Emit a tool_result event right after tool dispatch returns.
 
@@ -251,7 +261,14 @@ class ProvenanceLog:
         fields (schema v2, H3) carry per-call LLM usage when the tool
         wrapped a litellm.completion call. They are passed through verbatim;
         missing values stay ``None`` so v1 readers see no shape change.
+
+        ``cost_kind`` (H6) ∈ {"llm", "compute", "storage"} discriminates the
+        cost axis when ``cost_usd`` is set. Defaults to "llm" if ``cost_usd``
+        is set and no kind was given — preserves the H3 "tool wrapped an LLM
+        call" interpretation. Stays ``None`` when no cost was reported.
         """
+        if cost_usd is not None and cost_kind is None:
+            cost_kind = "llm"
         body = {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
@@ -260,6 +277,7 @@ class ProvenanceLog:
             "error": error,
             "duration_ms": int(duration_ms),
             "cost_usd": cost_usd,
+            "cost_kind": cost_kind,
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "model": model,
@@ -400,6 +418,37 @@ class ProvenanceLog:
         event_id = self._write_event("compute_job_status_changed", body)
         self._status_memo[job_id] = status
         return event_id
+
+    def emit_compute_cost_observed(
+        self,
+        *,
+        cluster_name: str,
+        instance_type: Optional[str],
+        wall_seconds: float,
+        cost_usd: float,
+        cost_source: str,
+    ) -> str:
+        """Emit a compute_cost_observed event (H6).
+
+        Fired by RunCostTracker each time it learns realized (or fallback-
+        estimated) cluster cost: per-turn polling, cluster terminate,
+        session end. ``cost_source`` ∈ {"sky_cost_report",
+        "sky_optimizer_estimate", "session_end_fallback"} per design §8.2 —
+        the discriminator a bench reader uses to weight reliability.
+
+        The aggregate `RunCostTracker.compute_cost_usd` is recomputed from
+        sky's authoritative numbers each poll; this event records the
+        per-cluster row that fed the rollup, so a verifier can reconstruct
+        the cluster-by-cluster breakdown without re-querying sky.
+        """
+        body = {
+            "cluster_name": cluster_name,
+            "instance_type": instance_type,
+            "wall_seconds": float(wall_seconds),
+            "cost_usd": float(cost_usd),
+            "cost_source": cost_source,
+        }
+        return self._write_event("compute_cost_observed", body)
 
     def emit_artifact_produced(
         self,

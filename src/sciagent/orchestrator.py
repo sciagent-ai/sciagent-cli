@@ -29,6 +29,10 @@ from .tools.atomic.todo import TodoTool, TodoGraph, TodoItem
 from .subagent import SubAgentOrchestrator, SubAgentResult, SubAgentConfig
 from .provenance import ProvenanceChecker, ProvenanceResult
 from .provenance_log import get_active_session_log
+from .run_cost import (
+    RunCostTracker,
+    set_active_cost_tracker,
+)
 from .defaults import (
     CODING_MODEL,
     FAST_MODEL,
@@ -208,6 +212,13 @@ class TaskOrchestrator:
         self._execution_log: List[Dict[str, Any]] = []
         self._start_time: Optional[float] = None
 
+        # H6: three-axis cost aggregator. Owns the number _check_budgets
+        # reads (replaces H1's hasattr(self, '_cost_so_far') stub). Set to
+        # the process-level active tracker for the duration of execute_all
+        # so the LLM hook in llm.py can update it without a constructor
+        # dependency on the orchestrator.
+        self._cost_tracker: RunCostTracker = RunCostTracker()
+
         # Provenance checking (data gate)
         self._provenance_checker = ProvenanceChecker()
         self._data_gate_passed: bool = False
@@ -235,6 +246,27 @@ class TaskOrchestrator:
         self._data_gate_passed = False
         self._exec_gate_passed = False
 
+        # H6: bind the tracker's session_id to the active provenance session
+        # so finalize / poll resolve the right cluster manifest. Register
+        # process-wide so the LLM hook (llm.py:_capture_last_usage) can
+        # feed it without a constructor wire-through. The try/finally below
+        # guarantees the registration is cleared and storage is finalized
+        # on every exit path — clean return, gate failure, BudgetExceeded.
+        active_log = get_active_session_log()
+        if active_log is not None and not self._cost_tracker.session_id:
+            self._cost_tracker.session_id = active_log.session_id
+        set_active_cost_tracker(self._cost_tracker)
+        try:
+            return self._execute_all_inner(graph)
+        finally:
+            try:
+                self._cost_tracker.finalize_storage()
+            except Exception:
+                pass
+            set_active_cost_tracker(None)
+
+    def _execute_all_inner(self, graph) -> Dict[str, Any]:
+        """Body of execute_all wrapped by the H6 tracker try/finally."""
         if self.config.verbose:
             print("=" * 60)
             print("TASK ORCHESTRATOR - Starting Execution")
@@ -262,10 +294,26 @@ class TaskOrchestrator:
 
         # Execute batch by batch
         for batch_num, batch in enumerate(batches):
-            # Kill-switch: wall-time and (post-H3) cost caps. Checked once
+            # H6: refresh compute_cost_usd from sky's authoritative numbers
+            # before the cap check, so a cluster that's run up cost between
+            # turns gets the kill switch this turn instead of the next.
+            # Best-effort — a sky.cost_report() failure must not stop work.
+            try:
+                self._cost_tracker.poll_active_clusters()
+            except Exception:
+                pass
+
+            # Kill-switch: wall-time and (H6) cost caps. Checked once
             # per batch turn before any task in the batch runs, so a
             # cap that's already been crossed never spawns more work.
-            self._check_budgets()
+            # On BudgetExceeded, stop every cluster registered to this
+            # session BEFORE propagating — the H1 wart was a cap that
+            # fired but left clusters running and accruing cost.
+            try:
+                self._check_budgets()
+            except BudgetExceeded:
+                self._stop_session_clusters("budget exceeded")
+                raise
 
             # DATA GATE CHECK: Before analysis tasks, verify data provenance
             if self.config.enable_data_gate and not self._data_gate_passed:
@@ -428,10 +476,11 @@ class TaskOrchestrator:
         """Raise BudgetExceeded if wall-time or cost has crossed the configured cap.
 
         Wall-time is measured from ``self._start_time`` (set at the top of
-        ``execute_all``); cost reads ``self._cost_so_far`` if H3 has plumbed
-        it through. When ``_cost_so_far`` is not yet present, the cost branch
-        skips silently — the cap on the config still loads, it just doesn't
-        fire until H3 lands.
+        ``execute_all``). Cost is read from ``self._cost_tracker.total_usd``
+        (H6) — the sum of llm + compute + storage axes per
+        ``feedback_cost_axis_separation.md``. The total is what the cap
+        compares against; the per-axis breakdown stays the source of truth
+        on the provenance log and on the bench's CellResult.
         """
         if self._start_time is None:
             return
@@ -443,15 +492,56 @@ class TaskOrchestrator:
                     f"({elapsed:.0f}s)"
                 )
         if self.config.max_cost_usd is not None:
-            # TODO(H3): self._cost_so_far is populated by the cost-tracking
-            # work in H3. Until then, the cap is loadable and the check is a
-            # no-op — exactly what the design doc (§3.5) calls for.
-            cost = getattr(self, "_cost_so_far", None)
-            if cost is not None and cost > self.config.max_cost_usd:
+            cost = self._cost_tracker.total_usd
+            if cost > self.config.max_cost_usd:
                 raise BudgetExceeded(
                     f"max_cost_usd={self.config.max_cost_usd} exceeded "
                     f"(${cost:.2f})"
                 )
+
+    def _stop_session_clusters(self, reason: str) -> None:
+        """Issue ``sky.stop`` (non-destructive) on every cluster the active
+        session registered.
+
+        Called from the BudgetExceeded path so a cap that fires also closes
+        the cost spigot. ``sky.stop`` (not ``sky.down``) per design §8.4 and
+        feedback_cluster_lifecycle_stop_not_down.md: preserves disk + data
+        tier; the next ``cluster_start`` is fast. A stop failure is logged
+        but does not block the exception propagating — the orchestrator's
+        reaper subagent is the safety net for orphaned clusters.
+        """
+        session_id = self._cost_tracker.session_id
+        if not session_id:
+            return
+        try:
+            from .compute.cluster_manifest import list_clusters
+            from .compute.router import ComputeRouter
+        except Exception:
+            return
+        try:
+            records = list_clusters(session_id=session_id)
+        except Exception:
+            return
+        names = [r.get("cluster_name") for r in records if r.get("cluster_name")]
+        if not names:
+            return
+        if self.config.verbose:
+            print(
+                f"\n🛑 {reason}: stopping {len(names)} session cluster(s): "
+                f"{', '.join(names)}"
+            )
+        router = ComputeRouter()
+        for name in names:
+            try:
+                router.cluster_stop(name)
+                if self.config.verbose:
+                    print(f"   ✓ stop submitted: {name}")
+            except Exception as exc:
+                if self.config.verbose:
+                    print(
+                        f"   ✗ failed to stop {name}: {exc} "
+                        f"(autostop will catch it; run `sky stop {name}` to force)"
+                    )
 
     def execute_next(self) -> Optional[ExecutionResult]:
         """

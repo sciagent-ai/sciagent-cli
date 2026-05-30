@@ -565,15 +565,29 @@ class LLMClient:
         for providers it supports. Missing fields stay ``None`` — we do NOT
         recompute cost from static token × price tables here. Provider
         branching belongs in litellm, not in sciagent.
+
+        H6: feed the realized cost into the process-level active cost
+        tracker so the orchestrator's ``_check_budgets`` can compare against
+        ``max_cost_usd``. The hook is a no-op when no tracker is registered
+        (CLI single-call path, tests). Stays provider-agnostic — the cost
+        value is whatever litellm normalized.
         """
         hidden_params = getattr(response, "_hidden_params", {}) or {}
         resp_usage = getattr(response, "usage", None)
+        cost_usd = hidden_params.get("response_cost")
         self._last_usage = {
             "tokens_in": getattr(resp_usage, "prompt_tokens", None) if resp_usage else None,
             "tokens_out": getattr(resp_usage, "completion_tokens", None) if resp_usage else None,
-            "cost_usd": hidden_params.get("response_cost"),
+            "cost_usd": cost_usd,
             "model": call_kwargs.get("model"),
         }
+        try:
+            from .run_cost import get_active_cost_tracker
+            tracker = get_active_cost_tracker()
+            if tracker is not None:
+                tracker.record_llm_call(cost_usd)
+        except Exception:
+            pass
 
     def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
         """

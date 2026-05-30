@@ -327,56 +327,20 @@ def _derive_summary_issues(
     return issues
 
 
-class VerifySessionTool:
-    """Atomic tool: read the durable provenance log for a session and
-    produce a structured report."""
-
-    name = "verify_session"
-    description = (
-        "Read the durable per-session provenance log "
-        "(~/.sciagent/sessions/<session_id>/provenance.jsonl) and produce a "
-        "structured verification report. Non-blocking, one-shot, snapshot. "
-        "The report is plain JSON suitable for any LLM provider to consume."
-    )
-
-    parameters = {
-        "type": "object",
-        "properties": {
-            "session_id": {
-                "type": "string",
-                "description": (
-                    "Session id whose log should be read. The directory "
-                    "~/.sciagent/sessions/<session_id>/provenance.jsonl must "
-                    "exist (it is created on first emission)."
-                ),
-            }
-        },
-        "required": ["session_id"],
-    }
-
-    def __init__(self, working_dir: str = "."):
-        self.working_dir = working_dir
-
-    def execute(self, session_id: str) -> ToolResult:
-        if not session_id or not isinstance(session_id, str):
-            return ToolResult(
-                success=False,
-                output=None,
-                error="session_id must be a non-empty string",
-            )
-        try:
-            report = verify_session(session_id)
-        except Exception as exc:
-            return ToolResult(
-                success=False,
-                output=None,
-                error=f"verify_session failed: {type(exc).__name__}: {exc}",
-            )
-        return ToolResult(success=True, output=report)
-
-    def to_schema(self) -> Dict:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-        }
+# NOTE — `VerifySessionTool` was retired 2026-05-29.
+#
+# The class was defined here but never registered in `create_default_registry`
+# (grep confirms no `register(VerifySessionTool())` call exists), so the agent
+# never had it in its toolset. It was forensic/replay plumbing wrapped as a
+# tool, but for live audit-grade verification the right mechanism is the
+# fresh-context `verifier` subagent kind invoked by
+# `TaskOrchestrator._run_llm_verification_gate` (orchestrator.py:365) — that's
+# the only verifier that runs adversarially with a fresh context.
+#
+# The pure function `verify_session(session_id, base_dir)` above is preserved
+# because it's a useful read helper. H2's planned `sciagent verify <log>` CLI
+# subcommand should NOT call it as a tool from inside an agent loop; instead
+# H2 should invoke the same gate code (and therefore the same `verifier`
+# subagent) that single-task runs will trigger after the §5.4.b prereq lands.
+# This keeps "live verification" and "replay verification" using one
+# mechanism, which is what audit-grade requires.

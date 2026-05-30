@@ -23,7 +23,7 @@ from sciagent.provenance_log import (
     get_provenance_log,
     reset_provenance_logs,
 )
-from sciagent.tools.atomic.verify import VerifySessionTool, verify_session
+from sciagent.tools.atomic.verify import verify_session
 
 
 @pytest.fixture(autouse=True)
@@ -241,39 +241,11 @@ def test_parse_errors_counted_in_report(tmp_path: Path, log: ProvenanceLog):
 # ---------------------------------------------------------------------------
 
 
-def test_verify_session_is_a_one_shot_atomic_tool():
-    """Hard-rule discipline (M1A): the schema must not expose any kwarg
-    that turns this into a blocker."""
-    tool = VerifySessionTool()
-    schema = tool.to_schema()
-    params = schema["parameters"]["properties"]
-    forbidden = {"wait", "until", "block", "follow", "stream"}
-    assert not (set(params.keys()) & forbidden), (
-        f"verify_session must not expose blocking kwargs: {set(params.keys()) & forbidden}"
-    )
-    # Required input is just session_id.
-    assert schema["parameters"]["required"] == ["session_id"]
-
-
-def test_tool_execute_returns_structured_report(tmp_path: Path, log: ProvenanceLog):
-    log.emit_tool_call(tool_call_id="c1", tool_name="shell", arguments={"x": 1})
-    log.emit_tool_result(
-        tool_call_id="c1", tool_name="shell", success=True,
-        output_summary={}, error=None, duration_ms=1,
-    )
-    tool = VerifySessionTool()
-    # Drive the underlying read against the test-isolated singleton
-    result = tool.execute(session_id="rep-sess")
-    assert result.success
-    assert result.output["session_id"] == "rep-sess"
-    assert result.output["events_total"] == 2
-
-
-def test_tool_rejects_empty_session_id():
-    tool = VerifySessionTool()
-    result = tool.execute(session_id="")
-    assert not result.success
-    assert "session_id" in (result.error or "")
+# VerifySessionTool was retired 2026-05-29 — tests for the tool-class wrapper
+# (test_verify_session_is_a_one_shot_atomic_tool, test_tool_execute_*,
+# test_tool_rejects_empty_session_id) have been removed. The pure function
+# verify_session(...) below is still exercised; that's what tests + future
+# H2 replay code will call.
 
 
 def test_repeat_calls_produce_consistent_snapshots(tmp_path: Path, log: ProvenanceLog):

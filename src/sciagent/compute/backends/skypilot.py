@@ -2081,6 +2081,56 @@ class SkyPilotBackend:
         except Exception:
             return False
 
+    # ------------------------------------------------------------------
+    # H6: realized cluster cost via sky.cost_report().
+    # ------------------------------------------------------------------
+
+    def cost_report(
+        self,
+        cluster_names: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return Sky's realized cost rows, optionally filtered to
+        ``cluster_names``.
+
+        Wraps ``sky.cost_report()`` — the Python entry point behind the
+        ``sky cost-report`` CLI. Reused by ``RunCostTracker.poll_active_clusters``
+        so we don't maintain a parallel pricing catalog. Each row is the
+        dict shape sky returns; the keys we care about are:
+
+          - ``name``           — cluster name
+          - ``resources``      — sky.Resources (used for ``instance_type``)
+          - ``duration``       — wall-seconds the cluster ran
+          - ``total_cost``     — realized $ for that cluster (sky-computed)
+
+        Older/newer sky versions have shipped slight key variants; this
+        method does not normalize them — the caller pulls whichever keys
+        are present and skips a row when a required field is missing. Keeps
+        sciagent decoupled from sky's row shape.
+
+        Returns ``[]`` on any sky error rather than raising; the cost path
+        is best-effort and the orchestrator must not fail because cost
+        polling failed.
+        """
+        sky = self._get_sky()
+        try:
+            rows = sky.cost_report()
+        except Exception:
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for row in rows or []:
+            try:
+                name = row.get("name") if isinstance(row, dict) else getattr(row, "name", None)
+            except Exception:
+                continue
+            if not name:
+                continue
+            if cluster_names is not None and name not in cluster_names:
+                continue
+            # Pass the row through verbatim; the consumer pulls fields.
+            out.append(row if isinstance(row, dict) else dict(row))
+        return out
+
     def _set_cluster_autostop(
         self,
         cluster_name: str,

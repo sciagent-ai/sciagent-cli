@@ -57,25 +57,27 @@ def test_wall_time_cap_unset_is_noop():
 
 
 def test_cost_cap_with_field_present_raises():
+    """H6: _check_budgets reads cost_tracker.total_usd (sum of llm + compute +
+    storage). A cap is crossed when the *total* exceeds it, not any single
+    axis — though here we drive the total entirely through the llm axis."""
     orch = _make_orch(max_cost_usd=1.0)
     orch._start_time = time.time()
-    orch._cost_so_far = 2.5
+    orch._cost_tracker.record_llm_call(2.5)
     with pytest.raises(BudgetExceeded, match="max_cost_usd=1.0 exceeded"):
         orch._check_budgets()
 
 
-def test_cost_cap_without_field_is_noop():
-    """Pre-H3, _cost_so_far doesn't exist — the check skips silently."""
+def test_cost_cap_with_zero_total_is_noop():
+    """A tracker that's seen no spend yet → total is 0 → no raise."""
     orch = _make_orch(max_cost_usd=1.0)
     orch._start_time = time.time()
-    # explicitly do NOT set orch._cost_so_far
     orch._check_budgets()  # no raise
 
 
 def test_cost_cap_below_threshold_passes():
     orch = _make_orch(max_cost_usd=1.0)
     orch._start_time = time.time()
-    orch._cost_so_far = 0.5
+    orch._cost_tracker.record_llm_call(0.5)
     orch._check_budgets()  # no raise
 
 
