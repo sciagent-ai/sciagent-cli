@@ -735,6 +735,18 @@ def set_active_session(session_id: Optional[str]) -> None:
     _active_session_id = session_id
 
 
+def get_active_session_id() -> Optional[str]:
+    """Return the active session id, or None.
+
+    Callers that need just the id (not the full ProvenanceLog object)
+    use this to avoid pulling in the lazy log-singleton creation that
+    ``get_active_session_log()`` does. ExecLogger / FetchLogger use it
+    to scope their per-project JSONLs to the active session's directory
+    instead of letting them accumulate in ``<cwd>/_logs/``.
+    """
+    return _active_session_id
+
+
 def get_active_session_log() -> Optional[ProvenanceLog]:
     """Return the ProvenanceLog for the active session, or None.
 

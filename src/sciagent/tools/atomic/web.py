@@ -97,14 +97,36 @@ class FetchLogger:
         if self._initialized:
             return
 
-        # Default to _logs in current working directory
-        if log_dir is None:
-            log_dir = os.path.join(os.getcwd(), "_logs")
-
-        self._log_dir = Path(log_dir)
-        self._log_dir.mkdir(parents=True, exist_ok=True)
-        self._log_file = self._log_dir / "fetch_log.jsonl"
+        # An explicit log_dir is honored verbatim (test paths,
+        # ProvenanceChecker forensic instantiation). When None, the dir
+        # resolves lazily on every read/write — preferring the active
+        # session's ``~/.sciagent/sessions/<sid>/_legacy_logs/`` so the
+        # project ``<cwd>/_logs/`` doesn't accumulate JSONL entries
+        # across sessions. surface_merge_findings.md Option 1 fix.
+        self._explicit_log_dir: Optional[Path] = (
+            Path(log_dir) if log_dir is not None else None
+        )
         self._initialized = True
+
+    @property
+    def _log_dir(self) -> Path:
+        """Resolved log directory. Active-session-scoped when available,
+        else the explicit dir from init, else ``<cwd>/_logs/``."""
+        if self._explicit_log_dir is not None:
+            base = self._explicit_log_dir
+        else:
+            from sciagent.provenance_log import get_active_session_id
+            sid = get_active_session_id()
+            if sid:
+                base = Path.home() / ".sciagent" / "sessions" / sid / "_legacy_logs"
+            else:
+                base = Path(os.getcwd()) / "_logs"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+
+    @property
+    def _log_file(self) -> Path:
+        return self._log_dir / "fetch_log.jsonl"
 
     def log_fetch(
         self,
