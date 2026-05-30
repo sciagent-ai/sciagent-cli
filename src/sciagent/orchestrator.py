@@ -1092,19 +1092,20 @@ class TaskOrchestrator:
 
     def _build_verification_context(self, task: TodoItem) -> Dict[str, Any]:
         """
-        Build the context for LLM verification of a task.
+        Build the header the verifier sees: original request, task content,
+        the agent's claimed result, the session log path, and the session id.
 
-        Returns claim summary and evidence to pass to the verifier subagent.
+        The verifier itself opens the session log via its `file_ops` tool and
+        audits the trajectory. We do not pre-curate fetch / exec summaries
+        here — that's the gap surface_merge_findings.md §1 closes.
         """
-        import json
+        log = get_active_session_log()
+        session_id = log.session_id if log is not None else None
+        log_path = str(log.path) if log is not None else None
 
-        # Build claim summary - start with original goal for outcome verification
-        claim_parts = []
-
-        # Add original request/goal if available (critical for outcome verification)
+        claim_parts: List[str] = []
         if self.config.original_request:
-            claim_parts.append(f"ORIGINAL USER GOAL: {self.config.original_request}\n")
-
+            claim_parts.append(f"ORIGINAL USER GOAL: {self.config.original_request}")
         claim_parts.append(f"Task: {task.content}")
 
         if task.result:
@@ -1118,69 +1119,11 @@ class TaskOrchestrator:
 
         claim = "\n".join(claim_parts)
 
-        # Build evidence summary
-        evidence_parts = []
-
-        # Add fetch log evidence
-        fetch_entries = self._provenance_checker.fetch_logger.get_recent_fetches(limit=10)
-        if fetch_entries:
-            evidence_parts.append("## Fetch Log (recent HTTP requests)")
-            for entry in fetch_entries[-5:]:  # Last 5 entries
-                url = entry.get("url", "unknown")
-                status = entry.get("status_code", "?")
-                success = entry.get("success", False)
-                evidence_parts.append(f"- {url[:80]}: status={status}, success={success}")
-
-        # Add exec log evidence
-        exec_entries = self._provenance_checker.exec_logger.get_recent_executions(limit=10)
-        if exec_entries:
-            evidence_parts.append("\n## Exec Log (recent commands)")
-            for entry in exec_entries[-5:]:
-                cmd = entry.get("command", "unknown")[:60]
-                exit_code = entry.get("exit_code", "?")
-                success = entry.get("success", False)
-                evidence_parts.append(f"- {cmd}: exit={exit_code}, success={success}")
-
-        # Add file evidence if produces file
-        if task.produces and task.produces.startswith("file:"):
-            parts = task.produces.split(":", maxsplit=3)
-            file_path = parts[1] if len(parts) > 1 else ""
-
-            if not os.path.isabs(file_path):
-                file_path = os.path.join(self.working_dir, file_path)
-
-            evidence_parts.append(f"\n## File Evidence: {file_path}")
-
-            if os.path.exists(file_path):
-                file_size = os.path.getsize(file_path)
-                evidence_parts.append(f"- File exists: Yes")
-                evidence_parts.append(f"- File size: {file_size} bytes")
-
-                # Read first 500 chars of file
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-                        content_preview = f.read(500)
-                    evidence_parts.append(f"- Content preview:\n```\n{content_preview}\n```")
-                except Exception as e:
-                    evidence_parts.append(f"- Content read error: {e}")
-            else:
-                evidence_parts.append(f"- File exists: No")
-
-        # Add provenance results if available
-        if task.id in self._provenance_results:
-            prov_result = self._provenance_results[task.id]
-            evidence_parts.append("\n## Provenance Check")
-            evidence_parts.append(f"- Valid: {prov_result.valid}")
-            if prov_result.issues:
-                for issue in prov_result.issues[:3]:
-                    evidence_parts.append(f"- Issue: {issue.message}")
-
-        evidence = "\n".join(evidence_parts) if evidence_parts else "No evidence available"
-
         return {
             "claim": claim,
-            "evidence": evidence,
             "task_id": task.id,
+            "session_id": session_id,
+            "session_log_path": log_path,
         }
 
     def _run_llm_verification_gate(self, tasks: List[TodoItem]) -> Dict[str, Any]:
@@ -1222,17 +1165,21 @@ class TaskOrchestrator:
             # Build context for verification
             context = self._build_verification_context(task)
 
-            # Build the verification prompt with claim and evidence injected
-            verification_prompt = f"""Please verify the following claim and evidence.
+            # Hand the verifier a small header. The session log path and the
+            # claim — that's it. The verifier opens the log via file_ops and
+            # audits the trajectory itself (see prompts/verification_llm.md).
+            session_id = context.get("session_id") or "<unknown>"
+            log_path = context.get("session_log_path") or "<no active session log>"
+            verification_prompt = f"""## Session
+Session id: {session_id}
+Session log: {log_path}
 
-## CLAIM TO AUDIT
+## Claim under audit
 {context['claim']}
 
-## EVIDENCE PROVIDED
-{context['evidence']}
-
-Respond with a JSON object containing your verdict, confidence, issues found, etc.
-"""
+Open the session log first (file_ops read on the path above). Reconstruct the
+trajectory, classify the task, and apply the audit rules in your system
+prompt. Respond with exactly one JSON object."""
 
             # Spawn verifier subagent with fresh context
             try:
@@ -1359,10 +1306,11 @@ Respond with a JSON object containing your verdict, confidence, issues found, et
                 verdict=verdict if verdict in ("verified", "refuted", "insufficient", "warning") else "insufficient",
                 confidence=float(confidence) if isinstance(confidence, (int, float)) else None,
                 evidence={
-                    "evidence_summary": context.get("evidence"),
+                    "session_log": context.get("session_log_path"),
                     "reasoning": verification.get("reasoning"),
                     "supporting_facts": verification.get("supporting_facts"),
                     "fabrication_indicators": verification.get("fabrication_indicators"),
+                    "missing_evidence": verification.get("missing_evidence"),
                 },
                 issues=issues,
                 verifier=verifier,
