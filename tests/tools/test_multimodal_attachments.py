@@ -82,14 +82,20 @@ def test_file_ops_pdf_emits_document_artifact(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "provider",
-    ["anthropic", "gemini", "vertex_ai", "bedrock"],
+    ["gemini", "vertex_ai", "bedrock"],
 )
 def test_pdf_routes_to_image_url_data_uri(provider: str) -> None:
-    """Anthropic / Gemini / Vertex / Bedrock all accept a PDF via an
-    ``image_url`` block whose URL is a ``data:application/pdf;base64,...``
-    URI; litellm rewrites that into the native ``document`` / ``inline_data``
-    block per provider. The dispatch boundary's job is just to emit that
-    one shape — litellm owns the rest."""
+    """Gemini / Vertex / Bedrock accept a PDF via an ``image_url`` block
+    whose URL is a ``data:application/pdf;base64,...`` URI; litellm
+    rewrites that into the native ``inline_data`` / ``document`` block per
+    provider.
+
+    Anthropic is intentionally NOT in this list — litellm's image_url →
+    Anthropic translation copies media_type as-is, producing an ``image``
+    block with media_type=application/pdf which Anthropic rejects (it
+    requires image/{png,jpeg,gif,webp}). PDFs going to Anthropic must use
+    the native ``document`` block instead (see
+    test_pdf_routes_to_anthropic_native_document)."""
     b64 = base64.b64encode(_MINI_PDF).decode()
     msg = Message.create_multimodal(
         role="user",
@@ -114,6 +120,37 @@ def test_pdf_routes_to_image_url_data_uri(provider: str) -> None:
     assert image_url_block["image_url"]["url"].startswith(
         "data:application/pdf;base64,"
     )
+
+
+def test_pdf_routes_to_anthropic_native_document() -> None:
+    """Anthropic accepts PDFs only via its native ``document`` block:
+    ``{"type": "document", "source": {"type": "base64",
+    "media_type": "application/pdf", "data": ...}}``. Routing via the
+    OpenAI image_url shape causes litellm to emit an Anthropic ``image``
+    block with media_type=application/pdf, which the Anthropic API
+    rejects (image blocks accept only image/{png,jpeg,gif,webp})."""
+    b64 = base64.b64encode(_MINI_PDF).decode()
+    msg = Message.create_multimodal(
+        role="user",
+        text="summarize",
+        attachments=[{
+            "type": "document",
+            "media_type": "application/pdf",
+            "data": b64,
+            "filename": "paper.pdf",
+        }],
+    )
+
+    client = _fake_client("anthropic")
+    out = client._format_attachments_for_provider([msg.to_dict()])
+    blocks = out[0]["content"]
+
+    doc_block = next(b for b in blocks if b["type"] == "document")
+    assert doc_block["source"]["type"] == "base64"
+    assert doc_block["source"]["media_type"] == "application/pdf"
+    assert doc_block["source"]["data"] == b64
+    # And we must NOT also emit an image_url for the same attachment.
+    assert all(b["type"] != "image_url" for b in blocks)
 
 
 def test_pdf_routes_to_openai_file_block() -> None:
@@ -183,12 +220,16 @@ _TINY_PNG = base64.b64decode(
 
 @pytest.mark.parametrize(
     "provider",
-    ["anthropic", "openai", "gemini", "vertex_ai", "bedrock", "xai", "groq"],
+    ["openai", "gemini", "vertex_ai", "bedrock", "xai", "groq"],
 )
 def test_image_routes_to_image_url_everywhere(provider: str) -> None:
-    """Images take ``image_url`` data URIs on every provider we've ever
-    seen; the capability table defaults unknown providers to that shape
-    for images specifically (other kinds default to drop)."""
+    """Images take ``image_url`` data URIs on every provider whose wire
+    format isn't Anthropic-native. The capability table defaults unknown
+    providers to that shape for images specifically (other kinds default
+    to drop).
+
+    Anthropic uses its native ``image`` block instead (see
+    test_image_routes_to_anthropic_native)."""
     b64 = base64.b64encode(_TINY_PNG).decode()
     msg = Message.create_multimodal(
         role="user",
@@ -203,6 +244,33 @@ def test_image_routes_to_image_url_everywhere(provider: str) -> None:
     out = client._format_attachments_for_provider([msg.to_dict()])
     blocks = out[0]["content"]
     assert any(b["type"] == "image_url" for b in blocks)
+
+
+def test_image_routes_to_anthropic_native() -> None:
+    """Anthropic accepts images via the native ``image`` block:
+    ``{"type": "image", "source": {"type": "base64",
+    "media_type": "image/png", "data": ...}}``. We use the same
+    shape that file_ops emits internally (sciagent's canonical
+    format), so this is effectively a passthrough."""
+    b64 = base64.b64encode(_TINY_PNG).decode()
+    msg = Message.create_multimodal(
+        role="user",
+        text="describe",
+        attachments=[{
+            "type": "image",
+            "media_type": "image/png",
+            "data": b64,
+        }],
+    )
+    client = _fake_client("anthropic")
+    out = client._format_attachments_for_provider([msg.to_dict()])
+    blocks = out[0]["content"]
+    img_block = next(b for b in blocks if b["type"] == "image")
+    assert img_block["source"]["type"] == "base64"
+    assert img_block["source"]["media_type"] == "image/png"
+    assert img_block["source"]["data"] == b64
+    # And no image_url for the same attachment.
+    assert all(b["type"] != "image_url" for b in blocks)
 
 
 # ---------------------------------------------------------------------------

@@ -656,9 +656,16 @@ class LLMClient:
     # provider = one column.
     _IMAGE_URL = "image_url_data_uri"
     _OPENAI_FILE = "openai_file_block"
+    # Anthropic's native multimodal block: {"type": "image"|"document",
+    # "source": {"type": "base64", "media_type": ..., "data": ...}}. Images
+    # accept only image/{png,jpeg,gif,webp}; PDFs MUST go through a `document`
+    # block with media_type=application/pdf. The OpenAI image_url shape
+    # collapses both into one image-with-media_type, which Anthropic rejects
+    # when media_type is application/pdf.
+    _ANTHROPIC_NATIVE = "anthropic_native_block"
 
     _CAPABILITY_TABLE: Dict[str, Dict[str, str]] = {
-        "anthropic":  {"image": _IMAGE_URL, "document": _IMAGE_URL},
+        "anthropic":  {"image": _ANTHROPIC_NATIVE, "document": _ANTHROPIC_NATIVE},
         "gemini":     {"image": _IMAGE_URL, "document": _IMAGE_URL,
                        "audio": _IMAGE_URL, "video": _IMAGE_URL},
         "vertex_ai":  {"image": _IMAGE_URL, "document": _IMAGE_URL,
@@ -732,6 +739,24 @@ class LLMClient:
                                     "filename": filename,
                                 }
                             })
+                        elif shape == self._ANTHROPIC_NATIVE:
+                            # Anthropic's native format: `image` block for
+                            # image/* media, `document` block for PDFs. Anthropic
+                            # rejects `image` with media_type=application/pdf,
+                            # which is what happens if we route PDFs through
+                            # _IMAGE_URL → litellm → Anthropic.
+                            native_source: Dict[str, Any] = {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            }
+                            native_block: Dict[str, Any] = {
+                                "type": block_type,
+                                "source": native_source,
+                            }
+                            if block_type == "document" and filename:
+                                native_block["title"] = filename
+                            new_content.append(native_block)
                         # shape is None → unsupported kind for this provider;
                         # drop the block. The read tool's text_fallback rides
                         # the tool-result message and is what the model sees.
