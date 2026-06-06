@@ -29,6 +29,13 @@ from dataclasses import dataclass, field
 
 import requests
 
+from .web_scientific import (
+    route_query,
+    search_arxiv,
+    search_crossref,
+    search_openalex,
+)
+
 
 # =============================================================================
 # FETCH LOGGING - Unbiased validation for data provenance
@@ -350,6 +357,19 @@ TIPS:
                 "type": "integer",
                 "description": "Number of results (1-10)",
                 "default": 5
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["auto", "web", "openalex", "arxiv", "crossref"],
+                "description": (
+                    "Search backend. 'auto' (default) routes DOI patterns to "
+                    "Crossref and arXiv IDs to arXiv, everything else to the "
+                    "general web (Brave/DDG). 'web' forces general search. "
+                    "'openalex'/'arxiv'/'crossref' force a scientific backend "
+                    "regardless of query shape — use these for literature "
+                    "search and citation-graph navigation."
+                ),
+                "default": "auto"
             }
         },
         "required": ["command"]
@@ -408,7 +428,11 @@ TIPS:
             query = kwargs.get("query", "")
             if not query:
                 return ToolResult(success=False, output=None, error="Missing query for search")
-            return self._search(query, kwargs.get("num_results", 5))
+            return self._search(
+                query,
+                kwargs.get("num_results", 5),
+                kind=kwargs.get("kind", "auto"),
+            )
         elif command == "fetch":
             url = kwargs.get("url", "")
             if not url:
@@ -461,21 +485,44 @@ TIPS:
         """Get quality indicator emoji for source type."""
         return self.QUALITY_EMOJI.get(source_type, '🌐')
 
-    def _search(self, query: str, num_results: int = 5) -> ToolResult:
-        """Search the web with retry logic and structured results."""
+    def _search(self, query: str, num_results: int = 5, kind: str = "auto") -> ToolResult:
+        """Search via the requested backend (or auto-route on query shape).
+
+        Routing:
+          - ``kind="auto"`` (default): DOI patterns → Crossref, arXiv IDs →
+            arXiv, everything else → general web (Brave → DDG fallback).
+            Only unambiguous patterns divert; "papers on metasurfaces" stays
+            on general web. The agent picks ``openalex``/``arxiv``/``crossref``
+            explicitly when it wants a literature backend.
+          - Explicit ``kind`` skips routing and calls the named backend.
+        """
         num_results = min(num_results, 10)
         search_date = datetime.now().strftime('%Y-%m-%d')
 
-        print(f"🔍 Searching: '{query}'")
+        # Resolve auto-routing once so the rest of the function operates on
+        # a concrete backend name.
+        if kind == "auto":
+            kind = route_query(query)
 
-        # Try Brave first with retry
-        results = self._search_brave(query, num_results)
-        provider = "Brave"
+        print(f"🔍 Searching ({kind}): '{query}'")
 
-        # Fallback to DuckDuckGo
-        if not results and DDGS:
-            results = self._search_duckduckgo(query, num_results)
-            provider = "DuckDuckGo"
+        if kind == "openalex":
+            results = search_openalex(query, num_results)
+            provider = "OpenAlex"
+        elif kind == "arxiv":
+            results = search_arxiv(query, num_results)
+            provider = "arXiv"
+        elif kind == "crossref":
+            results = search_crossref(query, num_results)
+            provider = "Crossref"
+        else:
+            # General web — Brave first, DDG fallback. Keeps the existing
+            # ladder unchanged.
+            results = self._search_brave(query, num_results)
+            provider = "Brave"
+            if not results and DDGS:
+                results = self._search_duckduckgo(query, num_results)
+                provider = "DuckDuckGo"
 
         if not results:
             return ToolResult(
@@ -518,15 +565,33 @@ TIPS:
             ""
         ]
 
-        # Show results grouped by quality
+        # Show results grouped by quality. Scientific backends populate the
+        # structured fields (authors / year / venue / source_id); we surface
+        # them on a dedicated line so the agent can cite without a fetch.
         for r in results:
             snippet = r['snippet'][:200] + "..." if len(r['snippet']) > 200 else r['snippet']
-            lines.append(
+            entry = (
                 f"[{r['index']}] {r['quality']} **{r['title']}**\n"
                 f"    URL: {r['url']}\n"
                 f"    Type: {r['source_type']} | Retrieved: {r['retrieved']}\n"
-                f"    {snippet}\n"
             )
+            cite_bits: List[str] = []
+            authors = r.get('authors') or []
+            if authors:
+                head = ", ".join(authors[:3])
+                if len(authors) > 3:
+                    head += " et al."
+                cite_bits.append(head)
+            if r.get('year'):
+                cite_bits.append(str(r['year']))
+            if r.get('venue'):
+                cite_bits.append(r['venue'])
+            if r.get('source_id'):
+                cite_bits.append(r['source_id'])
+            if cite_bits:
+                entry += f"    Cite: {' · '.join(cite_bits)}\n"
+            entry += f"    {snippet}\n"
+            lines.append(entry)
 
         # Add actionable next steps with priority guidance
         lines.append("")
