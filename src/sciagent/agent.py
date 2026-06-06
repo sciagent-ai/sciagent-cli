@@ -582,24 +582,93 @@ class AgentLoop:
         self.display.warning(f"Gate blocked: {gate_error}")
         return ToolResult(success=False, output=None, error=f"Blocked by gate: {gate_error}")
 
-    def _pause_for_user(self, reason: str, options: List[str]) -> ToolResult:
-        """
-        Action 2: Pause execution and get user decision on external failure.
-        Forces human involvement instead of letting LLM work around failures.
-        """
-        print(f"\n⚠️  {reason}")
-        print("\nWhat would you like to do?")
-        for i, opt in enumerate(options, 1):
-            print(f"  [{i}] {opt}")
+    def _harness_ask_user(
+        self,
+        *,
+        question: str,
+        options: List[str],
+        source: str,
+        context: Optional[str] = None,
+    ) -> ToolResult:
+        """Route a harness-initiated pause (DATA / EXEC gate) through the
+        same ask_user path the LLM uses.
 
+        Dispatches ask_user via the tool registry, prompts the user with the
+        shared ``_prompt_user_for_input`` UI, and emits a synthetic
+        ``tool_call``/``tool_result`` event pair to the provenance log. The
+        ``_source`` field on the tool_call arguments (e.g.
+        ``"harness:data_gate"``) lets log readers tell harness-initiated
+        ask_user events apart from LLM-initiated ones.
+
+        Returns a ToolResult shaped like the LLM-initiated ask_user path —
+        ``success=True`` with ``output="User responded: <text>"`` — so the
+        LLM sees the user's decision in its next turn and cooperates with
+        it. Stop semantics rely on LLM-level cooperation rather than a
+        harness halt (the old halt never propagated past the asking
+        subagent anyway).
+        """
+        import uuid
+
+        call_id = f"harness-{uuid.uuid4().hex[:12]}"
+        arguments: Dict[str, Any] = {
+            "question": question,
+            "options": list(options),
+            "_source": source,
+        }
+        if context is not None:
+            arguments["context"] = context
+
+        plog = None
         try:
-            choice = pt_prompt("\nChoice: ").strip()
-            if choice.isdigit() and 1 <= int(choice) <= len(options):
-                selected = options[int(choice) - 1]
-                return ToolResult(success=False, output=None, error=f"User chose: {selected}")
-            return ToolResult(success=False, output=None, error=f"User input: {choice}")
-        except (EOFError, KeyboardInterrupt):
-            return ToolResult(success=False, output=None, error="User chose: stop")
+            plog = get_provenance_log(self.state.session_id)
+        except Exception:
+            plog = None
+
+        started_monotonic = time.monotonic()
+        if plog is not None:
+            try:
+                plog.emit_tool_call(
+                    tool_call_id=call_id,
+                    tool_name="ask_user",
+                    arguments=arguments,
+                    actor=self.config.model,
+                )
+            except Exception:
+                pass  # Best-effort; never break dispatch on a log write.
+
+        registry_kwargs = {"question": question, "options": list(options)}
+        if context is not None:
+            registry_kwargs["context"] = context
+        tool_result = self.tools.execute("ask_user", **registry_kwargs)
+
+        if (
+            tool_result.success
+            and isinstance(tool_result.output, dict)
+            and tool_result.output.get("awaiting_user_input")
+        ):
+            user_response = self._prompt_user_for_input(tool_result.output)
+        else:
+            user_response = tool_result.error or "No response provided"
+
+        if plog is not None:
+            try:
+                duration_ms = int((time.monotonic() - started_monotonic) * 1000)
+                plog.emit_tool_result(
+                    tool_call_id=call_id,
+                    tool_name="ask_user",
+                    success=True,
+                    output_summary={"user_response": user_response, "_source": source},
+                    error=None,
+                    duration_ms=duration_ms,
+                    actor=self.config.model,
+                )
+            except Exception:
+                pass
+
+        return ToolResult(
+            success=True,
+            output=f"User responded: {user_response}",
+        )
 
     def _is_container_failure(self, command: str, result: ToolResult) -> bool:
         """Check if a bash command was a docker/container execution that failed."""
@@ -1127,13 +1196,18 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 # This prevents the LLM from silently "proceeding with local knowledge"
                 if self._consecutive_external_failures >= self._max_consecutive_external_failures:
                     self._consecutive_external_failures = 0  # Reset counter
-                    return self._pause_for_user(
-                        f"External data access failed {self._max_consecutive_external_failures} times: {result.error or 'No data retrieved'}",
+                    return self._harness_ask_user(
+                        question=(
+                            f"External data access failed "
+                            f"{self._max_consecutive_external_failures} times: "
+                            f"{result.error or 'No data retrieved'}"
+                        ),
                         options=[
                             "Provide alternative data source (I'll specify)",
                             "Continue with explicit limitations (document missing data)",
-                            "Stop task - required data not available"
-                        ]
+                            "Stop task - required data not available",
+                        ],
+                        source="harness:data_gate",
                     )
 
         # Track bash executions (especially docker)
@@ -1172,14 +1246,15 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                             display_error = line[:200]  # Truncate long lines
                             break
 
-                return self._pause_for_user(
-                    f"Container execution failed: {display_error}",
+                return self._harness_ask_user(
+                    question=f"Container execution failed: {display_error}",
                     options=[
                         "Use build-service to add missing package",
                         "Install at runtime (pip install in container)",
                         "Try alternative approach",
-                        "Stop"
-                    ]
+                        "Stop",
+                    ],
+                    source="harness:exec_gate",
                 )
 
         # Track file creation
