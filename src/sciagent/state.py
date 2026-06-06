@@ -168,18 +168,21 @@ class ContextWindow:
         self.messages.append(msg)
         return msg
 
-    def add_multimodal_user_message(self, text: str, images: List[Dict[str, Any]]) -> Message:
+    def add_multimodal_user_message(
+        self,
+        text: str,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+    ) -> Message:
         """
-        Add a user message with text and images.
+        Add a user message with text and any combination of attachments.
 
-        Args:
-            text: Text content
-            images: List of image dicts with keys: media_type, data (base64)
-
-        Returns:
-            Message with multimodal content blocks
+        Each attachment is an artifact descriptor (see ``Message.create_multimodal``)
+        carrying ``type`` / ``media_type`` / ``data``. Used by the agent loop to
+        inject multimodal tool results back into the conversation.
         """
-        msg = Message.create_multimodal(role="user", text=text, images=images)
+        msg = Message.create_multimodal(
+            role="user", text=text, attachments=attachments or []
+        )
         self.messages.append(msg)
         return msg
     

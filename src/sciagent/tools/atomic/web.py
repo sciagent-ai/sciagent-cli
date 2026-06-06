@@ -728,8 +728,35 @@ TIPS:
             if 'application/pdf' in content_type or url.lower().endswith('.pdf'):
                 # PDF content
                 is_pdf = True
-                content = self._pdf_to_text(response.content)
                 title = url.split('/')[-1]  # Use filename as title for PDFs
+                # When the caller didn't pass a focused extraction prompt, hand
+                # the model the raw PDF (figures, tables, equations preserved)
+                # rather than pypdf-stripped text. Same artifact shape that
+                # ``file_ops._read_pdf`` emits; provider wire-format dispatch
+                # happens once in ``llm._format_attachments_for_provider``.
+                # When ``prompt`` IS provided, fall through to the LLM
+                # extraction path on text — that path is about narrowing the
+                # response to a specific question, not about preserving
+                # multimodal fidelity.
+                if not prompt:
+                    artifact = self._pdf_artifact_from_bytes(
+                        response.content, filename=title, source_url=final_url
+                    )
+                    logger.log_fetch(
+                        url=url,
+                        final_url=final_url,
+                        status_code=response.status_code,
+                        content_type=content_type,
+                        content=artifact["text_fallback"][:WEB_FETCH_MAX_CONTENT],
+                        success=True,
+                        error=None,
+                    )
+                    print(
+                        f"📑 PDF artifact handed to model "
+                        f"({artifact['pages']} pages, {artifact['size_kb']:.1f} KB)"
+                    )
+                    return ToolResult(success=True, output=artifact, error=None)
+                content = self._pdf_to_text(response.content)
                 print(f"📑 Extracted text from PDF ({len(response.content):,} bytes)")
             elif 'html' in content_type or '<html' in response.text[:1000].lower():
                 # HTML content
@@ -974,6 +1001,49 @@ TIPS:
             return "\n\n".join(text_parts)
         except Exception as e:
             return f"[PDF extraction failed: {e}]"
+
+    def _pdf_artifact_from_bytes(
+        self, pdf_bytes: bytes, filename: str, source_url: str
+    ) -> Dict[str, Any]:
+        """Build the multimodal PDF artifact descriptor from raw bytes.
+
+        Matches the shape that ``file_ops._read_pdf`` emits so the agent's
+        tool-result loop and the LLM provider-format dispatch don't need to
+        care whether the PDF came from disk or HTTP.
+        """
+        import base64 as _b64
+
+        page_count = 0
+        text_fallback = ""
+        if PYPDF_AVAILABLE:
+            try:
+                reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+                page_count = len(reader.pages)
+                text_fallback = self._pdf_to_text(pdf_bytes)
+            except Exception as e:
+                text_fallback = f"[pypdf text fallback failed: {e}]"
+        else:
+            text_fallback = "[pypdf not installed; raw PDF was still handed to the model]"
+
+        b64_data = _b64.b64encode(pdf_bytes).decode("utf-8")
+        size_kb = len(pdf_bytes) / 1024
+        pages_str = f"{page_count} pages" if page_count else "PDF"
+        # Same canonical shape as ``file_ops._read_pdf`` — see that docstring
+        # for the extension contract.
+        return {
+            "type": "document",
+            "media_type": "application/pdf",
+            "data": b64_data,
+            "filename": filename,
+            "source_url": source_url,
+            "pages": page_count,
+            "size_kb": round(size_kb, 2),
+            "text_fallback": text_fallback,
+            "display_text": (
+                f"[PDF: {filename} ({pages_str}, {size_kb:.1f} KB) "
+                f"fetched from {source_url} — handed to model as native attachment]"
+            ),
+        }
 
     def _extract_with_llm(self, content: str, prompt: str, url: str) -> str:
         """

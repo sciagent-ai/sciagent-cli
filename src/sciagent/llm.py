@@ -192,6 +192,28 @@ def _extract_cache_metrics(response: Any, provider: str) -> Dict[str, Any]:
     return zero
 
 
+# Internal multimodal block kinds. Each kind maps to an Anthropic-style
+# ``{"type": kind, "source": {"type": "base64", "media_type": ..., "data": ...}}``
+# block; ``LLMClient._format_attachments_for_provider`` translates to the
+# active provider's wire format. To add a new kind: add it here, give it
+# defaults below, and add a row to ``LLMClient._CAPABILITY_TABLE``.
+MULTIMODAL_BLOCK_TYPES = frozenset({"image", "document", "audio", "video"})
+
+_DEFAULT_MEDIA_TYPE = {
+    "image": "image/png",
+    "document": "application/pdf",
+    "audio": "audio/wav",
+    "video": "video/mp4",
+}
+
+_DEFAULT_FILENAME = {
+    "image": "image.png",
+    "document": "document.pdf",
+    "audio": "audio.wav",
+    "video": "video.mp4",
+}
+
+
 @dataclass
 class Message:
     """
@@ -244,37 +266,50 @@ class Message:
         return False
 
     @staticmethod
-    def create_multimodal(role: str, text: str, images: List[Dict[str, Any]]) -> "Message":
+    def create_multimodal(
+        role: str,
+        text: str,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+    ) -> "Message":
         """
-        Create a multimodal message with text and images.
+        Create a multimodal message with text + an arbitrary list of attachments.
 
-        Args:
-            role: Message role (user, assistant, etc.)
-            text: Text content
-            images: List of image dicts with keys: media_type, data (base64)
+        Each attachment is the artifact descriptor emitted by a read tool — a
+        dict carrying ``type`` (``image`` / ``document`` / ``audio`` / ``video``),
+        ``media_type`` (full mime), ``data`` (base64), and optionally
+        ``filename``. The internal canonical block shapes match Anthropic's
+        native multimodal blocks so the rest of the codebase stays
+        provider-agnostic; ``LLMClient._format_attachments_for_provider`` does
+        the per-provider wire-format translation at send time.
 
-        Returns:
-            Message with multimodal content blocks
+        Extension: to support a new media kind, the read tool just needs to
+        emit an attachment dict with the appropriate ``type`` + ``media_type``.
+        No change needed here as long as the kind is one of the four supported
+        block types above. Truly novel kinds would also need a new block-type
+        branch in the provider-dispatch function.
         """
-        content_blocks = []
+        content_blocks: List[Dict[str, Any]] = []
 
-        # Add images first
-        for img in images:
-            content_blocks.append({
-                "type": "image",
+        # Attachments first so the trailing text is the "current ask".
+        for att in attachments or []:
+            kind = att.get("type", "image")
+            block: Dict[str, Any] = {
+                "type": kind,
                 "source": {
                     "type": "base64",
-                    "media_type": img["media_type"],
-                    "data": img["data"]
-                }
-            })
+                    "media_type": att["media_type"],
+                    "data": att["data"],
+                },
+            }
+            # ``filename`` is meaningful for document-class blocks (PDF/DOCX/etc.)
+            # — OpenAI requires it on the wire and Anthropic surfaces it in
+            # citations. Carry it through when present.
+            if "filename" in att:
+                block["source"]["filename"] = att["filename"]
+            content_blocks.append(block)
 
-        # Add text
         if text:
-            content_blocks.append({
-                "type": "text",
-                "text": text
-            })
+            content_blocks.append({"type": "text", "text": text})
 
         return Message(role=role, content=content_blocks)
 
@@ -589,19 +624,74 @@ class LLMClient:
         except Exception:
             pass
 
-    def _format_images_for_provider(self, messages: List[Dict]) -> List[Dict]:
+    # =====================================================================
+    # Multimodal attachment dispatch
+    # =====================================================================
+    #
+    # Internal canonical block shape (Anthropic-style) for every attachment:
+    #   {"type": <kind>, "source": {"type": "base64",
+    #                                "media_type": <mime>,
+    #                                "data": <base64>,
+    #                                "filename": <opt>}}
+    # where <kind> is one of: image / document / audio / video.
+    #
+    # We translate to two outgoing wire shapes — both flow through litellm,
+    # which then converts to the truly provider-native form:
+    #
+    #   IMAGE_URL_DATA_URI:  {"type": "image_url",
+    #                          "image_url": {"url": "data:<mime>;base64,..."}}
+    #     - Universally accepted for IMAGES.
+    #     - For DOCUMENTS, accepted by anthropic / gemini / vertex_ai / bedrock
+    #       (litellm routes the PDF data URI to ``document`` / ``inline_data``
+    #       blocks on the way out).
+    #
+    #   OPENAI_FILE_BLOCK:   {"type": "file",
+    #                          "file": {"file_data": "data:<mime>;base64,...",
+    #                                   "filename": "..."}}
+    #     - OpenAI chat completions accept this for DOCUMENTS (PDF natively;
+    #       DOCX/PPTX/XLSX as of recent GPT-5 updates).
+    #
+    # The capability table below maps (provider, kind) → wire shape. Adding
+    # support for a new kind = one row per provider. Adding support for a new
+    # provider = one column.
+    _IMAGE_URL = "image_url_data_uri"
+    _OPENAI_FILE = "openai_file_block"
+
+    _CAPABILITY_TABLE: Dict[str, Dict[str, str]] = {
+        "anthropic":  {"image": _IMAGE_URL, "document": _IMAGE_URL},
+        "gemini":     {"image": _IMAGE_URL, "document": _IMAGE_URL,
+                       "audio": _IMAGE_URL, "video": _IMAGE_URL},
+        "vertex_ai":  {"image": _IMAGE_URL, "document": _IMAGE_URL,
+                       "audio": _IMAGE_URL, "video": _IMAGE_URL},
+        "bedrock":    {"image": _IMAGE_URL, "document": _IMAGE_URL},
+        "openai":     {"image": _IMAGE_URL, "document": _OPENAI_FILE},
+        # Unknown providers fall through with ``image -> _IMAGE_URL`` only;
+        # other kinds get text-fallback-or-skip via the resolver below.
+    }
+
+    def _resolve_wire_shape(self, provider: str, kind: str) -> Optional[str]:
+        """Return the wire shape for (provider, kind), or None if unsupported.
+
+        ``None`` means: the active provider cannot ingest this kind through
+        litellm today. The dispatch loop will drop the attachment block; the
+        ``text_fallback`` carried alongside in the read-tool output is what the
+        model will see. Future work: add an OCR / rasterize fallback for the
+        gaps (e.g., rasterizing PDF pages for providers that don't take PDFs).
         """
-        Convert image content blocks to OpenAI format for litellm.
+        # Images default to IMAGE_URL even for unknown providers — every
+        # OpenAI-compat backend we know accepts that shape.
+        table = self._CAPABILITY_TABLE.get(provider, {"image": self._IMAGE_URL})
+        return table.get(kind)
 
-        IMPORTANT: litellm expects OpenAI-style multimodal format for ALL providers.
-        litellm then handles conversion to provider-specific formats internally.
+    def _format_attachments_for_provider(self, messages: List[Dict]) -> List[Dict]:
+        """Translate internal attachment blocks to the active provider's wire format.
 
-        Our internal format (Anthropic-style):
-            {"type": "image", "source": {"type": "base64", "media_type": "...", "data": "..."}}
-
-        litellm expected format (OpenAI-style):
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}
+        Single provider-dispatch boundary — the rest of the codebase emits the
+        canonical internal shape (see comment block above) and stays
+        provider-agnostic. Translation rules live in ``_CAPABILITY_TABLE``.
         """
+        provider = self._provider()
+
         formatted = []
         for msg in messages:
             msg_copy = msg.copy()
@@ -615,18 +705,36 @@ class LLMClient:
 
                     block_type = block.get("type")
 
-                    if block_type == "image":
-                        # Convert Anthropic-style image format to OpenAI format for litellm
+                    if block_type in MULTIMODAL_BLOCK_TYPES:
                         source = block.get("source", {})
-                        media_type = source.get("media_type", "image/png")
+                        media_type = source.get("media_type") or _DEFAULT_MEDIA_TYPE.get(
+                            block_type, "application/octet-stream"
+                        )
                         data = source.get("data", "")
-                        if data:  # Only add if there's actual data
+                        filename = source.get("filename") or _DEFAULT_FILENAME.get(
+                            block_type, "attachment"
+                        )
+                        if not data:
+                            continue
+                        shape = self._resolve_wire_shape(provider, block_type)
+                        if shape == self._IMAGE_URL:
                             new_content.append({
                                 "type": "image_url",
                                 "image_url": {
                                     "url": f"data:{media_type};base64,{data}"
                                 }
                             })
+                        elif shape == self._OPENAI_FILE:
+                            new_content.append({
+                                "type": "file",
+                                "file": {
+                                    "file_data": f"data:{media_type};base64,{data}",
+                                    "filename": filename,
+                                }
+                            })
+                        # shape is None → unsupported kind for this provider;
+                        # drop the block. The read tool's text_fallback rides
+                        # the tool-result message and is what the model sees.
                     elif block_type == "text":
                         # Keep text blocks, but strip any Anthropic-specific fields
                         new_content.append({
@@ -647,6 +755,7 @@ class LLMClient:
             formatted.append(msg_copy)
 
         return formatted
+
 
     def _format_messages_with_prompt_caching(self, messages: List[Dict]) -> List[Dict]:
         """
@@ -766,7 +875,7 @@ class LLMClient:
         msg_dicts = [m.to_dict() for m in messages]
 
         # Convert image blocks to provider-specific format
-        msg_dicts = self._format_images_for_provider(msg_dicts)
+        msg_dicts = self._format_attachments_for_provider(msg_dicts)
 
         # Apply Anthropic prompt caching if applicable
         msg_dicts = self._format_messages_with_prompt_caching(msg_dicts)

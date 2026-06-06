@@ -2,7 +2,12 @@
 File operations tool - unified read/write/edit/list.
 
 This tool IS the memory system. The filesystem persists data.
-Supports text files, PDFs (with pypdf), and images (PNG, JPG, GIF, WebP).
+Supports text files, images (PNG, JPG, GIF, WebP) and PDFs.
+
+PDFs are handed to the model as a native multimodal attachment (not
+pre-extracted text), so figures, tables, and equations survive. A pypdf
+text extraction is kept alongside as a fallback. Provider wire-format
+dispatch lives in ``llm._format_attachments_for_provider``.
 """
 
 from __future__ import annotations
@@ -263,19 +268,62 @@ class FileOpsTool:
             return ToolResult(success=False, output=None, error=str(e))
 
     def _read_pdf(self, path: Path, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
-        """Extract text from PDF file."""
-        if not PYPDF_AVAILABLE:
-            return ToolResult(
-                success=False,
-                output=None,
-                error="PDF reading requires pypdf. Install with: pip install pypdf"
-            )
+        """Read PDF as a multimodal artifact: raw bytes + pypdf text fallback.
 
+        Anthropic, Gemini, and OpenAI all accept PDFs natively through litellm —
+        the model does its own layout-aware rendering server-side, which
+        preserves figures/tables/equations that pypdf would strip. So we no
+        longer pre-extract text and throw away the rest; we hand the model the
+        whole PDF and keep a pypdf text fallback for log/debug and for any
+        provider that can't take the raw artifact.
+
+        Provider-format dispatch happens once in ``llm._format_attachments_for_provider``.
+        """
         try:
             pdf_bytes = path.read_bytes()
-            pdf_file = io.BytesIO(pdf_bytes)
-            reader = pypdf.PdfReader(pdf_file)
+        except Exception as e:
+            return ToolResult(success=False, output=None, error=f"Failed to read PDF: {str(e)}")
 
+        text_fallback, page_count = self._pdf_text_fallback(pdf_bytes)
+        b64_data = base64.b64encode(pdf_bytes).decode("utf-8")
+        size_kb = len(pdf_bytes) / 1024
+
+        pages_str = f"{page_count} pages" if page_count else "PDF"
+        display_text = f"[PDF: {path.name} ({pages_str}, {size_kb:.1f} KB) — handed to model as native attachment]"
+
+        # Internal canonical artifact shape — same ``type`` keys as Anthropic's
+        # native multimodal blocks (image / document / audio / video). The agent
+        # loop recognizes this set via ``MULTIMODAL_ARTIFACT_TYPES``; the LLM
+        # provider-dispatch in ``llm._format_attachments_for_provider`` translates
+        # to whichever wire format the active model accepts. To extend to
+        # ``.docx`` / ``.xlsx`` / ``.wav`` / ``.mp4`` / etc., emit the same shape
+        # with the matching ``type`` + ``media_type``; no other code needs changes.
+        return ToolResult(
+            success=True,
+            output={
+                "type": "document",
+                "media_type": "application/pdf",
+                "data": b64_data,
+                "filename": path.name,
+                "file_path": str(path),
+                "pages": page_count,
+                "size_kb": round(size_kb, 2),
+                "text_fallback": text_fallback,
+                "display_text": display_text,
+            },
+            error=None,
+        )
+
+    def _pdf_text_fallback(self, pdf_bytes: bytes) -> tuple[str, int]:
+        """Best-effort pypdf text extraction. Returns (text, page_count).
+
+        Used for the provenance log, the tool-result display string, and as
+        a fallback for providers that can't ingest the raw PDF.
+        """
+        if not PYPDF_AVAILABLE:
+            return ("[pypdf not installed; raw PDF was still handed to the model]", 0)
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
             text_parts = []
             for page_num, page in enumerate(reader.pages):
                 try:
@@ -284,33 +332,9 @@ class FileOpsTool:
                         text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
                 except Exception as e:
                     text_parts.append(f"--- Page {page_num + 1} ---\n[Error extracting: {e}]")
-
-            content = "\n\n".join(text_parts)
-            lines = content.splitlines()
-
-            # Apply line range if specified
-            if start_line is not None:
-                start_idx = max(0, start_line - 1)
-                end_idx = len(lines) if (end_line == -1 or end_line is None) else end_line
-                lines = lines[start_idx:end_idx]
-                line_offset = start_idx
-            else:
-                line_offset = 0
-
-            # Add line numbers
-            numbered = []
-            for i, line in enumerate(lines):
-                line_num = i + line_offset + 1
-                numbered.append(f"{line_num:4d} | {line}")
-
-            return ToolResult(
-                success=True,
-                output="\n".join(numbered),
-                error=None
-            )
-
+            return ("\n\n".join(text_parts), len(reader.pages))
         except Exception as e:
-            return ToolResult(success=False, output=None, error=f"Failed to read PDF: {str(e)}")
+            return (f"[pypdf text fallback failed: {e}]", 0)
 
     def _read_image(self, path: Path) -> ToolResult:
         """

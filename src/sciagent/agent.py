@@ -33,6 +33,18 @@ from .prompts import build_system_prompt
 from .provenance_log import get_provenance_log, set_active_session
 
 
+# Tool outputs carrying a top-level ``type`` in this set are treated as
+# multimodal artifacts: their raw bytes ride a separate user message rather
+# than getting flattened into the tool-result text channel. The set matches
+# Anthropic's native multimodal block names (image / document / audio /
+# video); ``llm._format_attachments_for_provider`` translates each kind to
+# whichever wire format the active provider accepts. Extending support to
+# a new kind = adding it here, having a read tool emit the matching
+# ``type`` + ``media_type``, and adding a block-type branch to the dispatch
+# function.
+MULTIMODAL_ARTIFACT_TYPES = frozenset({"image", "document", "audio", "video"})
+
+
 @dataclass
 class AgentConfig:
     """Configuration for the agent"""
@@ -1245,7 +1257,12 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         """
         results = []
         deferred_spiral_checks = []  # Defer spiral warnings until after all tool_results
-        pending_images = []  # Collect images to inject as multimodal message
+        # Collect multimodal artifacts (image / document / audio / video) emitted
+        # by tools to inject as a single multimodal user message at the end of
+        # the dispatch loop. See ``MULTIMODAL_ARTIFACT_TYPES`` for the recognized
+        # set; ``llm._format_attachments_for_provider`` translates each to the
+        # active provider's wire format.
+        pending_attachments: List[Dict[str, Any]] = []
 
         # M1B: per-session provenance log. Resolved once per loop entry —
         # the singleton accessor is cheap, but skipping the lookup per-call
@@ -1301,22 +1318,32 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 self.total_tokens += sub_tokens
                 self.total_subagent_tokens += sub_tokens
 
-            # Check if this is an image result from file_ops
-            is_image_result = (
-                result.success and
-                isinstance(result.output, dict) and
-                result.output.get("type") == "image"
+            # Detect multimodal artifacts emitted by file_ops / web / etc.
+            # All artifact kinds ride the same collect-then-inject path: we
+            # stash the descriptor in ``pending_attachments`` and replace the
+            # tool-result text with the short ``display_text`` so we never send
+            # base64 through the tool-result channel.
+            output_type = (
+                result.output.get("type")
+                if (result.success and isinstance(result.output, dict))
+                else None
             )
+            is_attachment_result = output_type in MULTIMODAL_ARTIFACT_TYPES
 
-            if is_image_result:
-                # Collect image for multimodal message
-                pending_images.append({
-                    "media_type": result.output["media_type"],
+            if is_attachment_result:
+                pending_attachments.append({
+                    "type": output_type,
+                    "media_type": result.output.get("media_type"),
                     "data": result.output["data"],
-                    "file_path": result.output.get("file_path", "unknown")
+                    "filename": result.output.get("filename"),
+                    "file_path": result.output.get("file_path")
+                                  or result.output.get("source_url")
+                                  or result.output.get("filename")
+                                  or "unknown",
                 })
-                # Use display text for the tool result (don't send base64 as text)
-                tool_result_text = result.output.get("display_text", "[Image loaded]")
+                tool_result_text = result.output.get(
+                    "display_text", f"[{output_type} attachment loaded]"
+                )
             else:
                 tool_result_text = result.to_message()
 
@@ -1334,17 +1361,23 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 result=tool_result_text
             )
 
-            # M1B: emit tool_result event. Image results record a metadata
-            # stub only — never the base64 — per the schema.
+            # M1B: emit tool_result event. Multimodal artifacts record a
+            # metadata stub only — never the base64 — per the schema.
             if plog is not None:
                 try:
-                    if is_image_result:
+                    if is_attachment_result:
                         output_summary: Any = {
-                            "type": "image",
+                            "type": output_type,
                             "media_type": result.output.get("media_type"),
+                            "filename": result.output.get("filename"),
                             "file_path": result.output.get("file_path"),
+                            "source_url": result.output.get("source_url"),
+                            "pages": result.output.get("pages"),
+                            "size_kb": result.output.get("size_kb"),
                             "size_bytes": len(result.output.get("data", "")) if result.output.get("data") else None,
                         }
+                        # Drop nones so the log row stays tight.
+                        output_summary = {k: v for k, v in output_summary.items() if v is not None}
                     else:
                         output_summary = result.output
                     duration_ms = int((time.monotonic() - call_started_monotonic) * 1000)
@@ -1370,10 +1403,16 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 except Exception:
                     pass  # Best-effort.
 
-            # Collect errors for deferred spiral checking
+            # Collect errors for deferred spiral checking. Multimodal artifacts
+            # hold raw bytes whose b64 representation can contain the substring
+            # "error" by coincidence; skip them here.
             if result.error:
                 deferred_spiral_checks.append(result.error)
-            elif result.output and not is_image_result and 'error' in str(result.output).lower():
+            elif (
+                result.output
+                and not is_attachment_result
+                and 'error' in str(result.output).lower()
+            ):
                 deferred_spiral_checks.append(str(result.output))
 
         # Now that all tool_results are added, check for spirals
@@ -1381,13 +1420,22 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
         for error in deferred_spiral_checks:
             self._check_spiral(error)
 
-        # If images were loaded, inject them as a multimodal user message
-        # This allows the LLM to actually "see" the images
-        if pending_images:
-            image_paths = [img["file_path"] for img in pending_images]
+        # If any multimodal artifacts were loaded, inject them as a single
+        # multimodal user message so the LLM can actually "see" them. One
+        # combined message lets the model reason across kinds side-by-side and
+        # avoids a message-count blip per kind.
+        if pending_attachments:
+            paths = [att["file_path"] for att in pending_attachments]
+            by_kind: Dict[str, int] = {}
+            for att in pending_attachments:
+                by_kind[att["type"]] = by_kind.get(att["type"], 0) + 1
+            counts_str = " + ".join(f"{n} {k}(s)" for k, n in by_kind.items())
             self.state.context.add_multimodal_user_message(
-                text=f"[System: {len(pending_images)} image(s) loaded: {', '.join(image_paths)}. Please analyze the image(s) above.]",
-                images=pending_images
+                text=(
+                    f"[System: {counts_str} loaded: {', '.join(paths)}. "
+                    f"Please analyze the attached content above.]"
+                ),
+                attachments=pending_attachments,
             )
 
         return results
