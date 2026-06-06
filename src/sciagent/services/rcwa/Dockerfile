@@ -39,7 +39,12 @@ RUN pip3 install --no-cache-dir numpy matplotlib && \
     sed -i "s|^CHOLMOD_LIB.*|CHOLMOD_LIB = -L$LIB_DIR -lcholmod|" Makefile && \
     sed -i 's|^OPENBLAS_INC.*|OPENBLAS_INC = -I/usr/include/openblas|' Makefile && \
     sed -i "s|^OPENBLAS_LIB.*|OPENBLAS_LIB = -L$LIB_DIR -lopenblas|" Makefile && \
-    make clean && make S4_pyext
+    make clean && make S4_pyext && \
+    # `make S4_pyext` produces the .so under build/lib*/ but doesn't install
+    # it on Python's import path. Copy it into the system site-packages so
+    # `python3 -c "import S4"` works from any cwd. Then verify the import.
+    cp build/lib*/S4*.so "$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/" && \
+    python3 -c "import S4; print('S4 import OK')"
 
 WORKDIR /workspace
 CMD ["python3"]
