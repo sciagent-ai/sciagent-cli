@@ -261,7 +261,7 @@ services:
 
   rcwa:
     description: "RCWA/S4 - Rigorous Coupled Wave Analysis for electromagnetic simulations"
-    image: ghcr.io/sciagent-ai/s4-rcwa
+    image: ghcr.io/sciagent-ai/rcwa
     dockerfile: services/rcwa/Dockerfile
     license: GPL-2.0
     runtime: python3
