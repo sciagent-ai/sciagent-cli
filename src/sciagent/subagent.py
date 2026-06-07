@@ -887,23 +887,39 @@ The failure mode that prompted this rule: subagent finishes the producer step, h
 
 ### Decision 2 — Container: when role IS right but the libs are missing
 
+Make this decision in your plan, not at execution time. The task tells
+you what the environment has to supply — read it for the operation
+class the work depends on (a derivation channel, a binary toolchain, a
+hardware-specific runtime, a state-holding mount) and pick the channel
+up-front. The run script comes AFTER the channel is decided, not as a
+first attempt that you patch when imports fail.
+
+The branches below are the plan-time options AND the recovery path: if
+execution surfaces a gap you didn't plan for (lib not in image, install
+fails, registry near-match instead of exact), iterate through them.
+Iteration is recovery, not the first pass.
+
 Four branches, ranked by recurrence + lib weight:
 
   A) **Pip-install in the current container.** Lightweight Python libs that
      won't conflict with the primary stack — typical examples are numerics
      and dataframe libraries, lightweight HTTP clients, simple ML helpers.
-     `pip install -q` on a warm cluster, ~10-30s. Normal and expected —
-     don't avoid this when it's the right tool. Use when the next step
-     still belongs in your role (a probe script that needs a dataframe lib;
-     a post-processing util the producer image lacks but pip can supply).
+     Two shapes by backend: on a warm cluster (cloud), exec the install
+     into the running container (`pip install -q <lib>`, seconds); for
+     a one-shot run (local docker is `--rm`, no warm container to exec
+     into), bake the install into the run command itself
+     (`pip install <lib> && <cmd>`). Normal and expected — don't avoid
+     this when it's the right tool.
 
   B) **Switch to an existing registry service.** Heavy / binary / system
      deps pip can't supply: visualization runtimes, GPU/MPI toolchains,
      GUI tools, specific OS libs, proprietary solvers, anything where
      install would be fragile or slow. `service_search` for the right
-     entry, `compute_run` a new cluster mounting the data tier (so it
-     reads the prior step's URIs), `compute_cluster(action="stop", ...)`
-     the prior cluster.
+     entry, then `compute_run` with that image. Two shapes by backend:
+     cloud — a new cluster mounting the data tier so it reads the prior
+     step's URIs from the workspace, then `compute_cluster(action="stop",
+     ...)` the prior cluster; local — a new `--rm` container with the
+     same workspace mount, nothing to stop afterwards.
 
   C) **Surface a registry gap to the parent / user.** When no existing
      service fits AND the gap looks recurring (a new scientific stack, an
@@ -959,6 +975,17 @@ The handoff between containers — same role or different role, same scale or di
   - Pip-installing heavy / system-dep stacks (visualization runtimes,
     GPU/MPI toolchains, GUI tools) instead of switching to a service that
     has them — that's branch (B), not (A).
+  - Silently downgrading to a less-featured workaround because the
+    current image lacks the right lib. The decision is which channel
+    supplies the dep, not whether to skip the lib: if pip can supply
+    it, install it (branch A); if pip can't, `service_search` for a
+    registry entry that already has it (branch B); if nothing fits,
+    surface a registry gap (branch C). Check the channels in order
+    before writing the fallback. The workspace mount (`/workspace/`)
+    is where state lives between steps — durability depends on backend
+    (cloud = persistent bucket across containers, local = cwd mount
+    that lives as long as the cwd does), but the handoff shape is the
+    same: write to /workspace/, the next step reads from /workspace/.
   - Extracting solver outputs via `cat`/`awk`/`grep` into shell variables
     or text dumps for downstream plotting — URIs are the handoff.
   - Spinning a second cluster and running a script there that doesn't

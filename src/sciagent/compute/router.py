@@ -20,7 +20,11 @@ class ComputeRouter:
 
     # Thresholds for routing to cloud backends
     LARGE_MEMORY_THRESHOLD_GB = 16
-    LARGE_CPU_THRESHOLD = 8  # More than 8 CPUs → cloud
+    LARGE_CPU_THRESHOLD = 4  # More than 4 CPUs → cloud
+    # Below this wall-time hint the cloud's ~40s provisioning tax
+    # dominates the run; if local fits, prefer local even when CPU
+    # count would otherwise route to sky. LLM-declared, not inferred.
+    SHORT_JOB_HOURS = 5.0 / 60.0  # 5 minutes
 
     def __init__(self):
         self._backends: Dict[str, Any] = {}
@@ -49,7 +53,8 @@ class ComputeRouter:
     def select(
         self,
         req: ComputeRequirements,
-        preferred: Optional[str] = None
+        preferred: Optional[str] = None,
+        duration_hours: Optional[float] = None,
     ) -> Tuple[Any, str]:
         """Select backend for job requirements.
 
@@ -57,12 +62,19 @@ class ComputeRouter:
         1. If preferred backend specified and available, use it
         2. Route GPU jobs (gpus > 0) to SkyPilot
         3. Route large memory jobs (> 16GB) to SkyPilot
-        4. Route high CPU jobs (> 8 cores) to SkyPilot
-        5. Default to local Docker
+        4. Short-job override: if duration_hours is below SHORT_JOB_HOURS
+           and local fits, prefer local even when CPU count would
+           otherwise route to sky (cloud provisioning would dominate
+           the wall time)
+        5. Route high CPU jobs (> 4 cores) to SkyPilot
+        6. Default to local Docker
 
         Args:
             req: Compute requirements
             preferred: Preferred backend name (optional)
+            duration_hours: LLM-declared wall-time hint; used as a
+                routing signal alongside cost/gate. None or above
+                SHORT_JOB_HOURS leaves the existing thresholds intact.
 
         Returns:
             Tuple of (backend, reason_string)
@@ -110,6 +122,24 @@ class ComputeRouter:
             if "skypilot" in self._backends:
                 return self._backends["skypilot"], f"Large memory job ({req.memory_gb}GB) routed to SkyPilot"
             # Fall through to local if SkyPilot not available
+
+        # Short-job override: when the LLM declared a short wall-time and
+        # local fits, prefer local even when CPU count would otherwise
+        # route to sky. A ~40s cloud provisioning tax dominates a few-min
+        # job; running it locally returns results sooner. GPU + large
+        # memory still force sky regardless — those checks fired above.
+        if (
+            duration_hours is not None
+            and duration_hours < self.SHORT_JOB_HOURS
+            and "local" in self._backends
+            and self._backends["local"].can_run(req)
+            and self._backends["local"].is_available()
+        ):
+            return (
+                self._backends["local"],
+                f"Short job ({duration_hours * 60:.1f} min declared), "
+                f"local fits — skipping cloud provisioning tax",
+            )
 
         # Route high CPU jobs to SkyPilot
         if req.cpus > self.LARGE_CPU_THRESHOLD:

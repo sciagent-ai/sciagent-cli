@@ -399,10 +399,13 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
             "duration_hours": {
                 "type": "number",
                 "description": (
-                    "Estimated runtime in hours. Drives estimated_total_usd "
-                    "in the menu and the commit-gate threshold check. Be "
+                    "Estimated runtime in hours. Drives estimated_total_usd, "
+                    "the commit-gate threshold check, AND the routing "
+                    "decision: short jobs (<5 min) prefer local when local "
+                    "fits, since cloud provisioning would dominate. Be "
                     "honest — under-estimating skips a gate that should "
-                    "have fired. Default 1.0."
+                    "have fired AND mis-routes short jobs to cloud. "
+                    "Default 1.0."
                 ),
                 "default": 1.0,
             },
@@ -999,9 +1002,15 @@ and auto-fetches /outputs/<job_id>/ to local on success."""
         try:
             router = self._get_router()
 
-            # Select backend and get cost estimate
+            # Select backend and get cost estimate. duration_hours flows
+            # into the router as a wall-time hint: short jobs prefer local
+            # when local fits (skips the cloud provisioning tax).
             preferred = backend if backend != "auto" else None
-            selected_backend, routing_reason = router.select(job.requirements, preferred=preferred)
+            selected_backend, routing_reason = router.select(
+                job.requirements,
+                preferred=preferred,
+                duration_hours=duration_hours,
+            )
             estimate_duration = float(duration_hours or 1.0)
             cost_estimate = router.estimate_cost(
                 job, duration_hours=estimate_duration
