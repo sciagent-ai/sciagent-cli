@@ -73,7 +73,20 @@ class ComputeRouter:
         # If preferred backend specified
         if preferred:
             if preferred in self._backends:
-                return self._backends[preferred], f"Using requested backend: {preferred}"
+                backend = self._backends[preferred]
+                # Re-probe the docker daemon for an explicit local request.
+                # The daemon was up at router init but the user may have
+                # quit Colima / Docker Desktop in the meantime; surface the
+                # specific failure rather than letting `docker run` fail
+                # with a generic socket error on the hot path.
+                if preferred == "local" and not backend.is_available():
+                    raise RuntimeError(
+                        "Requested backend 'local' but the docker daemon is "
+                        "no longer responsive (was up at startup). Start "
+                        "Docker Desktop / Colima, or pass backend='skypilot' "
+                        "to route to the cloud."
+                    )
+                return backend, f"Using requested backend: {preferred}"
             else:
                 available = list(self._backends.keys())
                 raise RuntimeError(
@@ -108,7 +121,23 @@ class ComputeRouter:
         if "local" in self._backends:
             local = self._backends["local"]
             if local.can_run(req):
-                return local, "Using local Docker"
+                # Re-probe the daemon at routing time: it was up at init,
+                # but a long-running CLI session may outlive a Colima /
+                # Docker Desktop quit. On daemon-down, fall through to
+                # SkyPilot with an explicit reason so the LLM sees what
+                # happened (vs. a cryptic docker socket error on launch).
+                if local.is_available():
+                    return local, "Docker daemon up, local fits resource envelope"
+                if "skypilot" in self._backends:
+                    return (
+                        self._backends["skypilot"],
+                        "Docker daemon unavailable, falling back to SkyPilot",
+                    )
+                raise RuntimeError(
+                    "Docker daemon is no longer responsive and SkyPilot is "
+                    "not configured. Start Docker Desktop / Colima or "
+                    "install SkyPilot: pip install 'skypilot[aws]'."
+                )
             else:
                 # Local can't handle it, try SkyPilot
                 if "skypilot" in self._backends:

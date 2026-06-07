@@ -297,3 +297,145 @@ def fetch_workspace_outputs(
         "file_count": len(files),
         "bytes_total": bytes_total,
     }
+
+
+def fetch_session_workspace(
+    session_id: str,
+    working_dir: str = ".",
+    timeout: int = 300,
+) -> Dict[str, Any]:
+    """Sync the durable session workspace bucket to ``<working_dir>/_outputs/workspace/``.
+
+    Sibling of :func:`fetch_workspace_outputs`: the latter pulls a single
+    job's ``/outputs/<job_id>/`` slice; this one pulls the cross-step
+    ``/workspace/`` mount that survives job boundaries. Both target the
+    same local layout the agent (and ``materialize_workspace``) already
+    expect, so a sciagent run that mixes auto-fetch with explicit
+    materialize calls sees one consistent local mirror.
+
+    Cloud-agnostic via the same dispatch table. Returns a dict in the same
+    shape as :func:`fetch_workspace_outputs` so ``bg_wait`` can fold both
+    fetches through identical output formatting.
+
+    Best-effort: a missing bucket (session never ran a workspace-mounted
+    job) returns ``ok=False`` with a reason; the caller treats that as a
+    no-op, not a failure.
+    """
+    if not session_id:
+        return {"ok": False, "reason": "session_id is required"}
+
+    try:
+        from sciagent.compute.backends.skypilot import (
+            SkyPilotBackend,
+            _build_workspace_uri,
+        )
+        store = SkyPilotBackend().resolve_workspace_store()
+        uri = _build_workspace_uri(store, session_id)
+    except Exception as exc:
+        return {
+            "ok": False,
+            "reason": f"could not resolve workspace URI for session {session_id!r}: {exc}",
+        }
+
+    scheme, bucket, resolved_prefix = _split_uri(uri)
+
+    if scheme not in _FETCH_DISPATCH:
+        return {
+            "ok": False,
+            "bucket": bucket,
+            "reason": (
+                f"unsupported cloud scheme {scheme!r} for workspace fetch; "
+                + _supported_schemes_message()
+            ),
+        }
+
+    required_cli = _REQUIRED_CLI[scheme]
+    if shutil.which(required_cli) is None:
+        return {
+            "ok": False,
+            "bucket": bucket,
+            "reason": (
+                f"{required_cli} CLI not found on PATH — install it or pull "
+                f"the workspace manually with materialize_workspace()."
+            ),
+        }
+
+    # Mirror materialize_workspace's default layout so explicit and
+    # auto-fetched workspaces land at the same local path.
+    dest_root = Path(working_dir)
+    if not dest_root.is_absolute():
+        dest_root = Path(working_dir)
+    local_target = dest_root / "_outputs" / "workspace"
+    local_target.mkdir(parents=True, exist_ok=True)
+
+    cmd_builder = _FETCH_DISPATCH[scheme]
+    cmd = cmd_builder(uri, str(local_target))
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "bucket": bucket,
+            "reason": f"{required_cli} sync timed out after {timeout}s",
+        }
+    except OSError as e:
+        return {
+            "ok": False,
+            "bucket": bucket,
+            "reason": f"failed to invoke {required_cli} CLI: {e}",
+        }
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        bucket_missing_markers = (
+            "NoSuchBucket",
+            "BucketNotFoundException",
+            "ContainerNotFound",
+            "BucketNotFound",
+        )
+        if any(m in stderr for m in bucket_missing_markers):
+            return {
+                "ok": False,
+                "bucket": bucket,
+                "reason": (
+                    "workspace bucket does not exist — session has no "
+                    "workspace-mounted jobs yet"
+                ),
+            }
+        return {
+            "ok": False,
+            "bucket": bucket,
+            "reason": (
+                f"{required_cli} workspace sync exit {result.returncode}: "
+                f"{stderr[:300]}"
+            ),
+        }
+
+    files = []
+    bytes_total = 0
+    if local_target.exists():
+        for p in sorted(local_target.rglob("*")):
+            if p.is_file():
+                size = p.stat().st_size
+                files.append(
+                    {"path": str(p.relative_to(dest_root)), "bytes": size}
+                )
+                bytes_total += size
+
+    return {
+        "ok": True,
+        "bucket": bucket,
+        "prefix": resolved_prefix,
+        "uri": uri,
+        "scheme": scheme,
+        "dest": str(dest_root),
+        "files": files,
+        "file_count": len(files),
+        "bytes_total": bytes_total,
+    }

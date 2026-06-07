@@ -709,8 +709,13 @@ class BgWaitTool:
                 # doesn't fail the wait (the job did succeed); the reason
                 # is surfaced so the agent can act on it.
                 fetch_lines = []
+                workspace_session_id: Optional[str] = None
                 try:
                     from .compute_fetch import fetch_workspace_outputs
+                    from sciagent.compute.task_index import read_task
+
+                    manifest = read_task(job_id) or {}
+                    workspace_session_id = manifest.get("session_id")
 
                     fetched = fetch_workspace_outputs(
                         job_id=job_id,
@@ -758,6 +763,41 @@ class BgWaitTool:
                         ]
                 except Exception as fetch_err:
                     fetch_lines = ["", f"(outputs not auto-fetched: {fetch_err})"]
+
+                # Also pull the durable session workspace (the /workspace/
+                # mount). /outputs/<job_id>/ is per-job; /workspace/ is the
+                # cross-step bucket and the natural place for the LLM to
+                # write artifacts it wants to read back locally. Without
+                # this second fetch, produces_uris that point at
+                # /workspace/... fail validation because the files only
+                # exist in the cloud bucket. Same best-effort handling as
+                # the outputs fetch.
+                if workspace_session_id:
+                    try:
+                        from .compute_fetch import fetch_session_workspace
+
+                        ws_fetched = fetch_session_workspace(
+                            session_id=workspace_session_id,
+                            working_dir=self.working_dir,
+                        )
+                        if ws_fetched.get("ok") and ws_fetched.get("file_count", 0) > 0:
+                            fetch_lines.extend([
+                                "",
+                                f"Fetched {ws_fetched['file_count']} "
+                                f"workspace file(s) "
+                                f"({ws_fetched['bytes_total']:,} bytes) "
+                                f"from {ws_fetched['bucket']} to "
+                                f"{ws_fetched['dest']}/_outputs/workspace/.",
+                            ])
+                        elif not ws_fetched.get("ok"):
+                            fetch_lines.append(
+                                f"(workspace not auto-fetched: "
+                                f"{ws_fetched.get('reason')})"
+                            )
+                    except Exception as ws_err:
+                        fetch_lines.append(
+                            f"(workspace not auto-fetched: {ws_err})"
+                        )
 
                 return ToolResult(
                     success=True,

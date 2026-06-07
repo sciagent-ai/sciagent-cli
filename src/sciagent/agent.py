@@ -1462,6 +1462,17 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                     # turn that produced this tool_call. cost_rollup.py
                     # (and later H6's RunCostTracker) sum these.
                     last_usage = getattr(self.llm, "_last_usage", None) or {}
+                    # compute_run / compute_exec return a dict whose
+                    # "routing_reason" field carries the router's backend
+                    # selection rationale. Promote it to a formal event
+                    # field so verifiers and the audit surface read the
+                    # routing decision without parsing tool output text.
+                    routing_reason: Optional[str] = None
+                    if (
+                        tc.name in ("compute_run", "compute_exec")
+                        and isinstance(result.output, dict)
+                    ):
+                        routing_reason = result.output.get("routing_reason")
                     plog.emit_tool_result(
                         tool_call_id=tc.id,
                         tool_name=tc.name,
@@ -1474,6 +1485,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         tokens_in=last_usage.get("tokens_in"),
                         tokens_out=last_usage.get("tokens_out"),
                         model=last_usage.get("model"),
+                        routing_reason=routing_reason,
                     )
                 except Exception:
                     pass  # Best-effort.

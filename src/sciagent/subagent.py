@@ -2259,6 +2259,21 @@ class SubAgentOrchestrator:
                 })
             else:
                 local = pat[7:] if pat.startswith("file://") else pat
+                # /workspace/ is the in-container path for the durable
+                # session bucket auto-mounted by compute_run / compute_exec.
+                # On the local filesystem the bucket is mirrored at
+                # <working_dir>/_outputs/workspace/ by bg_wait's auto-fetch
+                # (and by materialize_workspace). Rewrite the prefix so a
+                # natural produces_uris like "/workspace/run-001/fields/**"
+                # resolves against the local mirror without the LLM having
+                # to know about ./_outputs/workspace/ as a path.
+                if local.startswith("/workspace/"):
+                    local = os.path.join(
+                        self.working_dir,
+                        "_outputs",
+                        "workspace",
+                        local[len("/workspace/"):],
+                    )
                 base = local if os.path.isabs(local) else os.path.join(
                     self.working_dir, local
                 )

@@ -254,6 +254,7 @@ class ProvenanceLog:
         tokens_out: Optional[int] = None,
         model: Optional[str] = None,
         cost_kind: Optional[str] = None,
+        routing_reason: Optional[str] = None,
     ) -> str:
         """Emit a tool_result event right after tool dispatch returns.
 
@@ -266,6 +267,14 @@ class ProvenanceLog:
         cost axis when ``cost_usd`` is set. Defaults to "llm" if ``cost_usd``
         is set and no kind was given — preserves the H3 "tool wrapped an LLM
         call" interpretation. Stays ``None`` when no cost was reported.
+
+        ``routing_reason`` carries the compute router's backend selection
+        rationale for compute_run / compute_exec calls (e.g. "Docker daemon
+        up, local fits resource envelope" vs. "Local Docker constrained,
+        using SkyPilot"). The string already lives in the tool's output
+        dict; promoting it to a formal event field lets verifiers and the
+        audit surface read it without parsing output text. Stays ``None``
+        for non-compute tools.
         """
         if cost_usd is not None and cost_kind is None:
             cost_kind = "llm"
@@ -281,6 +290,7 @@ class ProvenanceLog:
             "tokens_in": tokens_in,
             "tokens_out": tokens_out,
             "model": model,
+            "routing_reason": routing_reason,
         }
         return self._write_event("tool_result", body, actor=actor)
 
