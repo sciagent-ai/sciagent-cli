@@ -1922,6 +1922,27 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                         break
 
                 else:
+                    # finish_reason="length" means the model hit the
+                    # max_tokens cap before it could emit a tool call or
+                    # finish its text — a truncated turn, not a completed
+                    # one. Litellm normalizes Anthropic max_tokens,
+                    # OpenAI length, and Gemini MAX_TOKENS all to "length",
+                    # so this branch is provider-agnostic. Retain the
+                    # partial as the assistant turn, inject a continuation
+                    # cue, and loop again rather than exiting "done" with
+                    # empty content.
+                    if response.finish_reason == "length":
+                        self.state.context.add_assistant_message(
+                            content=response.content or ""
+                        )
+                        self.state.context.add_user_message(
+                            "[System: previous response was truncated at "
+                            "the max_tokens cap before any tool call. "
+                            "Continue with the next concrete tool step "
+                            "from your todo list — do not re-summarize "
+                            "prior context.]"
+                        )
+                        continue
                     # No tool calls = done
                     # Integrity Action 3: Show evidence summary before final output
                     self._print_evidence_summary()

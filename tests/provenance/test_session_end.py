@@ -217,6 +217,53 @@ def test_session_end_emitted_after_tool_using_run(tmp_path: Path):
     assert se["tokens_out"] == 50
 
 
+def test_truncated_turn_continues_instead_of_exiting_done(tmp_path: Path):
+    """finish_reason="length" (max_tokens cap) used to silently exit the
+    loop as ``done`` with empty content — see the photonics run on
+    2026-06-07. The fix: detect the truncation, retain the partial as the
+    assistant turn, inject a continuation cue, and keep iterating.
+
+    Provider-agnostic because litellm normalizes Anthropic max_tokens,
+    OpenAI length, and Gemini MAX_TOKENS all to ``"length"``."""
+    llm = _StubLLM(responses=[
+        LLMResponse(
+            content="",  # truncated mid-tool-use → no usable text
+            tool_calls=[],
+            finish_reason="length",
+            usage={"prompt_tokens": 100, "completion_tokens": 16273},
+        ),
+        LLMResponse(
+            content="final answer",
+            tool_calls=[],
+            finish_reason="stop",
+            usage={"prompt_tokens": 200, "completion_tokens": 12},
+        ),
+    ])
+
+    agent = _make_agent(tmp_path, llm=llm)
+    log_path = _isolate_log(agent, tmp_path / "sciagent")
+
+    agent.run("do the thing")
+
+    events = _read_log(log_path)
+    se = [e for e in events if e["event_kind"] == "session_end"][0]
+
+    # Did NOT terminate on the truncated turn — looped to a second LLM call.
+    assert se["iterations"] == 2
+    assert se["exit_reason"] == "done"
+    # Two LLM calls means the continuation cue actually went out.
+    assert len(llm.calls) == 2
+    second_call_messages = llm.calls[1]["messages"]
+    def _text(m):
+        c = m.content if hasattr(m, "content") else m.get("content")
+        return c if isinstance(c, str) else ""
+    cue_present = any(
+        "truncated at the max_tokens cap" in _text(m)
+        for m in second_call_messages
+    )
+    assert cue_present, "continuation cue should be visible in the next LLM round"
+
+
 def test_session_end_exit_reason_error_on_llm_exception(tmp_path: Path):
     """An exception inside _single_step routes to exit_reason="error"."""
     class _ExplodingLLM(_StubLLM):

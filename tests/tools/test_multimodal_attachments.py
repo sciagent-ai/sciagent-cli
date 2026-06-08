@@ -75,6 +75,91 @@ def test_file_ops_pdf_emits_document_artifact(tmp_path: Path) -> None:
     assert "[PDF: tiny.pdf" in out["display_text"]
 
 
+def _multi_page_pdf(n_pages: int) -> bytes:
+    """Build a real n-page PDF via pypdf so the page-count probe and the
+    slicer have something authentic to chew on. Using ``_MINI_PDF`` n times
+    isn't enough — pypdf needs a valid xref table per page."""
+    import io as _io
+    import pypdf
+
+    writer = pypdf.PdfWriter()
+    for _ in range(n_pages):
+        writer.add_blank_page(width=612, height=792)
+    buf = _io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
+
+
+def test_pdf_over_soft_cap_requires_pages_range(tmp_path: Path) -> None:
+    """A 12-page PDF without ``pages`` is refused with an actionable error.
+    This is the regression guard against the failure mode where a 12-page
+    paper streamed to the model unsliced caused the next LLM turn to max
+    out the output cap before emitting any tool call."""
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_multi_page_pdf(12))
+
+    result = FileOpsTool().execute(command="read", path=str(pdf))
+    assert not result.success
+    assert "12 pages" in result.error
+    assert "pages" in result.error
+
+
+def test_pdf_under_soft_cap_no_pages_required(tmp_path: Path) -> None:
+    """A 5-page PDF (≤ ``MAX_PDF_PAGES_NO_RANGE``) still flows through
+    without a `pages` argument — the guard only kicks in above the soft
+    cap so short PDFs stay zero-friction."""
+    pdf = tmp_path / "short.pdf"
+    pdf.write_bytes(_multi_page_pdf(5))
+
+    result = FileOpsTool().execute(command="read", path=str(pdf))
+    assert result.success, result.error
+    assert result.output["pages"] == 5
+    assert result.output["page_range"] is None
+
+
+def test_pdf_pages_range_slices_to_requested_pages(tmp_path: Path) -> None:
+    """With ``pages="3-7"`` the artifact carries only those 5 pages — the
+    re-encoded PDF round-trips through pypdf with the right page count and
+    the artifact metadata records the slice for the provenance log."""
+    pdf = tmp_path / "paper.pdf"
+    pdf.write_bytes(_multi_page_pdf(12))
+
+    result = FileOpsTool().execute(command="read", path=str(pdf), pages="3-7")
+    assert result.success, result.error
+    assert result.output["pages"] == 5
+    assert result.output["page_range"] == [3, 7]
+    assert result.output["total_pages"] == 12
+    assert "pages 3-7 of 12" in result.output["display_text"]
+
+    import io as _io
+    import pypdf
+    reader = pypdf.PdfReader(_io.BytesIO(base64.b64decode(result.output["data"])))
+    assert len(reader.pages) == 5
+
+
+def test_pdf_pages_range_over_hard_cap_rejected(tmp_path: Path) -> None:
+    """The per-read hard cap (``MAX_PDF_PAGES_PER_READ``) is enforced even
+    when an explicit range is given — keeps a runaway ``pages="1-200"`` from
+    sidestepping the guard."""
+    pdf = tmp_path / "long.pdf"
+    pdf.write_bytes(_multi_page_pdf(30))
+
+    result = FileOpsTool().execute(command="read", path=str(pdf), pages="1-25")
+    assert not result.success
+    assert "cap is 20" in result.error
+
+
+def test_pdf_pages_range_bad_value_rejected(tmp_path: Path) -> None:
+    """Non-numeric / malformed ``pages`` strings come back with a clear
+    error rather than a stack trace."""
+    pdf = tmp_path / "short.pdf"
+    pdf.write_bytes(_multi_page_pdf(5))
+
+    result = FileOpsTool().execute(command="read", path=str(pdf), pages="abc")
+    assert not result.success
+    assert "Invalid `pages`" in result.error
+
+
 # ---------------------------------------------------------------------------
 # Provider dispatch — PDF
 # ---------------------------------------------------------------------------

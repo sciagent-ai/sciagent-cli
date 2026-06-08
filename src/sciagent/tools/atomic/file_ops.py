@@ -44,7 +44,20 @@ class FileOpsTool:
     """Unified file operations - read, write, edit, list."""
 
     name = "file_ops"
-    description = "File operations: read, write, edit, list. Read supports text files, PDFs, images (PNG, JPG, GIF, WebP), and common code formats."
+    description = (
+        "File operations: read, write, edit, list. Read supports text files, "
+        "PDFs, images (PNG, JPG, GIF, WebP), and common code formats. PDFs "
+        "over 10 pages require an explicit `pages` range (e.g., \"1-10\"); "
+        "the per-read cap is 20 pages."
+    )
+
+    # PDFs ride a native multimodal channel; an unbounded page count turns
+    # into an unbounded token bill on the next LLM turn, which has bitten
+    # us with max_tokens-cap truncations. Mirror Claude Code's Read tool:
+    # require an explicit `pages` range past the soft cap, hard-cap per
+    # read at the second number.
+    MAX_PDF_PAGES_NO_RANGE = 10
+    MAX_PDF_PAGES_PER_READ = 20
 
     # Supported image extensions and their media types
     IMAGE_EXTENSIONS = {
@@ -100,6 +113,10 @@ class FileOpsTool:
                 "type": "integer",
                 "description": "Read last N lines (like tail -n). Useful for logs/errors."
             },
+            "pages": {
+                "type": "string",
+                "description": "PDF page range: \"5\" or \"1-10\"."
+            },
             "recursive": {
                 "type": "boolean",
                 "description": "Recursive listing",
@@ -150,7 +167,8 @@ class FileOpsTool:
                 kwargs.get("end_line"),
                 kwargs.get("max_lines", 200),
                 kwargs.get("pattern"),
-                kwargs.get("tail")
+                kwargs.get("tail"),
+                kwargs.get("pages"),
             )
         elif command == "write":
             return self._write(path, kwargs.get("content", ""))
@@ -168,7 +186,8 @@ class FileOpsTool:
         end_line: Optional[int] = None,
         max_lines: int = 200,
         pattern: Optional[str] = None,
-        tail: Optional[int] = None
+        tail: Optional[int] = None,
+        pages: Optional[str] = None,
     ) -> ToolResult:
         """Read file contents. Supports text files, PDFs, and images."""
         try:
@@ -189,7 +208,7 @@ class FileOpsTool:
 
             # Handle PDF files specially
             if p.suffix.lower() == '.pdf':
-                return self._read_pdf(p, start_line, end_line)
+                return self._read_pdf(p, pages)
 
             content = p.read_text(encoding="utf-8")
             lines = content.splitlines()
@@ -267,7 +286,7 @@ class FileOpsTool:
         except Exception as e:
             return ToolResult(success=False, output=None, error=str(e))
 
-    def _read_pdf(self, path: Path, start_line: Optional[int] = None, end_line: Optional[int] = None) -> ToolResult:
+    def _read_pdf(self, path: Path, pages: Optional[str] = None) -> ToolResult:
         """Read PDF as a multimodal artifact: raw bytes + pypdf text fallback.
 
         Anthropic, Gemini, and OpenAI all accept PDFs natively through litellm —
@@ -277,6 +296,12 @@ class FileOpsTool:
         whole PDF and keep a pypdf text fallback for log/debug and for any
         provider that can't take the raw artifact.
 
+        Page-range guard: if the PDF is larger than ``MAX_PDF_PAGES_NO_RANGE``,
+        ``pages`` must be supplied. The slice is capped at
+        ``MAX_PDF_PAGES_PER_READ``. Without this guard a 12-page paper turns
+        into ~30k input tokens and the next LLM turn frequently maxes out
+        before emitting a tool call.
+
         Provider-format dispatch happens once in ``llm._format_attachments_for_provider``.
         """
         try:
@@ -284,12 +309,49 @@ class FileOpsTool:
         except Exception as e:
             return ToolResult(success=False, output=None, error=f"Failed to read PDF: {str(e)}")
 
-        text_fallback, page_count = self._pdf_text_fallback(pdf_bytes)
+        total_pages = self._pdf_page_count(pdf_bytes)
+
+        page_range: Optional[tuple[int, int]] = None
+        if pages is not None and str(pages).strip():
+            try:
+                page_range = self._parse_pdf_page_range(pages, total_pages)
+            except ValueError as e:
+                return ToolResult(success=False, output=None, error=str(e))
+        elif total_pages > self.MAX_PDF_PAGES_NO_RANGE:
+            return ToolResult(
+                success=False,
+                output=None,
+                error=(
+                    f"PDF has {total_pages} pages; specify a `pages` range "
+                    f"(e.g., pages=\"1-{self.MAX_PDF_PAGES_NO_RANGE}\"). "
+                    f"Max {self.MAX_PDF_PAGES_PER_READ} pages per read."
+                ),
+            )
+
+        if page_range is not None:
+            sliced = self._slice_pdf(pdf_bytes, page_range)
+            if sliced is None:
+                return ToolResult(
+                    success=False,
+                    output=None,
+                    error="Failed to slice PDF to requested page range",
+                )
+            pdf_bytes = sliced
+
+        text_fallback, emitted_pages = self._pdf_text_fallback(pdf_bytes)
         b64_data = base64.b64encode(pdf_bytes).decode("utf-8")
         size_kb = len(pdf_bytes) / 1024
 
-        pages_str = f"{page_count} pages" if page_count else "PDF"
-        display_text = f"[PDF: {path.name} ({pages_str}, {size_kb:.1f} KB) — handed to model as native attachment]"
+        if page_range is not None:
+            pages_str = f"pages {page_range[0] + 1}-{page_range[1]} of {total_pages}"
+        elif total_pages:
+            pages_str = f"{total_pages} pages"
+        else:
+            pages_str = "PDF"
+        display_text = (
+            f"[PDF: {path.name} ({pages_str}, {size_kb:.1f} KB) "
+            "— handed to model as native attachment]"
+        )
 
         # Internal canonical artifact shape — same ``type`` keys as Anthropic's
         # native multimodal blocks (image / document / audio / video). The agent
@@ -306,13 +368,77 @@ class FileOpsTool:
                 "data": b64_data,
                 "filename": path.name,
                 "file_path": str(path),
-                "pages": page_count,
+                "pages": emitted_pages or (
+                    page_range[1] - page_range[0] if page_range else total_pages
+                ),
+                "total_pages": total_pages,
+                "page_range": [page_range[0] + 1, page_range[1]] if page_range else None,
                 "size_kb": round(size_kb, 2),
                 "text_fallback": text_fallback,
                 "display_text": display_text,
             },
             error=None,
         )
+
+    def _pdf_page_count(self, pdf_bytes: bytes) -> int:
+        """Cheap page-count probe. Returns 0 if pypdf is unavailable or the
+        PDF can't be opened — in that case the page-range guard is skipped
+        and the existing ship-whole-PDF behavior is preserved."""
+        if not PYPDF_AVAILABLE:
+            return 0
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            return len(reader.pages)
+        except Exception:
+            return 0
+
+    def _parse_pdf_page_range(self, pages: str, total: int) -> tuple[int, int]:
+        """Parse ``"5"`` or ``"1-10"`` into a 0-indexed ``(start, end)`` tuple
+        with ``end`` exclusive. Raises ``ValueError`` on bad input, out-of-bounds
+        ranges, or spans over ``MAX_PDF_PAGES_PER_READ``."""
+        s = str(pages).strip()
+        try:
+            if "-" in s:
+                a, b = s.split("-", 1)
+                start = int(a.strip())
+                end = int(b.strip())
+            else:
+                start = int(s)
+                end = start
+        except ValueError:
+            raise ValueError(
+                f"Invalid `pages` value: {pages!r}. "
+                "Expected \"5\" or \"1-10\"."
+            )
+        if start < 1 or end < start:
+            raise ValueError(f"Invalid page range: {pages!r}")
+        if total and end > total:
+            raise ValueError(
+                f"Page range {pages!r} exceeds total pages ({total})"
+            )
+        span = end - start + 1
+        if span > self.MAX_PDF_PAGES_PER_READ:
+            raise ValueError(
+                f"Page range {pages!r} requests {span} pages; cap is "
+                f"{self.MAX_PDF_PAGES_PER_READ} per read"
+            )
+        return (start - 1, end)
+
+    def _slice_pdf(self, pdf_bytes: bytes, page_range: tuple[int, int]) -> Optional[bytes]:
+        """Re-encode just the requested page range. Returns None if pypdf is
+        unavailable or the slice fails."""
+        if not PYPDF_AVAILABLE:
+            return None
+        try:
+            reader = pypdf.PdfReader(io.BytesIO(pdf_bytes))
+            writer = pypdf.PdfWriter()
+            for i in range(page_range[0], page_range[1]):
+                writer.add_page(reader.pages[i])
+            buf = io.BytesIO()
+            writer.write(buf)
+            return buf.getvalue()
+        except Exception:
+            return None
 
     def _pdf_text_fallback(self, pdf_bytes: bytes) -> tuple[str, int]:
         """Best-effort pypdf text extraction. Returns (text, page_count).
