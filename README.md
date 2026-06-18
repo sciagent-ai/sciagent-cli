@@ -1,6 +1,15 @@
 # SciAgent
 
-SciAgent is a modular agent framework for software engineering and scientific computing. It combines a standard agent loop with dependency-aware task orchestration, allowing the language model to plan and execute complex workflows by invoking external tools, containerised services, and cloud compute.
+![SciAgent Design Overview](assets/systemdesign.png)
+
+SciAgent is an LLM-agnostic framework — a runtime and reusable harness — for scientific computing agents. A user submits a scientific task — a simulation to run, a hypothesis to test, results to reproduce or extend — and the framework plans the work, delegates to role-isolated sub-agents (compute, analyze, research, verify), executes the heavy work in containerised services on local Docker or SkyPilot-managed cloud clusters, and writes every tool call, cloud job, artifact, and verification to an append-only provenance log. A separate verifier sub-agent reads the log in a fresh context to check the trail before the result is returned.
+
+The architecture has five layers (see diagram):
+
+- **Provider-agnostic orchestration** routes through LiteLLM so the same harness runs against Anthropic, OpenAI, Gemini, xAI, DeepSeek, or open-source models.
+- **Runtime** is a standard agent loop (planner + context + task DAG) over atomic tools (`bash`, `file_ops`, `web`, `search`, `todo`).
+- **Role sub-agents** (compute, analyze, research, verify) run with isolated tool surfaces and per-role model tiers.
+- **Registry, Compute, Provenance, Audit** are the four side-layers: registered scientific service containers, local-Docker / SkyPilot / cluster execution, append-only JSONL log, and an independent verifier that reads the log + artifacts.
 
 > **v2.0 is current.** Highlights: cloud compute via SkyPilot, durable provenance log, task orchestration with background subagents and checkpoint/resume. See [What's New in v2.0](docs/whats-new-v2.md). v1.0 is preserved on branch `release/v1.0` and tag `v1.0`.
 
@@ -297,6 +306,13 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 - SkyPilot extras (`pip install '.[cloud]'`) — only required for cloud compute
 - Cloud credentials (`aws configure` / `gcloud auth application-default login` / `az login`) — only required for cloud compute
 - API key for your chosen LLM provider (e.g. Anthropic, OpenAI, Google) and `BRAVE_SEARCH_API_KEY` for web search
+
+## Citing
+
+If you use SciAgent in your work, please cite:
+
+- **SciAgent: Containerized Code Generation for Scientific Computing with Verification.** Shruti Badhwar. AI4X – Accelerate, Singapore, 16–19 June 2026. [OpenReview PDF](https://openreview.net/pdf?id=FzcjjKIoqt)
+- **Audit-Grade Harness for Agent-driven Scientific Computation Workflows.** Shruti Badhwar. ICML 2026 AI4Science Workshop. [OpenReview forum](https://openreview.net/forum?id=6rOHtK32Mp#discussion)
 
 ## License
 
