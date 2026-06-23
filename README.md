@@ -15,28 +15,6 @@ The architecture has five layers (see diagram):
 
 ## How it works
 
-You give sciagent a scientific task — a simulation to run, a hypothesis to test, a dataset to analyze, results to reproduce or extend. It plans, delegates to specialised sub-agents, runs the heavy work on a cloud cluster, derives the result, and an independent verifier checks the trail before you see the answer. Every tool call, cloud job, artifact, and verification is appended to a durable per-session log — the audit comes out of normal operation.
-
-```mermaid
-flowchart TD
-    Goal["Your scientific task<br/>(design, computation,<br/>optimization)"]
-    Main["Main agent<br/>plans + delegates"]
-    Compute["<b>compute</b> subagent<br/>SkyPilot cluster +<br/>workspace bucket"]
-    Analyze["<b>analyze</b> subagent<br/>plots, stats, fits, comparisons"]
-    Verifier["<b>verifier</b> subagent<br/>fresh context, reads the log"]
-    Log[("Provenance log<br/>(durable per-session JSONL)<br/>tool calls, cloud jobs,<br/>artifacts, verifications")]
-    Result["Verified result + audit trail"]
-
-    Goal --> Main
-    Main --> Compute
-    Main --> Analyze
-    Main --> Verifier
-    Compute --> Log
-    Analyze --> Log
-    Verifier -. reads .-> Log
-    Log --> Result
-```
-
 Properties of this loop:
 
 - **Cloud compute.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket. Outputs survive cluster teardown.
