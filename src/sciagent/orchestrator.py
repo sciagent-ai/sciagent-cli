@@ -103,6 +103,12 @@ class OrchestratorConfig:
     fast_model: Optional[str] = None        # None -> defaults.FAST_MODEL
     vision_model: Optional[str] = None      # None -> defaults.VISION_MODEL
 
+    # When True, the LLM verifier prompt header lists child session logs
+    # (one per subagent_completed event) alongside the parent log, so the
+    # verifier's file_ops can audit subagent trajectories. Default ON;
+    # the no-recursion ablation flips it to False.
+    verifier_include_child_sessions: bool = True
+
     # Kill-switch caps. None on either field disables that check entirely.
     # Wall-time is checked from the orchestrator's own _start_time.
     # Cost is checked against self._cost_so_far when present (populated by H3).
@@ -1170,10 +1176,27 @@ class TaskOrchestrator:
             # audits the trajectory itself (see prompts/verification_llm.md).
             session_id = context.get("session_id") or "<unknown>"
             log_path = context.get("session_log_path") or "<no active session log>"
+
+            child_section = ""
+            if self.config.verifier_include_child_sessions:
+                parent_log = get_active_session_log()
+                if parent_log is not None:
+                    child_paths = [
+                        str(parent_log.base_dir / cid / "provenance.jsonl")
+                        for cid in parent_log.iter_child_session_ids()
+                    ]
+                    if child_paths:
+                        bullets = "\n".join(f"  - {p}" for p in child_paths)
+                        child_section = (
+                            "\nChild session logs (read these too if "
+                            "subagent_completed events appear):\n"
+                            f"{bullets}\n"
+                        )
+
             verification_prompt = f"""## Session
 Session id: {session_id}
 Session log: {log_path}
-
+{child_section}
 ## Claim under audit
 {context['claim']}
 

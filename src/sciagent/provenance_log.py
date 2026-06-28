@@ -56,7 +56,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 
 SCHEMA_VERSION = "2"
@@ -708,6 +708,18 @@ class ProvenanceLog:
             finally:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
         return events
+
+    def iter_child_session_ids(self) -> Iterator[str]:
+        """Yield each distinct ``child_session_id`` recorded by this session's
+        ``subagent_completed`` events, in append order. Lets the verifier walk
+        the parent → child fan-out without re-reading the log itself."""
+        seen: set[str] = set()
+        for ev in self.read_events():
+            if ev.get("event_kind") == "subagent_completed":
+                cid = ev.get("child_session_id")
+                if cid and cid not in seen:
+                    seen.add(cid)
+                    yield cid
 
 
 # ----------------------------------------------------------------------
