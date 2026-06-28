@@ -1640,7 +1640,9 @@ class SubAgentOrchestrator:
             self._apply_resume(sub_agent, cp)
 
         try:
-            result = sub_agent.run(task)
+            result = self._run_with_produces_retry(
+                sub_agent, task, produces_uris, produces_min_bytes
+            )
         except Exception as e:
             # SubAgent.run catches its own exceptions today, but if a
             # future change leaks one, treat it as a "crashed" lifecycle
@@ -2038,7 +2040,9 @@ class SubAgentOrchestrator:
 
         crashed = False
         try:
-            result = sub_agent.run(task)
+            result = self._run_with_produces_retry(
+                sub_agent, task, produces_uris, produces_min_bytes
+            )
         except Exception as e:
             # SubAgent.run catches its own exceptions; reaching here means
             # something inside SubAgent.run leaked (server disconnect,
@@ -2390,6 +2394,55 @@ class SubAgentOrchestrator:
             "gap to the user."
         )
         return "\n".join(lines)
+
+    def _run_with_produces_retry(
+        self,
+        sub_agent: "SubAgent",
+        task: str,
+        produces_uris: Optional[List[str]],
+        produces_min_bytes: int,
+    ) -> SubAgentResult:
+        """Run the subagent; on a false-success at the produces_uris gate,
+        give it ONE corrective turn before bubbling the failure to the caller.
+
+        Sub-agents under load occasionally emit a no-tool-call "done" turn
+        that exits the AgentLoop "done" branch before the declared output
+        URIs are actually written (transient LLM timeout mid-thinking, model
+        hallucinates completion). The corrective re-run hands the gate's
+        exact complaint back as a new user message — state.context is
+        preserved across run() calls (iteration_count resets at
+        agent.py:2154), so the model continues from its prior trajectory.
+        Caller still runs its own gate + downgrade after this returns; the
+        helper only widens the window the sub-agent has to satisfy the
+        contract.
+        """
+        result = sub_agent.run(task)
+
+        if not (result.success and produces_uris):
+            return result
+
+        # Cancelled runs return success=True with "(Stopped by user)" as
+        # output (AgentLoop sets final_response and breaks rather than
+        # raising). Don't retry those — the user already said stop.
+        if (result.output or "").startswith("(Stopped by user)"):
+            return result
+        interrupt_event = getattr(sub_agent, "parent_interrupt_event", None)
+        if interrupt_event is not None and interrupt_event.is_set():
+            return result
+
+        verdict = self._validate_produces_uris(
+            produces_uris, produces_min_bytes
+        )
+        if not verdict["missing"]:
+            return result
+
+        corrective = self._format_produces_failure(
+            sub_agent.config.name, produces_uris, verdict["missing"]
+        )
+        try:
+            return sub_agent.run(corrective)
+        except Exception:
+            return result
 
     def spawn_parallel(
         self,
