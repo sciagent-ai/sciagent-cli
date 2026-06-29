@@ -44,11 +44,11 @@ SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriA
 
 | Tier | Anthropic (tested) | OpenAI | Google | xAI |
 |------|-------------------|--------|--------|-----|
-| **Scientific** | `claude-sonnet-4-6` (default), `claude-opus-4-7` | `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
-| **Vision** | `claude-opus-4-7` (default) | `gpt-4.1`, `o3` | `gemini-3-pro-preview` | `grok-4-1-fast-reasoning`, `grok-2-vision-1212` |
-| **Coding** | `claude-sonnet-4-6` (default) | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Verification** | `claude-sonnet-4-6` (default) | `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Fast** | `claude-haiku-4-5-20251001` (default) | `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
+| **Scientific** | `claude-sonnet-4-6` (default), `claude-opus-4-7` | `gpt-5.4`, `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
+| **Vision** | `claude-opus-4-7` (default) | `gpt-5.4`, `gpt-4.1`, `o3` | `gemini-3.1-pro-preview`, `gemini-3-pro-image-preview` | `grok-4.3`, `grok-2-vision-1212` |
+| **Coding** | `claude-sonnet-4-6` (default) | `gpt-5.4-mini`, `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Verification** | `claude-sonnet-4-6` (default) | `gpt-5.4`, `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
+| **Fast** | `claude-haiku-4-5-20251001` (default) | `gpt-5.4-mini`, `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
 
 **Open-Source alternatives** (via Together AI, Groq, or self-hosted):
 

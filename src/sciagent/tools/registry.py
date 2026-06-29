@@ -259,8 +259,15 @@ class ToolRegistry:
             new_registry.register(tool)
         return new_registry
 
-    def execute(self, name: str, **kwargs) -> ToolResult:
-        """Execute a tool by name."""
+    def execute(self, name: str, /, **kwargs) -> ToolResult:
+        """Execute a tool by name.
+
+        ``name`` is positional-only (PEP 570) so the dispatcher key can't
+        collide with a tool whose own argument is also called ``name``
+        (e.g. ``service_detail(name="sci-core")``). Without ``/``, the
+        spread ``**tool_call.arguments`` would land a second ``name=`` in
+        kwargs and Python raises ``got multiple values for argument 'name'``.
+        """
         tool = self.get(name)
         if not tool:
             return ToolResult(

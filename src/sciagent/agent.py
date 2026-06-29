@@ -1857,7 +1857,7 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                 # the context is still over threshold afterwards, fall through
                 # to the LLM-based middle-summarize pass.
                 if self.state.context.token_estimate() > self.state.context.compress_token_threshold:
-                    cleared = self.state.context.clear_old_tool_results(keep_last=8)
+                    cleared = self.state.context.clear_old_tool_results(keep_last=2)
                     if cleared:
                         print(f"  🧹 Cleared {cleared} old tool result(s)")
                     if self.state.context.token_estimate() > self.state.context.compress_token_threshold:

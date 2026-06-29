@@ -17,12 +17,33 @@ step that comes before that.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
 from ..registry import BaseTool, ToolResult
+
+
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def _tokenize(text: str) -> List[str]:
+    return [t for t in _TOKEN_SPLIT.split(text.lower()) if t]
+
+
+def _token_in(token: str, haystack: str) -> bool:
+    if token in haystack:
+        return True
+    # Tiny plural strip: 'photonics' → 'photonic'. Only kicks in for tokens
+    # long enough that the trim isn't accidental (e.g. don't strip 's' off
+    # 'gpus' down to 'gpu' — that's the wrong direction; we only handle the
+    # query-is-plural / registry-is-singular case, not the reverse, and 4+
+    # chars keeps us away from 2–3 letter abbreviations.)
+    if len(token) > 4 and token.endswith("s") and token[:-1] in haystack:
+        return True
+    return False
 
 
 class ServiceSearchTool(BaseTool):
@@ -142,29 +163,25 @@ class ServiceSearchTool(BaseTool):
                 continue
             haystack = self._service_haystack(name, entry)
             if needle in haystack:
-                matches.append(
-                    {
-                        "name": name,
-                        "description": entry.get("description") or "",
-                        "image": entry.get("image") or "",
-                        "extends": entry.get("extends"),
-                        "packages": list(entry.get("packages") or []),
-                        # Cap capabilities to keep the result token-light;
-                        # full entry is one Read away if the agent wants more.
-                        "capabilities": list((entry.get("capabilities") or [])[:6]),
-                        # Env contract — surface the registry's promise about
-                        # the container's runtime layout so the agent can
-                        # write code against observed paths instead of
-                        # locally-imagined ones. Missing fields fall through
-                        # as null; the agent knows to probe rather than
-                        # assume in that case.
-                        "workdir": entry.get("workdir"),
-                        "runtime": entry.get("runtime"),
-                        "env_setup": entry.get("env_setup"),
-                        "tool_paths": entry.get("tool_paths"),
-                        "probe_command": entry.get("probe_command"),
-                    }
-                )
+                matches.append(self._match_entry(name, entry))
+
+        # Fallback: phrase didn't appear contiguously, but every token might
+        # still be present. Handles two common misses: multi-token queries
+        # whose words live in different fields ('S4 RCWA' vs description
+        # 'RCWA/S4 ...' + package 'S4'), and a plural query against a
+        # singular registry phrasing ('photonics' vs 'Photonic crystal').
+        match_mode = "exact"
+        if not matches:
+            tokens = _tokenize(needle)
+            if tokens:
+                for name, entry in services.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    haystack = self._service_haystack(name, entry)
+                    if all(_token_in(t, haystack) for t in tokens):
+                        matches.append(self._match_entry(name, entry))
+                if matches:
+                    match_mode = "token"
 
         return ToolResult(
             success=True,
@@ -172,9 +189,34 @@ class ServiceSearchTool(BaseTool):
                 "keyword": keyword,
                 "match_count": len(matches),
                 "matches": matches,
+                "match_mode": match_mode,
                 "registry_path": self._registry_path,
             },
         )
+
+    @staticmethod
+    def _match_entry(name: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "name": name,
+            "description": entry.get("description") or "",
+            "image": entry.get("image") or "",
+            "extends": entry.get("extends"),
+            "packages": list(entry.get("packages") or []),
+            # Cap capabilities to keep the result token-light;
+            # full entry is one Read away if the agent wants more.
+            "capabilities": list((entry.get("capabilities") or [])[:6]),
+            # Env contract — surface the registry's promise about
+            # the container's runtime layout so the agent can
+            # write code against observed paths instead of
+            # locally-imagined ones. Missing fields fall through
+            # as null; the agent knows to probe rather than
+            # assume in that case.
+            "workdir": entry.get("workdir"),
+            "runtime": entry.get("runtime"),
+            "env_setup": entry.get("env_setup"),
+            "tool_paths": entry.get("tool_paths"),
+            "probe_command": entry.get("probe_command"),
+        }
 
 
 class ServiceDetailTool(BaseTool):

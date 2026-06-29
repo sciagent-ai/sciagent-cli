@@ -18,6 +18,7 @@ Load both sci-compute and build-service together for scientific work - this lets
 | Codebase exploration | explore | Need to search many files |
 | Error investigation | debug | Stuck on an error, need root cause |
 | External documentation | research | Need info NOT in provided files |
+| Local document digestion | research | Reading a paper / spec / datasheet to extract parameters, figures, methods — keeps the bytes out of your context |
 | Cloud compute jobs | compute | ANY "run on sky / on AWS / in the cloud" task — including the WRITING of run scripts, not just execution (see below) |
 | Analysis of compute outputs | analyze | Derivation off primary data: plots, distributions, residuals, statistics, comparisons, light fits (regression / GP / lightweight Bayesian-optimization). ANY "make X plot / fit Y / compare A vs B" against simulation outputs. Reads from URIs the parent declared, writes artifacts back to the URIs the parent declared. NOT for training heavy surrogate models (that's a compute job on a GPU image). |
 | Complex planning | plan | Before implementing non-trivial features |
@@ -199,16 +200,19 @@ within its scope; you'd be paying provisioning + iteration cost twice
 for the same outcome.
 
 ### Don't Delegate
-- Work with documents you already read (papers, specs, configs)
-- Simple single-file reads
+- Simple single-file reads of small text artifacts (configs, short scripts)
 - Quick bash commands
 - Final implementation after planning
-- Extracting parameters from files in your context
+- Synthesis / decisions based on findings already returned to you
+
+### Do Delegate (even if it feels like "I could just read it")
+- **Multimodal / large documents** (PDFs, papers, datasheets, images): these come in as document/image blocks that replay in your tool_result history every turn. Dispatch a subagent to ingest them; you get back a text summary, the bytes die with the subagent.
+- Any artifact whose raw form is meaningfully larger than your eventual finding from it.
 
 ### Why This Matters
-Your context is limited. Sub-agents have fresh context.
+Your context is limited AND every tool_result in it replays on every subsequent LLM call. A large multimodal block (e.g. a PDF document attachment) costs you upload time and context bloat on every turn until it ages out of history. Sub-agents have fresh, disposable context — they ingest the bytes once, return text findings, and die.
 - You: coordinate, synthesize, decide, implement
-- Sub-agents: explore, gather, analyze, report
+- Sub-agents: explore, gather, ingest, analyze, report
 
 ### Asking the User (ask_user tool)
 

@@ -911,6 +911,7 @@ class LLMClient:
             "messages": msg_dicts,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "timeout": 600,
             **kwargs
         }
 
@@ -1016,6 +1017,7 @@ class LLMClient:
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "stream": True,
+            "timeout": 600,
             **kwargs
         }
 

@@ -28,6 +28,7 @@ Anthropic:    anthropic/claude-sonnet-4-6             [DEFAULT - TESTED]
 Anthropic:    anthropic/claude-opus-4-7               [TESTED — bump for the heaviest scientific reasoning]
 Anthropic:    anthropic/claude-opus-4-5-20251101      [legacy snapshot]
 Anthropic:    anthropic/claude-sonnet-4-20250514      [legacy snapshot]
+OpenAI:       openai/gpt-5.4                          [bench-validated GA equivalent of Sonnet 4-6]
 OpenAI:       openai/gpt-4.1                          [untested]
 OpenAI:       openai/o3                               [untested - reasoning model]
 OpenAI:       openai/o3-pro                           [untested - max reasoning]
@@ -42,11 +43,12 @@ VISION TIER (Multimodal/image analysis)
 -----------------------------------------------------------------------------
 Anthropic:    anthropic/claude-opus-4-7               [DEFAULT - TESTED]
 Anthropic:    anthropic/claude-opus-4-5-20251101      [legacy snapshot]
+OpenAI:       openai/gpt-5.4                          [bench-recipe choice for OpenAI vision role - multimodal GA]
 OpenAI:       openai/gpt-4.1                          [untested - supports vision]
 OpenAI:       openai/o3                               [untested - visual reasoning]
-Google:       gemini/gemini-3-pro-preview             [untested - native multimodal]
+Google:       gemini/gemini-3.1-pro-preview           [bench-recipe choice for Gemini vision role - 3-pro-preview was shut down 2026-03-09]
 Google:       gemini/gemini-3-pro-image-preview       [untested - image specialist]
-xAI:          xai/grok-4-1-fast-reasoning             [untested - text/image input]
+xAI:          xai/grok-4.3                            [bench-recipe choice for xAI vision role - only live xAI model since 2026-05-15]
 xAI:          xai/grok-2-vision-1212                  [untested - vision model]
 
 Open-Source Vision Models (via Together AI / self-hosted):
@@ -61,6 +63,7 @@ CODING TIER (Implementation, debugging, research)
 -----------------------------------------------------------------------------
 Anthropic:    anthropic/claude-sonnet-4-6             [DEFAULT - TESTED]
 Anthropic:    anthropic/claude-sonnet-4-20250514      [legacy snapshot]
+OpenAI:       openai/gpt-5.4-mini                     [bench-recipe choice for OpenAI coding/fast role]
 OpenAI:       openai/gpt-4.1-mini                     [untested]
 OpenAI:       openai/o4-mini                          [untested - fast reasoning]
 Google:       gemini/gemini-3-flash-preview           [untested]
@@ -78,6 +81,7 @@ Open-Source Coding Models (via Together AI / self-hosted):
 FAST TIER (Speed/cost optimized)
 -----------------------------------------------------------------------------
 Anthropic:    anthropic/claude-haiku-4-5-20251001     [DEFAULT - TESTED]
+OpenAI:       openai/gpt-5.4-mini                     [bench-recipe choice for OpenAI fast role]
 OpenAI:       openai/gpt-4.1-nano                     [untested]
 OpenAI:       openai/o4-mini                          [untested]
 Google:       gemini/gemini-2.5-flash-lite            [untested]

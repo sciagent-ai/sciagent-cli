@@ -493,33 +493,35 @@ Do NOT make changes. Only investigate and report.""",
             max_iterations=60
         ))
 
-        # Research agent - for web-based research and documentation
-        # Uses CODING_MODEL (Sonnet) - sufficient for web search and reading docs
+        # Research agent - for digest/synthesis from web OR local sources.
+        # Uses CODING_MODEL — capable of multimodal ingestion (PDFs, images
+        # via file_ops) and external web search.
         self.register(SubAgentConfig(
             name="research",
-            description="Web research, documentation lookup, literature review. Use for external knowledge.",
+            description="Digest and synthesize from web OR local documents (papers, specs, datasheets). Reads multimodal artifacts via file_ops; runs web search/fetch for external knowledge.",
             model=CODING_MODEL,
-            system_prompt="""You are a research agent. Find and synthesize information from the web.
+            system_prompt="""You are a research agent. Ingest and synthesize information from web AND local sources.
 
 ## What You Do
-- Search for documentation, tutorials, examples
+- Read and digest local documents (papers, specs, datasheets, configs) via file_ops — including PDFs with figures, equations, and tables
+- Search the web for documentation, tutorials, examples
 - Find scientific papers and methods
+- Extract parameters, figure descriptions, tables, methods, findings
 - Look up API references and best practices
-- Research libraries and their usage patterns
 
 ## Process
-1. Search with specific queries: web(command="search", query="...")
-2. Fetch promising sources: web(command="fetch", url="...")
-3. Extract key information
-4. Save findings to _outputs/ if substantial
+- Local document: file_ops to read (use `pages=` for specific PDF page ranges when targeting figures or sections), then summarize concrete content. For figure-bearing pages, describe quantitatively — peak positions, curve shapes, asymmetries, multi-modal features — not just "shows three curves."
+- External: web(command="search", query="...") then web(command="fetch", url="...")
+- Extract key information from either path
+- Save findings to _outputs/ if substantial
 
 ## Output Format
-1. **Finding**: What you learned
-2. **Source**: URL or citation
-3. **Details**: Key facts, code examples, parameters
+1. **Finding**: What you learned (specific parameters, methods, figure features, table values)
+2. **Source**: URL, citation, or file path + page number
+3. **Details**: Key facts, code examples, parameters, equations
 4. **Recommendation**: How to apply this
 
-Always cite sources. Do NOT fabricate information.""",
+Always cite sources. Do NOT fabricate information. When describing figures, prefer concrete quantitative features over generic phrases.""",
             allowed_tools=["web", "file_ops", "search"],
             max_iterations=50
         ))
@@ -2510,7 +2512,7 @@ class TaskTool(BaseTool):
 Available agents:
 - explore: Fast codebase search (uses Haiku). Quick file/pattern lookups.
 - debug: Error investigation with web research. Use when fixing errors.
-- research: Web research, documentation, literature review. Use for external knowledge.
+- research: Digest and synthesize — web sources OR local documents (papers, specs, datasheets). Reads multimodal artifacts (figures/tables/equations) via file_ops. Use for external knowledge OR local document digestion.
 - compute: Run jobs on the cloud (SkyPilot) end-to-end and bring outputs back local. Use for any 'on sky', 'on AWS', 'in the cloud' task. Produces primary scientific data.
 - analyze: Consume data produced upstream (compute jobs, prior analyze runs, acquired datasets) and emit derived artifacts: plots, statistics, comparisons, distributions, residuals, light fits (regression / GP / lightweight Bayesian optimization). Picks its own container based on libs needed. Use for ANY 'plot X', 'fit Y', 'compare runs', 'reproduce figure N' deliverable.
 - plan: Break down complex problems into steps.
@@ -2519,7 +2521,7 @@ Available agents:
 
 Use 'explore' for quick local searches.
 Use 'debug' when investigating errors.
-Use 'research' for documentation, APIs, scientific methods.
+Use 'research' for any digest-and-synthesize work — web sources, documentation, APIs, scientific methods, OR local documents (papers, specs, datasheets). Dispatch research for any non-trivial local document (PDF, paper) instead of reading it in your main context; the bytes replay every turn and bloat your context.
 Use 'compute' for ANY task that runs on the cloud — keeps install chatter, status polls, and job logs out of your context. Returns a tight summary with local file paths.
 Use 'analyze' for ANY derivation off compute outputs — plots, fits, comparisons. Don't make compute do plotting in a container that lacks plotting libs; that path ends in fabricated figures.
 Use 'plan' before implementing anything non-trivial.
