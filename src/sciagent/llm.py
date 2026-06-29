@@ -40,7 +40,7 @@ from .defaults import DEFAULT_MODEL
 
 try:
     import litellm
-    from litellm import completion
+    from litellm import completion, stream_chunk_builder
     from litellm.caching import Cache
     LITELLM_AVAILABLE = True
 
@@ -905,12 +905,22 @@ class LLMClient:
         # Apply Anthropic prompt caching if applicable
         msg_dicts = self._format_messages_with_prompt_caching(msg_dicts)
 
-        # Prepare kwargs
+        # Prepare kwargs. We call litellm with stream=True under the hood
+        # even though chat() returns a single LLMResponse — streaming keeps
+        # bytes flowing on the socket, which resets idle timers in the
+        # network path and prevents the silent-connection-drop hangs that
+        # bite long extended-thinking calls and multi-MB multimodal payloads.
+        # stream_chunk_builder reconstructs a non-streaming-shaped response
+        # from the chunks so the existing extraction code runs unchanged.
+        # stream_options.include_usage=True is required for the final chunk
+        # to carry token usage; without it the usage merge yields None.
         call_kwargs = {
             "model": self.model,
             "messages": msg_dicts,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
             "timeout": 600,
             **kwargs
         }
@@ -934,7 +944,39 @@ class LLMClient:
         # These warnings occur when litellm's response models have extra/missing fields
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=UserWarning)
-            response = self._call_with_retry(call_kwargs)
+            stream = self._call_with_retry(call_kwargs, is_stream=True)
+
+            # Collect all chunks. Each chunk is small; the entire stream is
+            # consumed here in one pass so the caller still gets a single
+            # response object. The benefit is at the transport layer:
+            # incremental bytes prevent silent socket drops between issuing
+            # the request and the server emitting the first token.
+            chunks = [chunk for chunk in stream]
+
+            # Reassemble into a non-streaming-shaped response so the
+            # extraction below works as before. stream_chunk_builder handles
+            # content accumulation, tool_call assembly across deltas, and
+            # merges usage from the final (usage-only) chunk.
+            response = stream_chunk_builder(chunks, messages=msg_dicts)
+
+            # stream_chunk_builder drops finish_reason when the trailing
+            # stream_options.include_usage chunk arrives with no choices —
+            # the rebuilt response defaults to "stop" even when the model
+            # actually emitted "tool_calls" or "length" in an earlier chunk.
+            # That misclassification breaks the agent-loop continuation
+            # branch at agent.py:1934 (re-prompt on max_tokens truncation).
+            # Recover the real finish_reason by scanning chunks back-to-front
+            # for the last non-None value.
+            actual_finish_reason = None
+            for chunk in reversed(chunks):
+                if not chunk.choices:
+                    continue
+                fr = chunk.choices[0].finish_reason
+                if fr is not None:
+                    actual_finish_reason = fr
+                    break
+            if actual_finish_reason is not None and response.choices:
+                response.choices[0].finish_reason = actual_finish_reason
 
             # Parse response (also under warnings suppression as model_dump triggers them)
             choice = response.choices[0]
