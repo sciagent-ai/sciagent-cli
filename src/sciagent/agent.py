@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 import traceback
+import uuid
 from typing import Dict, Any, List, Optional, Callable
 
 from prompt_toolkit import prompt as pt_prompt
@@ -1406,6 +1407,16 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
             is_attachment_result = output_type in MULTIMODAL_ARTIFACT_TYPES
 
             if is_attachment_result:
+                # Mint a fresh artifact_id and stash the pypdf / text fallback
+                # alongside the b64. The LLM wire-format dispatcher in
+                # ``llm._format_attachments_for_provider`` tracks which
+                # artifact_ids it has already sent and substitutes the
+                # text_fallback on every subsequent send — so the b64 only
+                # goes out exactly once. The in-memory message keeps the
+                # block as-is; only the wire shape changes per-turn. Fixes
+                # the replay-bloat where a 4 MB PDF was re-shipped every
+                # iteration after the read.
+                artifact_id = uuid.uuid4().hex
                 pending_attachments.append({
                     "type": output_type,
                     "media_type": result.output.get("media_type"),
@@ -1415,6 +1426,8 @@ Provide a focused summary (target ~600 words; longer is fine if dense facts dema
                                   or result.output.get("source_url")
                                   or result.output.get("filename")
                                   or "unknown",
+                    "artifact_id": artifact_id,
+                    "text_fallback": result.output.get("text_fallback") or "",
                 })
                 tool_result_text = result.output.get(
                     "display_text", f"[{output_type} attachment loaded]"

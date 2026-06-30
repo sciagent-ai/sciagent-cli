@@ -371,3 +371,162 @@ def test_canonical_block_types_kept_in_sync() -> None:
     from sciagent.agent import MULTIMODAL_ARTIFACT_TYPES
 
     assert MULTIMODAL_BLOCK_TYPES == MULTIMODAL_ARTIFACT_TYPES
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral multimodal replay (one wire-send per artifact_id)
+# ---------------------------------------------------------------------------
+
+
+def _pdf_attachment(artifact_id: str, *, text_fallback: str = "TEXT") -> dict:
+    """Canonical multimodal attachment dict matching what the agent loop
+    builds in ``_execute_tool_calls`` after a file_ops PDF read."""
+    return {
+        "type": "document",
+        "media_type": "application/pdf",
+        "data": base64.b64encode(_MINI_PDF).decode(),
+        "filename": "paper.pdf",
+        "artifact_id": artifact_id,
+        "text_fallback": text_fallback,
+    }
+
+
+def test_artifact_sent_as_multimodal_on_first_wire_format() -> None:
+    """First time an artifact_id appears in a wire-format pass, the b64
+    rides the multimodal block (existing behavior). The artifact_id is
+    recorded on the client as consumed."""
+    client = _fake_client("anthropic")
+    client._consumed_artifact_ids = set()
+
+    msg = Message.create_multimodal(
+        role="user",
+        text="analyze",
+        attachments=[_pdf_attachment("aid-first-send")],
+    )
+
+    out = client._format_attachments_for_provider([msg.to_dict()])
+    blocks = out[0]["content"]
+    doc_blocks = [b for b in blocks if b["type"] == "document"]
+    assert len(doc_blocks) == 1, "first send must carry the b64 multimodal block"
+    assert doc_blocks[0]["source"]["data"] == base64.b64encode(_MINI_PDF).decode()
+    assert "aid-first-send" in client._consumed_artifact_ids
+
+
+def test_artifact_swapped_for_text_fallback_on_second_wire_format() -> None:
+    """Second pass: the same in-memory message goes through the dispatcher
+    again (as it would on the next turn). Because the artifact_id is now
+    consumed, the dispatcher drops the b64 and emits a text block carrying
+    the carried text_fallback instead. This is the replay-bloat fix."""
+    client = _fake_client("anthropic")
+    client._consumed_artifact_ids = set()
+
+    msg = Message.create_multimodal(
+        role="user",
+        text="analyze",
+        attachments=[_pdf_attachment("aid-replay", text_fallback="page 1: hello")],
+    )
+
+    # Turn 1 — first send. b64 goes out, artifact is consumed.
+    client._format_attachments_for_provider([msg.to_dict()])
+    # Turn 2 — same message list re-sent. b64 must NOT appear.
+    out = client._format_attachments_for_provider([msg.to_dict()])
+    blocks = out[0]["content"]
+
+    assert all(b["type"] != "document" for b in blocks), (
+        "second send must not re-ship the multimodal block"
+    )
+    text_blocks = [b for b in blocks if b["type"] == "text"]
+    fallback_block = next(
+        b for b in text_blocks if "page 1: hello" in b["text"]
+    )
+    # Marker tells the model the artifact was already shown.
+    assert "previously shown above" in fallback_block["text"]
+    assert "paper.pdf" in fallback_block["text"]
+
+
+def test_artifact_ids_tracked_per_artifact_independently() -> None:
+    """Two artifacts on two different turns: the first artifact's id is
+    already consumed when the second turn arrives, but the second's id is
+    fresh and must still ship its b64."""
+    client = _fake_client("anthropic")
+    client._consumed_artifact_ids = set()
+
+    msg_turn1 = Message.create_multimodal(
+        role="user",
+        text="first",
+        attachments=[_pdf_attachment("aid-1", text_fallback="FIRST")],
+    )
+    client._format_attachments_for_provider([msg_turn1.to_dict()])
+
+    # Turn 2 — the loop re-sends turn-1's message AND adds a second one.
+    msg_turn2 = Message.create_multimodal(
+        role="user",
+        text="second",
+        attachments=[_pdf_attachment("aid-2", text_fallback="SECOND")],
+    )
+    out = client._format_attachments_for_provider(
+        [msg_turn1.to_dict(), msg_turn2.to_dict()]
+    )
+
+    # Turn-1 message: only text (the fallback).
+    t1_blocks = out[0]["content"]
+    assert all(b["type"] != "document" for b in t1_blocks)
+    assert any("FIRST" in b.get("text", "") for b in t1_blocks)
+
+    # Turn-2 message: still has the document block.
+    t2_blocks = out[1]["content"]
+    assert any(b["type"] == "document" for b in t2_blocks)
+    assert "aid-2" in client._consumed_artifact_ids
+
+
+def test_artifact_without_id_keeps_legacy_unbounded_replay() -> None:
+    """Backward compat: a block without an ``_artifact_id`` (e.g. a direct
+    Message.create_multimodal call from a legacy caller) bypasses the
+    ephemeral machinery entirely and rides as a normal multimodal block on
+    every send. The opt-in is the artifact_id."""
+    client = _fake_client("anthropic")
+    client._consumed_artifact_ids = set()
+
+    msg = Message.create_multimodal(
+        role="user",
+        text="legacy",
+        attachments=[{
+            "type": "document",
+            "media_type": "application/pdf",
+            "data": base64.b64encode(_MINI_PDF).decode(),
+            "filename": "legacy.pdf",
+        }],
+    )
+    out1 = client._format_attachments_for_provider([msg.to_dict()])
+    out2 = client._format_attachments_for_provider([msg.to_dict()])
+
+    for out in (out1, out2):
+        types = [b["type"] for b in out[0]["content"]]
+        assert "document" in types
+    assert client._consumed_artifact_ids == set()
+
+
+def test_consumed_set_is_per_client_instance() -> None:
+    """The consumed set is bound to the LLMClient instance — two sessions
+    (two LLMClient instances) do not share. Verifies no cross-session
+    leakage when a subagent constructs its own client."""
+    client_a = _fake_client("anthropic")
+    client_a._consumed_artifact_ids = set()
+    client_b = _fake_client("anthropic")
+    client_b._consumed_artifact_ids = set()
+
+    msg = Message.create_multimodal(
+        role="user",
+        text="shared",
+        attachments=[_pdf_attachment("aid-shared")],
+    )
+    client_a._format_attachments_for_provider([msg.to_dict()])
+
+    # client_b has never seen this artifact — must ship the b64.
+    out_b = client_b._format_attachments_for_provider([msg.to_dict()])
+    assert any(b["type"] == "document" for b in out_b[0]["content"])
+    assert "aid-shared" not in client_b._consumed_artifact_ids or (
+        client_b._consumed_artifact_ids == {"aid-shared"}
+    )
+    # After the b call, client_b records it for ITS session.
+    assert "aid-shared" in client_b._consumed_artifact_ids

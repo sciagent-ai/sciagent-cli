@@ -306,6 +306,18 @@ class Message:
             # citations. Carry it through when present.
             if "filename" in att:
                 block["source"]["filename"] = att["filename"]
+            # Ephemeral-replay machinery. When the agent-loop boundary mints
+            # an ``artifact_id`` and stashes the pypdf / extracted text in
+            # ``text_fallback``, the wire-format dispatcher uses both to send
+            # the b64 exactly once per session: first send goes out as the
+            # full multimodal block, subsequent sends collapse to a text
+            # block carrying the fallback. The keys live alongside the
+            # canonical ``source`` shape and are stripped before they reach
+            # any provider — the dispatcher rebuilds blocks from scratch.
+            if "artifact_id" in att:
+                block["_artifact_id"] = att["artifact_id"]
+            if "text_fallback" in att:
+                block["_text_fallback"] = att["text_fallback"]
             content_blocks.append(block)
 
         if text:
@@ -432,6 +444,14 @@ class LLMClient:
             "cost_usd": None,
             "model": None,
         }
+        # Ephemeral multimodal replay tracking. Each multimodal block emitted
+        # by the agent loop carries an ``_artifact_id``; the dispatcher in
+        # ``_format_attachments_for_provider`` adds the id here on first
+        # send and substitutes the carried ``_text_fallback`` on every
+        # subsequent send. Bound to the LLMClient instance because each
+        # session / subagent constructs its own client — no cross-session
+        # leakage.
+        self._consumed_artifact_ids: set = set()
 
         # Set API key if provided. Provider id comes from litellm's resolver
         # (L1) so router aliases and bedrock/vertex_ai-fronted models route
@@ -723,6 +743,35 @@ class LLMClient:
                         )
                         if not data:
                             continue
+                        # Ephemeral-replay swap: if this artifact has already
+                        # been shipped to the provider on a prior turn, drop
+                        # the b64 and substitute the carried text_fallback.
+                        # The model already "saw" the multimodal content on
+                        # the first send; replaying 4 MB of base64 per turn
+                        # bloats the cached prefix for ~no information gain.
+                        # If the model needs the raw content back (a figure,
+                        # a table layout), it re-reads the file — file_ops
+                        # mints a fresh artifact_id, which triggers another
+                        # one-shot send.
+                        artifact_id = block.get("_artifact_id")
+                        if artifact_id and artifact_id in self._consumed_artifact_ids:
+                            fallback = block.get("_text_fallback") or ""
+                            fname = filename or _DEFAULT_FILENAME.get(
+                                block_type, "attachment"
+                            )
+                            header = (
+                                f"[{block_type} {fname} — previously shown above; "
+                                f"text extract below]"
+                            )
+                            new_content.append({
+                                "type": "text",
+                                "text": (
+                                    f"{header}\n{fallback}" if fallback else header
+                                ),
+                            })
+                            continue
+                        if artifact_id:
+                            self._consumed_artifact_ids.add(artifact_id)
                         shape = self._resolve_wire_shape(provider, block_type)
                         if shape == self._IMAGE_URL:
                             new_content.append({
