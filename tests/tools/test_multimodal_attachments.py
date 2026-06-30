@@ -16,6 +16,7 @@ Covers the contract described in
 from __future__ import annotations
 
 import base64
+import types
 from pathlib import Path
 
 import pytest
@@ -41,9 +42,19 @@ def _fake_client(provider: str) -> LLMClient:
     """Bypass __init__ (which would try to load credentials) and pin the
     provider so we can exercise ``_format_attachments_for_provider`` in
     isolation. The function only consults ``self._provider()`` + the
-    capability table; nothing else on the client matters for this test."""
+    capability table; nothing else on the client matters for this test.
+
+    Provider is patched on the INSTANCE via ``types.MethodType``, not on
+    the class. A previous version of this helper assigned to
+    ``LLMClient._provider`` directly — that leaks across tests, and any
+    later test that constructs a real ``LLMClient`` sees the patched
+    provider regardless of its model id. Also seeds the ephemeral
+    multimodal consumed-set so the dispatcher's first wire pass has a
+    clean state per client.
+    """
     c = LLMClient.__new__(LLMClient)
-    LLMClient._provider = lambda self, _p=provider: _p
+    c._consumed_artifact_ids = set()
+    c._provider = types.MethodType(lambda self, _p=provider: _p, c)
     return c
 
 
@@ -396,7 +407,6 @@ def test_artifact_sent_as_multimodal_on_first_wire_format() -> None:
     rides the multimodal block (existing behavior). The artifact_id is
     recorded on the client as consumed."""
     client = _fake_client("anthropic")
-    client._consumed_artifact_ids = set()
 
     msg = Message.create_multimodal(
         role="user",
@@ -418,7 +428,6 @@ def test_artifact_swapped_for_text_fallback_on_second_wire_format() -> None:
     consumed, the dispatcher drops the b64 and emits a text block carrying
     the carried text_fallback instead. This is the replay-bloat fix."""
     client = _fake_client("anthropic")
-    client._consumed_artifact_ids = set()
 
     msg = Message.create_multimodal(
         role="user",
@@ -449,7 +458,6 @@ def test_artifact_ids_tracked_per_artifact_independently() -> None:
     already consumed when the second turn arrives, but the second's id is
     fresh and must still ship its b64."""
     client = _fake_client("anthropic")
-    client._consumed_artifact_ids = set()
 
     msg_turn1 = Message.create_multimodal(
         role="user",
@@ -485,7 +493,6 @@ def test_artifact_without_id_keeps_legacy_unbounded_replay() -> None:
     ephemeral machinery entirely and rides as a normal multimodal block on
     every send. The opt-in is the artifact_id."""
     client = _fake_client("anthropic")
-    client._consumed_artifact_ids = set()
 
     msg = Message.create_multimodal(
         role="user",
@@ -511,9 +518,7 @@ def test_consumed_set_is_per_client_instance() -> None:
     (two LLMClient instances) do not share. Verifies no cross-session
     leakage when a subagent constructs its own client."""
     client_a = _fake_client("anthropic")
-    client_a._consumed_artifact_ids = set()
     client_b = _fake_client("anthropic")
-    client_b._consumed_artifact_ids = set()
 
     msg = Message.create_multimodal(
         role="user",
