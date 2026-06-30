@@ -180,3 +180,199 @@ def test_missing_registry_file_returns_error(tmp_path: Path):
     out = tool.execute(keyword="anything")
     assert out.success is False
     assert "registry" in (out.error or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# Token-fallback matching (multi-word queries + plural→singular strip)
+# ---------------------------------------------------------------------------
+
+
+def test_match_mode_present_on_exact_matches(tmp_path: Path):
+    """Every result row carries a `match_mode` field so downstream code can
+    branch on the discovery path. Exact substring hits report 'exact' and
+    leave `matched_tokens` null."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          openfoam:
+            description: "OpenFOAM CFD"
+            packages: []
+            capabilities: ["incompressible flow"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="openfoam")
+    assert out.output["matches"][0]["match_mode"] == "exact"
+    assert out.output["matches"][0]["matched_tokens"] is None
+
+
+def test_multi_word_query_with_tokens_spanning_fields(tmp_path: Path):
+    """The motivating case: a query like 'molecular dynamics' where one
+    token lives in the description and the other in the capabilities list.
+    Exact substring fails (no contiguous match); token-fallback succeeds and
+    reports match_mode='token' with the singularized tokens that matched."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          amber:
+            description: "Amber molecular force field"
+            packages: [amber]
+            capabilities: ["dynamics simulation"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="molecular dynamics")
+    assert out.success is True
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "amber"
+    assert m["match_mode"] == "token"
+    assert set(m["matched_tokens"]) == {"molecular", "dynamic"}
+
+
+def test_plural_query_matches_singular_haystack(tmp_path: Path):
+    """A plural query ('simulations') falls through exact match when the
+    haystack carries the singular ('simulation'). The guarded singularizer
+    strips the 's' in the token-fallback pass."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          gromacs:
+            description: "Molecular dynamics"
+            packages: [gromacs]
+            capabilities: ["MD simulation"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="simulations")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "gromacs"
+    assert m["match_mode"] == "token"
+    assert m["matched_tokens"] == ["simulation"]
+
+
+def test_singularizer_guards_against_overstripping(tmp_path: Path):
+    """Words ending in 'ss' / 'us' / 'is' / 'os' / 'as' are NOT plurals — the
+    singularizer must leave them alone. If 'analysis' got stripped to
+    'analysi' the token-fallback would silently miss this service."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          scipy-base:
+            description: "Numerical analysis foundation"
+            packages: [numpy, scipy]
+            capabilities: ["statistical analysis"]
+          openfoam:
+            description: "CFD solver"
+            packages: []
+            capabilities: ["process pipeline"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+
+    # 'analysis' must match (ends in 'is' — not stripped).
+    out = tool.execute(keyword="statistical analysis")
+    names = [m["name"] for m in out.output["matches"]]
+    assert "scipy-base" in names
+
+    # 'process' must not be over-stripped to 'proce'.
+    out = tool.execute(keyword="process")
+    names = [m["name"] for m in out.output["matches"]]
+    assert "openfoam" in names
+
+
+def test_token_fallback_handles_ies_to_y(tmp_path: Path):
+    """Plural 'frequencies' must singularize to 'frequency' so it matches a
+    haystack with 'frequency'."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          spectrum-tool:
+            description: "Frequency-domain analysis"
+            packages: []
+            capabilities: ["spectral methods"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="frequencies")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "spectrum-tool"
+    assert m["matched_tokens"] == ["frequency"]
+
+
+def test_exact_match_takes_precedence_over_token(tmp_path: Path):
+    """When an exact substring hit exists, the token-fallback pass does NOT
+    run — exact-mode results are returned alone. This keeps the result set
+    stable and precise when the registry literally carries the query."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          exact-hit:
+            description: "Has molecular dynamics in the description verbatim"
+            packages: []
+            capabilities: []
+          token-hit:
+            description: "Amber molecular force field"
+            packages: []
+            capabilities: ["dynamics simulation"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="molecular dynamics")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "exact-hit"
+    assert m["match_mode"] == "exact"
+
+
+def test_token_fallback_returns_zero_when_a_token_is_missing(tmp_path: Path):
+    """Token mode requires ALL query tokens to appear in the haystack —
+    partial hits do not match. Otherwise a 'cfd openfoam' query would
+    surface every service that has 'cfd' but no openfoam."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          openfoam:
+            description: "OpenFOAM CFD solver"
+            packages: []
+            capabilities: []
+          paraview:
+            description: "Visualization toolkit"
+            packages: []
+            capabilities: []
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="visualization fortran")
+    assert out.output["match_count"] == 0
+
+
+def test_token_fallback_across_hyphenated_service_names(tmp_path: Path):
+    """Service names like 'openfoam-swak4foam' tokenize into separate words.
+    A query 'swak openfoam' that has no exact contiguous form must still
+    surface the service via the token path."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          openfoam-swak4foam-2012:
+            description: "OpenFOAM with swak4foam utilities"
+            packages: []
+            capabilities: []
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="swak openfoam")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "openfoam-swak4foam-2012"
+    assert m["match_mode"] == "token"

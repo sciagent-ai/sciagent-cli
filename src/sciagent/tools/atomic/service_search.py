@@ -17,12 +17,67 @@ step that comes before that.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
 
 from ..registry import BaseTool, ToolResult
+
+
+# Token boundary for the multi-word fallback path. We split on runs of
+# non-alphanumeric so service names like ``openfoam-swak4foam-2012`` and
+# capability prose ("Molecular dynamics, MD simulation") both yield clean
+# tokens. Lowercased upstream — the regex stays ASCII.
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokenize(text: str) -> List[str]:
+    """Lowercase + split on non-alphanumeric. Empty input → empty list."""
+    return _TOKEN_RE.findall(text.lower())
+
+
+# Suffixes we DO NOT strip a trailing 's' from. These are common
+# false-friends where the word ends in 's' but is not a plural:
+#   - 'ss': process, class, glass, boss
+#   - 'us': focus, status, abacus
+#   - 'is': analysis, basis, axis, thesis
+#   - 'os': bios, chaos
+#   - 'as': atlas, gas, canvas
+# Conservative on purpose — the token-fallback path is forgiving enough that
+# missing a plural strip is fine, but over-stripping ("analysis" → "analysi")
+# introduces silent false positives that are hard to debug.
+_NON_PLURAL_S_TAIL = ("ss", "us", "is", "os", "as")
+
+
+def _singularize(token: str) -> str:
+    """Guarded plural→singular. Handles the common English patterns:
+
+      - ``frequencies`` → ``frequency`` (ies → y), len > 4 guard.
+      - ``classes`` / ``processes`` → ``class`` / ``process`` (sses → ss).
+      - ``boxes`` / ``matches`` / ``brushes`` / ``buzzes`` → strip ``es``.
+      - Generic trailing ``s`` strip with the ss/us/is/os/as guard above.
+
+    Returns the input untouched when no rule applies. We deliberately do not
+    try to handle irregulars (man/men, child/children) — the registry uses
+    standard technical vocabulary where regular plurals dominate, and an
+    irregular-aware singularizer would need a wordlist that is itself a
+    maintenance burden.
+    """
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 5 and token.endswith("sses"):
+        return token[:-2]
+    if len(token) > 4 and token.endswith(("xes", "shes", "ches", "zes")):
+        return token[:-2]
+    if (
+        len(token) > 3
+        and token.endswith("s")
+        and not token.endswith(_NON_PLURAL_S_TAIL)
+    ):
+        return token[:-1]
+    return token
 
 
 class ServiceSearchTool(BaseTool):
@@ -137,34 +192,47 @@ class ServiceSearchTool(BaseTool):
 
         needle = keyword.strip().lower()
         matches: List[Dict[str, Any]] = []
+
+        # Pass 1: exact substring against the joined haystack — the historical
+        # behavior. Most agent queries are a single keyword that's literally
+        # present in the registry, and this path keeps them stable.
         for name, entry in services.items():
             if not isinstance(entry, dict):
                 continue
             haystack = self._service_haystack(name, entry)
             if needle in haystack:
-                matches.append(
-                    {
-                        "name": name,
-                        "description": entry.get("description") or "",
-                        "image": entry.get("image") or "",
-                        "extends": entry.get("extends"),
-                        "packages": list(entry.get("packages") or []),
-                        # Cap capabilities to keep the result token-light;
-                        # full entry is one Read away if the agent wants more.
-                        "capabilities": list((entry.get("capabilities") or [])[:6]),
-                        # Env contract — surface the registry's promise about
-                        # the container's runtime layout so the agent can
-                        # write code against observed paths instead of
-                        # locally-imagined ones. Missing fields fall through
-                        # as null; the agent knows to probe rather than
-                        # assume in that case.
-                        "workdir": entry.get("workdir"),
-                        "runtime": entry.get("runtime"),
-                        "env_setup": entry.get("env_setup"),
-                        "tool_paths": entry.get("tool_paths"),
-                        "probe_command": entry.get("probe_command"),
-                    }
-                )
+                matches.append(self._summarize(name, entry, "exact", None))
+
+        # Pass 2: token-fallback. Multi-word queries whose tokens span fields
+        # ("molecular dynamics" — molecular in description, dynamics in
+        # capabilities) miss the substring pass entirely. So do plural forms
+        # whose haystack carries the singular ("simulations" vs "simulation").
+        # We tokenize and guarded-singularize both sides, then require every
+        # query token to appear as a substring of the joined haystack. Token
+        # mode runs only when exact returned nothing — fallback semantics
+        # keep results stable when the exact term is present.
+        if not matches:
+            query_tokens = [_singularize(t) for t in _tokenize(needle)]
+            query_tokens = [t for t in query_tokens if t]
+            if query_tokens:
+                for name, entry in services.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    haystack = self._service_haystack(name, entry)
+                    # Singularize the haystack tokens too so a singular query
+                    # still hits a plural haystack ("simulation" finds
+                    # "simulations"). We feed the singularized tokens back
+                    # into a joined string and substring-test against it —
+                    # cheaper than building per-token sets and equivalent for
+                    # the prefix-substring queries the agent typically issues
+                    # (e.g., "swak" matching "swak4foam").
+                    haystack_singular = " ".join(
+                        _singularize(t) for t in _tokenize(haystack)
+                    )
+                    if all(t in haystack_singular for t in query_tokens):
+                        matches.append(
+                            self._summarize(name, entry, "token", query_tokens)
+                        )
 
         return ToolResult(
             success=True,
@@ -175,6 +243,42 @@ class ServiceSearchTool(BaseTool):
                 "registry_path": self._registry_path,
             },
         )
+
+    @staticmethod
+    def _summarize(
+        name: str,
+        entry: Dict[str, Any],
+        match_mode: str,
+        matched_tokens: Optional[List[str]],
+    ) -> Dict[str, Any]:
+        """Per-service result row. ``match_mode`` is ``"exact"`` (substring on
+        the joined haystack) or ``"token"`` (all query tokens present as
+        substrings of the singularized haystack). ``matched_tokens`` is the
+        list of singularized query tokens for token-mode hits, ``None`` for
+        exact hits. Adding fields here is safe — consumers read by key.
+        """
+        return {
+            "name": name,
+            "description": entry.get("description") or "",
+            "image": entry.get("image") or "",
+            "extends": entry.get("extends"),
+            "packages": list(entry.get("packages") or []),
+            # Cap capabilities to keep the result token-light; full entry is
+            # one Read away if the agent wants more.
+            "capabilities": list((entry.get("capabilities") or [])[:6]),
+            # Env contract — surface the registry's promise about the
+            # container's runtime layout so the agent can write code against
+            # observed paths instead of locally-imagined ones. Missing fields
+            # fall through as null; the agent knows to probe rather than
+            # assume in that case.
+            "workdir": entry.get("workdir"),
+            "runtime": entry.get("runtime"),
+            "env_setup": entry.get("env_setup"),
+            "tool_paths": entry.get("tool_paths"),
+            "probe_command": entry.get("probe_command"),
+            "match_mode": match_mode,
+            "matched_tokens": matched_tokens,
+        }
 
 
 class ServiceDetailTool(BaseTool):
