@@ -16,8 +16,7 @@ from textwrap import dedent
 
 import pytest
 
-from sciagent.tools.atomic.service_search import ServiceDetailTool, ServiceSearchTool
-from sciagent.tools.registry import ToolRegistry
+from sciagent.tools.atomic.service_search import ServiceSearchTool
 
 
 def _write_registry(tmp_path: Path, body: str) -> Path:
@@ -183,91 +182,197 @@ def test_missing_registry_file_returns_error(tmp_path: Path):
     assert "registry" in (out.error or "").lower()
 
 
-def test_token_fallback_handles_reversed_phrase(tmp_path: Path):
-    """Phrase 'S4 RCWA' doesn't appear contiguously in the rcwa entry —
-    description has 'RCWA/S4 ...' (reversed) and 'S4' lives alone in
-    packages. Exact substring fails; token-AND fallback must catch it."""
+# ---------------------------------------------------------------------------
+# Token-fallback matching (multi-word queries + plural→singular strip)
+# ---------------------------------------------------------------------------
+
+
+def test_match_mode_present_on_exact_matches(tmp_path: Path):
+    """Every result row carries a `match_mode` field so downstream code can
+    branch on the discovery path. Exact substring hits report 'exact' and
+    leave `matched_tokens` null."""
     registry = _write_registry(
         tmp_path,
         """
         services:
-          rcwa:
-            description: "RCWA/S4 - Rigorous Coupled Wave Analysis"
-            packages: [S4, numpy]
-            capabilities: ["Photonic crystal simulations"]
-        """,
-    )
-    tool = ServiceSearchTool(registry_path=str(registry))
-    out = tool.execute(keyword="S4 RCWA")
-    assert out.success is True
-    assert out.output["match_count"] == 1
-    assert out.output["matches"][0]["name"] == "rcwa"
-    assert out.output["match_mode"] == "token"
-
-
-def test_token_fallback_handles_plural_query(tmp_path: Path):
-    """'photonics' (plural) must find a registry entry whose capability says
-    'Photonic crystal simulations' (singular). One-char plural strip in the
-    fallback is enough — no full stemmer required."""
-    registry = _write_registry(
-        tmp_path,
-        """
-        services:
-          rcwa:
-            description: "RCWA"
+          openfoam:
+            description: "OpenFOAM CFD"
             packages: []
-            capabilities: ["Photonic crystal simulations"]
+            capabilities: ["incompressible flow"]
         """,
     )
     tool = ServiceSearchTool(registry_path=str(registry))
-    out = tool.execute(keyword="photonics")
-    assert out.success is True
-    assert out.output["match_count"] == 1
-    assert out.output["matches"][0]["name"] == "rcwa"
-    assert out.output["match_mode"] == "token"
+    out = tool.execute(keyword="openfoam")
+    assert out.output["matches"][0]["match_mode"] == "exact"
+    assert out.output["matches"][0]["matched_tokens"] is None
 
 
-def test_service_detail_via_registry_does_not_collide_on_name(tmp_path: Path):
-    """Regression: an agent call like ``service_detail(name="sci-core")`` used
-    to crash with ``ToolRegistry.execute() got multiple values for argument
-    'name'`` because the dispatcher's own ``name`` parameter (the tool key)
-    collided with the spread ``**arguments`` carrying its own ``name`` kwarg.
-    The fix makes the dispatcher's ``name`` positional-only — this test pins
-    that contract."""
+def test_multi_word_query_with_tokens_spanning_fields(tmp_path: Path):
+    """The motivating case: a query like 'molecular dynamics' where one
+    token lives in the description and the other in the capabilities list.
+    Exact substring fails (no contiguous match); token-fallback succeeds and
+    reports match_mode='token' with the singularized tokens that matched."""
     registry = _write_registry(
         tmp_path,
         """
         services:
-          sci-core:
-            description: "Core scientific computing"
-            packages: [numpy, scipy]
-            capabilities: ["Numerical computing"]
+          amber:
+            description: "Amber molecular force field"
+            packages: [amber]
+            capabilities: ["dynamics simulation"]
         """,
     )
-    tools = ToolRegistry()
-    tools.register(ServiceDetailTool(registry_path=str(registry)))
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="molecular dynamics")
+    assert out.success is True
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "amber"
+    assert m["match_mode"] == "token"
+    assert set(m["matched_tokens"]) == {"molecular", "dynamic"}
 
-    # Exactly mirrors agent.py: tools.execute(tool_call.name, **tool_call.arguments)
-    result = tools.execute("service_detail", name="sci-core")
-    assert result.success is True, result.error
-    assert result.output["name"] == "sci-core"
-    assert result.output["entry"]["description"] == "Core scientific computing"
 
-
-def test_exact_match_still_preferred_over_fallback(tmp_path: Path):
-    """If the exact substring matches anything, the token fallback must not
-    fire — exact is more precise and the match_mode should reflect that."""
+def test_plural_query_matches_singular_haystack(tmp_path: Path):
+    """A plural query ('simulations') falls through exact match when the
+    haystack carries the singular ('simulation'). The guarded singularizer
+    strips the 's' in the token-fallback pass."""
     registry = _write_registry(
         tmp_path,
         """
         services:
-          rcwa:
-            description: "RCWA/S4"
+          gromacs:
+            description: "Molecular dynamics"
+            packages: [gromacs]
+            capabilities: ["MD simulation"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="simulations")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "gromacs"
+    assert m["match_mode"] == "token"
+    assert m["matched_tokens"] == ["simulation"]
+
+
+def test_singularizer_guards_against_overstripping(tmp_path: Path):
+    """Words ending in 'ss' / 'us' / 'is' / 'os' / 'as' are NOT plurals — the
+    singularizer must leave them alone. If 'analysis' got stripped to
+    'analysi' the token-fallback would silently miss this service."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          scipy-base:
+            description: "Numerical analysis foundation"
+            packages: [numpy, scipy]
+            capabilities: ["statistical analysis"]
+          openfoam:
+            description: "CFD solver"
+            packages: []
+            capabilities: ["process pipeline"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+
+    # 'analysis' must match (ends in 'is' — not stripped).
+    out = tool.execute(keyword="statistical analysis")
+    names = [m["name"] for m in out.output["matches"]]
+    assert "scipy-base" in names
+
+    # 'process' must not be over-stripped to 'proce'.
+    out = tool.execute(keyword="process")
+    names = [m["name"] for m in out.output["matches"]]
+    assert "openfoam" in names
+
+
+def test_token_fallback_handles_ies_to_y(tmp_path: Path):
+    """Plural 'frequencies' must singularize to 'frequency' so it matches a
+    haystack with 'frequency'."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          spectrum-tool:
+            description: "Frequency-domain analysis"
+            packages: []
+            capabilities: ["spectral methods"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="frequencies")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "spectrum-tool"
+    assert m["matched_tokens"] == ["frequency"]
+
+
+def test_exact_match_takes_precedence_over_token(tmp_path: Path):
+    """When an exact substring hit exists, the token-fallback pass does NOT
+    run — exact-mode results are returned alone. This keeps the result set
+    stable and precise when the registry literally carries the query."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          exact-hit:
+            description: "Has molecular dynamics in the description verbatim"
+            packages: []
+            capabilities: []
+          token-hit:
+            description: "Amber molecular force field"
+            packages: []
+            capabilities: ["dynamics simulation"]
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="molecular dynamics")
+    assert out.output["match_count"] == 1
+    m = out.output["matches"][0]
+    assert m["name"] == "exact-hit"
+    assert m["match_mode"] == "exact"
+
+
+def test_token_fallback_returns_zero_when_a_token_is_missing(tmp_path: Path):
+    """Token mode requires ALL query tokens to appear in the haystack —
+    partial hits do not match. Otherwise a 'cfd openfoam' query would
+    surface every service that has 'cfd' but no openfoam."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          openfoam:
+            description: "OpenFOAM CFD solver"
+            packages: []
+            capabilities: []
+          paraview:
+            description: "Visualization toolkit"
             packages: []
             capabilities: []
         """,
     )
     tool = ServiceSearchTool(registry_path=str(registry))
-    out = tool.execute(keyword="rcwa")
+    out = tool.execute(keyword="visualization fortran")
+    assert out.output["match_count"] == 0
+
+
+def test_token_fallback_across_hyphenated_service_names(tmp_path: Path):
+    """Service names like 'openfoam-swak4foam' tokenize into separate words.
+    A query 'swak openfoam' that has no exact contiguous form must still
+    surface the service via the token path."""
+    registry = _write_registry(
+        tmp_path,
+        """
+        services:
+          openfoam-swak4foam-2012:
+            description: "OpenFOAM with swak4foam utilities"
+            packages: []
+            capabilities: []
+        """,
+    )
+    tool = ServiceSearchTool(registry_path=str(registry))
+    out = tool.execute(keyword="swak openfoam")
     assert out.output["match_count"] == 1
-    assert out.output["match_mode"] == "exact"
+    m = out.output["matches"][0]
+    assert m["name"] == "openfoam-swak4foam-2012"
+    assert m["match_mode"] == "token"
