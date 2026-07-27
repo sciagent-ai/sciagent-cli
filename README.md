@@ -290,7 +290,7 @@ Comprehensive documentation is available in the `docs` folder. Start with the fo
 If you use SciAgent in your work, please cite:
 
 - **SciAgent: Containerized Code Generation for Scientific Computing with Verification.** Shruti Badhwar. AI4X – Accelerate, Singapore, 16–19 June 2026. [OpenReview PDF](https://openreview.net/pdf?id=FzcjjKIoqt)
-- **Audit-Grade Harness for Agent-driven Scientific Computation Workflows.** Shruti Badhwar. ICML 2026 AI4Science Workshop. [OpenReview forum](https://openreview.net/forum?id=6rOHtK32Mp#discussion)
+- **Audit-Grade Harness for Agent-driven Scientific Computation Workflows.** Shruti Badhwar. ICML 2026 AI4Science Workshop. [OpenReview PDF](https://openreview.net/pdf?id=6rOHtK32Mp)
 
 ## License
 
