@@ -186,6 +186,44 @@ Each field also has an env var and (for some) a `~/.sciagent/config.yaml` key. P
 
 See [Cloud Compute](cloud-compute.md) for the full cloud-compute guide.
 
+## Cost caps
+
+SciAgent tracks cost on three separate axes and gates on the aggregate. Per-axis is the source of truth — never collapsed into one number internally, because bench-style honest comparison needs the split.
+
+### Three-axis rollup
+
+`RunCostTracker` (owned by `TaskOrchestrator` while `execute_all` runs, exposed as a process-level "active tracker" so peripheral layers can update it without a constructor dep):
+
+| Axis | What it counts | Source |
+|------|----------------|--------|
+| `llm_cost_usd` | Per-LLM-call cost | `response._hidden_params["response_cost"]` via litellm, fed by `LLMClient`'s hook |
+| `compute_cost_usd` | Sky-realized cluster cost | `sky.cost_report()`, recomputed each poll (idempotent — replaces, doesn't increment) |
+| `storage_cost_usd` | Workspace bucket size × per-region rate | Computed once on session shutdown via `finalize_storage` |
+
+`total_usd = llm + compute + storage` — that's the number the kill switch reads.
+
+### Kill switch: `max_cost_usd`
+
+Hard cap on aggregate cost. Set on `OrchestratorConfig`:
+
+```bash
+sciagent --set orchestrator.max_cost_usd=25.0 "…"
+```
+
+The orchestrator checks once per iteration; on exceed, the loop halts and session-owned clusters are stopped. Companion: `orchestrator.max_wall_seconds` for a wall-clock cap. Both default to `None` (disabled).
+
+### Per-launch prompt: `commit_threshold_usd`
+
+Different mechanism, different intent. `CloudConfig.commit_threshold_usd` (default `$5.00`) is the estimated total above which `compute_run` prompts the user before launching a cluster. This is a per-launch confirmation gate, not a session-wide cap. Precedence: env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` > `CloudConfig` field > `~/.sciagent/config.yaml` `compute.commit_threshold_usd` > $5 default.
+
+### Session token budget: `session_soft_budget`
+
+`AgentConfig.session_soft_budget` is the cumulative token budget for one agent session; the loop triggers compaction (not termination) as it approaches the limit. Resolution: profile default (Anthropic 1M, OpenAI 2M, xAI 2M) → explicit `--set agent.session_soft_budget=N` → `SCIAGENT_SESSION_SOFT_BUDGET` env. `None` on both profile and override disables the soft cap. Distinct from `max_cost_usd`: this one bounds tokens, not dollars, and triggers a compaction rather than a stop.
+
+### Where cost lands in the log
+
+Each `tool_result` event carries a per-call `cost_usd` when litellm reported one. The `session_end` event (fired at `AgentLoop.run` exit) carries session-level totals — same axes, same aggregate — so post-hoc adapters can read one event per session instead of summing per-call rows. See [Provenance Log Schema](provenance_log_schema.md).
+
 ## Image Analysis
 
 SciAgent can analyze images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.

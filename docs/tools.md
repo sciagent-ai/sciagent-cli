@@ -82,6 +82,42 @@ skill(name="code-review")
 
 ---
 
+## PDF & image inputs
+
+Scientific work runs on PDFs and figures. `file_ops` reads both as multimodal artifacts: the raw bytes go to the model, with a text fallback preserved for logs and providers that can't take the raw format.
+
+### PDFs
+
+`file_ops(command="view", path="paper.pdf")` returns a document artifact. The full PDF bytes ride on the next LLM turn; the model does layout-aware rendering server-side, so figures, tables, and equations survive. A pypdf-extracted text fallback is carried alongside for the log and for providers that don't accept native PDFs.
+
+Large PDFs need a page range:
+
+```
+file_ops(command="view", path="paper.pdf", pages="1-30")
+file_ops(command="view", path="paper.pdf", pages="45-70")
+```
+
+The guard fires above `MAX_PDF_PAGES_NO_RANGE` (see `src/sciagent/tools/atomic/file_ops.py`) — without a page range a long paper turns into ~30k input tokens and the next turn often maxes out before it can call a tool. Each read is capped at `MAX_PDF_PAGES_PER_READ`.
+
+### Images
+
+`file_ops(command="view", path="./plots/results.png")` returns an image artifact using the same canonical shape. Supported formats: PNG, JPG/JPEG, GIF, WebP. Visual analysis uses the `VISION_MODEL` tier.
+
+### Send-once per session (`artifact_id`)
+
+Each attachment gets a UUID `artifact_id` at the agent-loop boundary. `LLMClient` tracks the ids it has already shipped in `_consumed_artifact_ids` (per client — subagents construct their own client and stay isolated).
+
+- **First pass**: the full base64 multimodal block goes over the wire.
+- **Subsequent passes**: the block is swapped for a text block containing the carried `text_fallback` plus a "previously shown above" marker.
+
+The in-memory message list is untouched, so Anthropic prompt-cache layout stays byte-stable. The model already saw the artifact on the first pass; the text-fallback marker on later passes tells it the content is still in scope without reshipping the bytes.
+
+### Provider dispatch
+
+`llm._format_attachments_for_provider` translates the canonical artifact shape (`{"type": "image"|"document", "media_type": ..., "data": <b64>, ...}`) into whichever wire format the active model accepts. Anthropic images and documents ride the native block format; other providers get the LiteLLM-normalized shape. Extending to `.docx` / `.xlsx` / audio / video is additive — emit the same shape with a matching `type` + `media_type`; no other code needs changes.
+
+---
+
 ## Compute
 
 Cloud and local container job orchestration. See [Cloud Compute](cloud-compute.md) for the full guide.

@@ -165,6 +165,50 @@ The prompt is a real `ask_user` — no silent resumption. The user sees what cra
 
 A subagent voluntarily lands in `blocked_resume` when it realizes the work can't finish in the current process — typically because the parent's token budget is about to run out, or because the subagent is mid-pipeline and the next step needs a different cluster that the parent should provision. The work pauses cleanly and the parent can pick it up later.
 
+## Verification
+
+The orchestrator runs three gates before it accepts a task as done: the **data gate** (fetch logs vs. file contents), the **exec gate** (declared executables actually ran), and the **LLM verification gate** (independent audit of the trajectory). All three are enabled by default and can be toggled per gate on `OrchestratorConfig`.
+
+### The LLM verification gate
+
+The gate runs the `verifier` subagent with a fresh context and the session log path — nothing more. The verifier opens `provenance.jsonl` via `file_ops`, reconstructs the trajectory (tool calls, artifacts, timing), and applies the audit rules in its system prompt (`src/sciagent/prompts/verification_llm.md`). It returns a single JSON verdict.
+
+Cross-LLM friendly: because the verifier reads the durable log rather than the parent's in-memory state, a different provider can audit a session it didn't run. This is the same contract [`verify_session`](tools.md#verify_session) exposes as a tool.
+
+The gate is trajectory-aware — a `session_end` event (fired unconditionally at `AgentLoop.run` exit) provides session-level totals (model, iterations, tokens, cost, wall time, exit reason) even for tool-free runs. The verifier reads that plus every prior event.
+
+### Child sessions in the audit trail
+
+When a task spawned subagents, evidence often lives in the child session's log, not the parent's. `OrchestratorConfig.verifier_include_child_sessions` (default `True`) surfaces the child log paths in the verifier's prompt header, so the verifier's `file_ops` can walk into each subagent trajectory. The parent log lists them via `subagent_completed` events; the orchestrator resolves those to `sessions/<child_id>/provenance.jsonl` paths.
+
+Set `verifier_include_child_sessions=False` to run the no-recursion ablation.
+
+### produces_uris — corrective retry
+
+When a subagent is spawned with `produces_uris=[...]` and returns success, the orchestrator validates each pattern against the filesystem / workspace bucket. If any pattern resolves to zero files (or all files below `produces_min_bytes`), the subagent gets **one** corrective continuation turn seeded with the gate's exact complaint before the failure bubbles up:
+
+```
+result = sub_agent.run(task)
+if result.success and produces_uris and validation_fails:
+    corrective = format_produces_failure(produces_uris, missing)
+    return sub_agent.run(corrective)   # state.context preserved across calls
+```
+
+Rationale: under load, subagents occasionally emit a no-tool-call "done" turn that exits the loop before the declared outputs are written (transient LLM timeout mid-thinking, hallucinated completion). One corrective turn recovers those cases without the parent having to re-spawn. If the retry still misses, the task lands in `blocked_produce_missing` as before.
+
+Interrupt-safe: cancelled runs (`(Stopped by user)` output, parent interrupt flag set) skip the retry — the user's stop takes precedence.
+
+### Kill-switch caps
+
+`OrchestratorConfig` has two hard caps that halt execution mid-run, checked once per orchestrator iteration:
+
+| Field | Purpose |
+|-------|---------|
+| `max_wall_seconds` | Wall-clock budget from `_start_time`. Exceeding it stops the loop and stops any session-owned clusters. |
+| `max_cost_usd` | Aggregate cost cap across LLM + compute + storage axes (see [Cost caps](configuration.md#cost-caps)). |
+
+Both default to `None` (disabled). Set via `--set orchestrator.max_wall_seconds=3600` / `--set orchestrator.max_cost_usd=25.0`, or via `~/.sciagent/config.yaml` under `orchestrator:`.
+
 ## Storage layout
 
 ```
