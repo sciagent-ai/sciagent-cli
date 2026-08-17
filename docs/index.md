@@ -17,7 +17,7 @@ A terminal-based AI agent for software engineering and scientific computing. Sci
 ```bash
 pip install sciagent-cli
 export ANTHROPIC_API_KEY="your-key"
-sciagent --project-dir ~/my-project "Create a Python script that fetches weather data"
+sciagent run --project-dir ~/my-project --task "Create a Python script that fetches weather data"
 ```
 
 ## Documentation
@@ -33,6 +33,7 @@ sciagent --project-dir ~/my-project "Create a Python script that fetches weather
 | [Provenance Log Schema](provenance_log_schema.md) | Durable JSONL audit trail (v1) |
 | [Use Cases](use-cases.md) | Examples for coding, research, and scientific computing |
 | [Case Studies](case-studies/) | Real-world reproductions of published research |
+| [Reading Trajectories](reading-trajectories.md) | How to inspect `result.txt`, `stdout.txt`, provenance, and outputs from real runs |
 | [Comparison](comparison.md) | How SciAgent compares to other frameworks |
 
 ## For Developers

@@ -10,89 +10,132 @@ nav_order: 1
 **Paper**: "Design and Experimental Validation of a High-Efficiency Multi-Zone Metasurface Waveguide In-Coupler"
 **Published**: Optical Materials Express, Vol. 15, No. 12, December 2025
 
----
+This page reflects the tracked benchmark trajectories in `icml_results_clean/`, not an older exploratory run.
 
-## The Challenge
+## The challenge
 
-Reproduce RCWA simulation results from a peer-reviewed photonics paper using only the PDF as input. Validate that computed results match the publication.
+Reproduce the paper's RCWA-based in-coupler optimization from the PDF and verify that the minimum field efficiency clears the paper-level target of `0.25`.
 
 ## Prompt
 
-```
+```text
 Reproduce simulation and optimization results from the
 publication in the project folder. Verify results match publication.
 ```
 
-## What SciAgent Did
+## Trajectory snapshot
 
-**Phase 1: Paper Analysis**
-Read the PDF and extracted all simulation parameters:
+The benchmark pair for this task is:
 
-| Parameter | Value | Source |
-|-----------|-------|--------|
-| Wavelength | 532 nm | Section 2 |
-| Grating Period | 453 nm | Section 2 |
-| TiO2 Index | 2.4 + 0.001j | Literature |
-| Zone Widths | 1.1, 0.94, 0.96 mm | Fig 2(e) |
+- `icml_results_clean/20260630T120254Z/photonics/photonics__sciagent-verifier-on-default__sonnet/`
+- `icml_results_clean/20260608T200907Z/photonics/photonics__cc-bare__sonnet/`
 
-**Phase 2: Task Planning**
-Created dependency-aware execution plan:
+On **June 30, 2026**, the audit-grade SciAgent run reported **MFE = 25.09%** and produced a `verified` verifier verdict at confidence `0.75`.
+On **June 8, 2026**, the `cc-bare` baseline reported **MFE = 25.04%**.
 
-```
-Extract params → RCWA Zone 1 ─┐
-                RCWA Zone 2 ─┼→ Coupling Model → Validation
-                RCWA Zone 3 ─┘
-```
+## What SciAgent did
 
-**Phase 3: Implementation**
-Wrote 350 lines of Python using S4 (Stanford RCWA solver):
-- Modeled TiO2 nano-beam + pillar unit cells
-- Simulated air→glass diffraction (T+1)
-- Simulated glass→glass TIR reflection (R0)
-- Implemented multi-bounce coupling model
+### Phase 1: Paper analysis
 
-**Phase 4: Debug & Iterate**
-Resolved API differences and refined geometry orientation across 4 code iterations.
+SciAgent read the paper PDF and recovered the main geometric and optical parameters:
+
+| Parameter | Value |
+|-----------|-------|
+| Wavelength | 532 nm |
+| Grating period | 453 nm |
+| Structure height | 250 nm |
+| Beam widths | 110, 110, 100 nm |
+| Pillar radii | 50, 85, 98 nm |
+
+### Phase 2: Multi-stage RCWA workflow
+
+The tracked run did not stop at a single script. It generated a staged workflow under `project/_outputs/photonics/`:
+
+- `rcwa_phase3.py`
+- `rcwa_phase4.py`
+- `rcwa_phase5.py`
+- `rcwa_refine.py`
+- `rcwa_metasurface.py`
+
+It also kept the intermediate execution logs:
+
+- `phase3_stdout.txt`
+- `phase4_stdout.txt`
+- `phase5_stdout.txt`
+- `refine_stdout.txt`
+- `sim_stdout.txt`
+- `simulation_log.txt`
+
+### Phase 3: Verification
+
+Because this was a SciAgent run, the cell also contains:
+
+- `provenance.jsonl`
+- a final `verification_result` event
+- structured verifier evidence, including supporting facts and missing-evidence notes
 
 ## Results
 
 ![Metasurface Simulation Results](../images/case-studies/metasurface_results.png)
 
-### Zone Efficiency Comparison
+### Minimum field efficiency
 
-| Zone | Simulated T+1 | Paper Target | Simulated R0 | Paper Target |
-|------|---------------|--------------|--------------|--------------|
-| 1 | 71.5% | 60% | 13.4% | 40% |
-| 2 | 34.3% | 50% | 32.0% | 50% |
-| 3 | 15.6% | 40% | 40.7% | 60% |
+| Metric | SciAgent run on June 30, 2026 | Paper target |
+|--------|-------------------------------|--------------|
+| MFE | **25.09%** | **≥ 25.0%** |
+| Average coupling efficiency | **30.6%** | **31.0%** |
 
-**Zone efficiency trends match** (Zone 1 > Zone 2 > Zone 3 for diffraction).
+### Best recovered geometries
 
-### Coupling Efficiency
+| Parameter | Zone 1 | Zone 2 | Zone 3 |
+|-----------|--------|--------|--------|
+| Period d (nm) | 453 | 453 | 453 |
+| Height h (nm) | 250 | 250 | 250 |
+| Beam width wb (nm) | 110 | 110 | 100 |
+| Pillar radius r (nm) | 50 | 85 | 98 |
+| Ly (nm) | 250 | 290 | 350 |
+| Separation (nm) | 125 | 70 | 250 |
 
-| Metric | SciAgent | Paper (Simulated) | Paper (Measured) |
-|--------|----------|-------------------|------------------|
-| MFE | 20.1% | 25.3% | 17% |
-| Average | 51% | 31% | 30% |
+### Coupling efficiency by angle
 
-## Validation
+| FOV angle | Zone | Coupling efficiency |
+|-----------|------|---------------------|
+| -10° | 1 | 43.8% |
+| -8° | 1 | 42.2% |
+| -6° | 1 | 35.3% |
+| -4° | 1 | 25.5% |
+| -2° | 2 | 25.2% |
+| 0° | 2 | 26.1% |
+| 2° | 2 | 25.9% |
+| 4° | 3 | 29.5% |
+| 6° | 3 | 29.5% |
+| 8° | 3 | 28.2% |
+| 10° | 3 | **25.1%** |
 
-| Check | Status |
-|-------|--------|
-| RCWA simulation framework | PASS |
-| Zone efficiency trends | PASS |
-| Multi-bounce coupling model | PASS |
-| MFE within 20% of paper | PASS |
+The tracked run matched the paper's main success criterion and recovered the qualitative zone behavior the paper describes.
 
-## Generated Artifacts
+## Generated artifacts
 
-- `metasurface_final.py` - Complete RCWA simulation (350 LOC)
-- `_outputs/all_results.json` - Numerical results
-- `_outputs/metasurface_results.png` - Visualization
-- `_outputs/VALIDATION_REPORT.md` - Detailed analysis
+The June 30, 2026 SciAgent run produced these primary artifacts:
 
-## Execution
+- `_outputs/photonics/mfe_result.json`
+- `_outputs/photonics/efficiency_curves.png`
+- `_outputs/photonics/coupling_efficiency.png`
+- `_outputs/photonics/zone1_results.json`
+- `_outputs/photonics/zone2_results.json`
+- `_outputs/photonics/zone3_results.json`
+- `_outputs/photonics/rcwa_metasurface.py`
 
-- **Time**: ~12 minutes
-- **Iterations**: 45 agent turns
-- **Services**: `rcwa` (S4 container)
+## Why this case matters
+
+This task is a good example of the difference between "got the right answer" and "left an audit trail":
+
+- the `cc-bare` baseline also cleared the `0.25` target
+- the SciAgent run adds `provenance.jsonl`, a verifier verdict, and structured evidence about what was actually observed
+
+If you want to inspect the raw benchmark artifacts, start with:
+
+- `result.txt`
+- `stdout.txt`
+- `provenance.jsonl`
+- `project/_outputs/photonics/`

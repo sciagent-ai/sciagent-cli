@@ -668,10 +668,10 @@ class TaskOrchestrator:
 
         # Map task type to agent type
         agent_map = {
-            "research": "researcher",
+            "research": "research",
             "code": "general",
             "validate": "general",
-            "review": "reviewer",
+            "review": "verifier",
             "general": "general",
         }
 

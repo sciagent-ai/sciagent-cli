@@ -10,15 +10,15 @@ nav_order: 2
 **Study**: "Accurate classification of BRCA1 variants with saturation genome editing"
 **Published**: Findlay et al., Nature 562, 217-222 (2018)
 
----
+This page is aligned to the tracked benchmark runs from **June 30, 2026**.
 
-## The Challenge
+## The challenge
 
-Analyze how BRCA1 mutation fitness scores correlate with protein 3D structure using deep mutational scanning data and AlphaFold predictions. Map 1,837 experimentally-measured mutation effects to structural features and identify patterns relevant for clinical variant interpretation.
+Map BRCA1 deep mutational scanning scores onto structural features from the AlphaFold model, then verify that the mapping rate clears the target threshold and that the expected structure-function signals appear.
 
 ## Prompt
 
-```
+```text
 Analyze how BRCA1 mutation fitness scores correlate with protein structure
 using the pre-downloaded data in `_data/`.
 
@@ -42,98 +42,90 @@ Verification targets:
 - Statistical comparison of buried vs exposed residue fitness
 ```
 
-## What SciAgent Did
+## Trajectory snapshot
 
-**Phase 1: Data Exploration**
-Parsed fitness data and validated structure alignment:
+The benchmark pair for this task is:
 
-| Data Source | Count | Coverage |
-|-------------|-------|----------|
-| Mutations | 1,837 | 326 positions |
-| Structure residues | 1,863 | Full protein |
-| RING domain | 575 | Residues 1-109 |
-| BRCT domain | 1,200 | Residues 1642-1863 |
+- `icml_results_clean/20260630T135609Z/brca1_fitness_structure/brca1_fitness_structure__sciagent-verifier-on-default__sonnet/`
+- `icml_results_clean/20260630T135609Z/brca1_fitness_structure/brca1_fitness_structure__cc-bare__sonnet/`
 
-**Phase 2: Structure Feature Extraction**
-Calculated per-residue structural properties using BioPython:
-- Secondary structure from φ/ψ dihedral angles (Ramachandran classification)
-- Solvent accessibility from Cα neighbor count within 10Å cutoff
-- B-factor/pLDDT confidence scores from AlphaFold model
+On **June 30, 2026**, both runs achieved a mapping rate of **1.00**. The SciAgent run additionally produced a verifier verdict of `verified` at confidence `0.78`.
 
-**Phase 3: Implementation**
-Wrote 530 lines of Python across 4 analysis scripts:
-- Fitness data parsing and validation
-- PDB structure feature extraction
-- Fitness-structure mapping with sequence verification
-- Statistical analysis and multi-panel visualization
+## What SciAgent did
 
-**Phase 4: Debug & Iterate**
-Resolved BioPython API issues (HSExposure import, Residue atom access methods) through web search and code correction across 3 iterations.
+### Phase 1: Data parsing and alignment
 
-```
-Parse Data → Extract Features → Map Fitness → Statistical Analysis
-    ↓              ↓                ↓               ↓
- 1,837 mut     1,863 res       100% mapped      p < 10⁻¹⁸
-```
+SciAgent parsed all 1,837 mutations and aligned them to the BRCA1 AlphaFold structure.
+
+### Phase 2: Structural feature extraction
+
+The tracked run computed:
+
+- secondary structure classes
+- an accessibility proxy based on local structure
+- domain-level summaries for RING and BRCT
+
+### Phase 3: Single-script analysis
+
+The actual June 30, 2026 run converged to a single main analysis script:
+
+- `project/brca1_analysis.py`
+
+That is a better reflection of the tracked artifact set than earlier multi-script summaries.
 
 ## Results
 
 ![BRCA1 Structure-Fitness Analysis](../images/case-studies/brca1_structure_fitness.png)
 
-### Buried vs Exposed Residues
+### Verification targets
 
-| Metric | Buried | Exposed | Significance |
-|--------|--------|---------|--------------|
-| Mean Fitness | -0.778 | -0.278 | p < 10⁻¹⁸ |
-| Std Dev | ±0.942 | ±0.711 | — |
-| Sample Size | n=915 | n=354 | — |
-| Effect Size | Cohen's d = -0.600 | (medium-large) |
-
-**Buried residues are significantly more sensitive to mutation** — consistent with their role in maintaining protein stability.
-
-### Functional Domain Analysis
-
-| Domain | Mean Fitness | Role |
-|--------|--------------|------|
-| RING (1-109) | -0.705 | E3 ubiquitin ligase (most critical) |
-| BRCT (1642-1863) | -0.582 | Phospho-protein binding |
-| Other regions | -0.030 | Linker regions (most tolerant) |
-
-**ANOVA**: F=17.091, p=4.42×10⁻⁸
-
-### Secondary Structure Effect
-
-| Structure | Mean Fitness | Percent |
-|-----------|--------------|---------|
-| Beta Sheet | -0.743 | 13.7% |
-| Alpha Helix | -0.646 | 9.2% |
-| Coil/Loop | -0.512 | 77.0% |
-
-**ANOVA**: F=8.887, p=1.44×10⁻⁴
-
-## Validation
-
-| Check | Status |
+| Check | Result |
 |-------|--------|
-| Mutations parsed (1,837) | PASS |
-| Mapping success (≥95%) | PASS (100%) |
-| Sequence match verification | PASS (100%) |
-| Statistical tests completed | PASS |
-| Visualization generated | PASS |
+| Mutations parsed | **1,837** |
+| Mapping rate | **1.00** |
+| Buried vs exposed test | **p = 1.48 × 10⁻⁴** |
 
-## Generated Artifacts
+### Mean fitness by secondary structure
 
-- `explore_data.py` - Data parsing and exploration (115 LOC)
-- `extract_structure_simple.py` - Structural feature extraction (195 LOC)
-- `map_fitness_structure.py` - Fitness-structure mapping (180 LOC)
-- `create_analysis_visualizations.py` - Analysis and plots (238 LOC)
-- `_outputs/structure_features.json` - Per-residue structural data (671 KB)
-- `_outputs/mapped_data.json` - Combined fitness-structure dataset (858 KB)
-- `_outputs/brca1_structure_fitness.png` - Multi-panel visualization (1.4 MB)
-- `_outputs/brca1_analysis_summary.json` - Methods and statistics
+| Structure | Mean fitness |
+|-----------|--------------|
+| Coil | -0.567 |
+| Helix | -0.624 |
+| Sheet | -0.668 |
 
-## Execution
+### Mean fitness by accessibility
 
-- **Time**: ~8 minutes
-- **Iterations**: 44 agent turns
-- **Services**: `biopython` (BioPython + SciPy + Matplotlib)
+| Accessibility | Mean fitness |
+|---------------|--------------|
+| Buried | **-1.497** |
+| Exposed | **-0.591** |
+
+Buried residues are much less tolerant to mutation in this tracked run.
+
+### Mean fitness by domain
+
+| Domain | Mean fitness |
+|--------|--------------|
+| RING | -0.705 |
+| BRCT | -0.582 |
+| Other | -0.030 |
+
+## Generated artifacts
+
+The June 30, 2026 SciAgent run produced:
+
+- `project/brca1_analysis.py`
+- `project/_outputs/fitness_structure_mapped.csv`
+- `project/_outputs/fitness_vs_position.png`
+- `project/_outputs/summary.json`
+
+## Audit note
+
+The verifier accepted the run overall, but the benchmark report also notes a caught scope mismatch in the broader execution trail. That is exactly the kind of nuance the durable provenance log is meant to preserve even when the headline result is correct.
+
+To inspect the raw artifacts, start with:
+
+- `result.txt`
+- `stdout.txt`
+- `provenance.jsonl`
+- `project/_outputs/summary.json`

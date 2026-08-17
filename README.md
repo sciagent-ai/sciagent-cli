@@ -1,6 +1,6 @@
 # SciAgent
 
-![SciAgent Design Overview](assets/systemdesign.png)
+![SciAgent Design Overview](https://raw.githubusercontent.com/sciagent-ai/sciagent-cli/main/assets/systemdesign.png)
 
 SciAgent is an LLM-agnostic framework — a runtime and reusable harness — for scientific computing agents. A user submits a scientific task — a simulation to run, a hypothesis to test, results to reproduce or extend — and the framework plans the work, delegates to role-isolated sub-agents (compute, analyze, research, verify), executes the heavy work in containerised services on local Docker or SkyPilot-managed cloud clusters, and writes every tool call, cloud job, artifact, and verification to an append-only provenance log. A separate verifier sub-agent reads the log in a fresh context to check the trail before the result is returned.
 
@@ -80,27 +80,35 @@ Additional environment variables (e.g. `OPENAI_API_KEY`, `GOOGLE_API_KEY`) can b
 
 ### Run a task
 
-Invoke SciAgent via the `sciagent` CLI and pass a natural-language task description. A project directory is created to store generated code and artifacts:
+Invoke SciAgent via the `sciagent run` CLI and pass a natural-language task description. A project directory is created to store generated code and artifacts:
 
 ```bash
-sciagent --project-dir ~/my-project "Create a Python script that calculates Fibonacci numbers"
+sciagent run --project-dir ~/my-project --task "Create a Python script that calculates Fibonacci numbers"
 ```
 
 Use the `--interactive` flag to enter a REPL for iterative control:
 
 ```bash
-sciagent --interactive
+sciagent run --project-dir ~/my-project --interactive
 ```
 
 Select a different model or enable sub-agents when needed:
 
 ```bash
-sciagent -m openai/gpt-4.1 "Analyze this codebase"
-sciagent -m gemini/gemini-3-pro-preview "Explain this diagram"
-sciagent --subagents "Research and refactor this module"
+sciagent run -m openai/gpt-4.1 --task "Analyze this codebase"
+sciagent run -m gemini/gemini-3-pro-preview --task "Explain this diagram"
+sciagent run --project-dir ~/my-project --subagents --task "Research and refactor this module"
 ```
 
-For more details on CLI flags see the [Configuration](docs/configuration.md) guide or run `sciagent --help`.
+Inspect the current CLI surface with:
+
+```bash
+sciagent --help
+sciagent run --help
+sciagent config keys
+```
+
+For more details on flags and layered config see the [Configuration](docs/configuration.md) guide.
 
 ## Image analysis examples
 
@@ -108,16 +116,16 @@ SciAgent can analyze images including scientific plots, microscopy, diagrams, an
 
 ```bash
 # Analyze a scientific plot
-sciagent "Read and interpret the graph at ./results/figure1.png"
+sciagent run --task "Read and interpret the graph at ./results/figure1.png"
 
 # Examine microscopy images
-sciagent "Analyze the cell structure in ./data/microscopy.jpg"
+sciagent run --task "Analyze the cell structure in ./data/microscopy.jpg"
 
 # Interpret simulation output
-sciagent "What does the CFD velocity field in ./output/velocity.png show?"
+sciagent run --task "What does the CFD velocity field in ./output/velocity.png show?"
 
 # Review data visualisation
-sciagent "Explain the trends in ./plots/timeseries.png and suggest improvements"
+sciagent run --task "Explain the trends in ./plots/timeseries.png and suggest improvements"
 ```
 
 Supported formats: PNG, JPG/JPEG, GIF, WebP.
@@ -128,19 +136,19 @@ SciAgent can run simulations directly in specialised Docker containers. Some exa
 
 ```bash
 # RCWA electromagnetic simulation
-sciagent "Design a photonic crystal with bandgap at 1550 nm using rcwa"
+sciagent run --task "Design a photonic crystal with bandgap at 1550 nm using rcwa"
 
 # Molecular dynamics (GROMACS)
-sciagent "Run a GROMACS simulation for a protein in water"
+sciagent run --task "Run a GROMACS simulation for a protein in water"
 
 # Convex optimisation (CVXPY)
-sciagent "Solve a portfolio optimisation problem using cvxpy"
+sciagent run --task "Solve a portfolio optimisation problem using cvxpy"
 
 # Symbolic math (SymPy)
-sciagent "Derive equations of motion for a double pendulum using sympy"
+sciagent run --task "Derive equations of motion for a double pendulum using sympy"
 
 # Cloud-scale CFD (SkyPilot + OpenFOAM)
-sciagent "Reproduce Fig 3 of the datacenter CFD paper on a SkyPilot cluster"
+sciagent run --task "Reproduce Fig 3 of the datacenter CFD paper on a SkyPilot cluster"
 ```
 
 For an end-to-end cloud example, see the [Datacenter CFD case study](docs/case-studies/datacenter-cfd.md).
@@ -172,11 +180,11 @@ SciAgent uses a skill-based workflow system for complex, multi-phase tasks. Skil
 
 | Skill | Purpose |
 |-------|---------|
-| `use-service` | Look up a registered scientific service and run a simulation |
+| `sci-compute` | Look up a registered scientific service and run a simulation |
 | `build-service` | Build and publish Docker services to GHCR |
 | `code-review` | Comprehensive code review with security analysis |
 
-The `use-service` skill implements a research-first workflow: discover the right service, read its docs, write the simulation code, run it in the container, debug. This ensures correct API usage by researching official documentation before writing simulation code.
+The `sci-compute` skill implements a research-first workflow: discover the right service, read its docs, write the simulation code, run it in the container, debug. This ensures correct API usage by researching official documentation before writing simulation code.
 
 ## Sub-agents
 
@@ -205,7 +213,7 @@ All tiers are provider-agnostic via [LiteLLM](https://github.com/BerriAI/litellm
 
 ## Architecture
 
-SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call core tools (`bash`, `file_ops`, `search`, `web`, `todo`, `skill`, `ask_user`), compute tools (`compute_run`, `compute_exec`, `compute_cluster`, `materialize`, `materialize_workspace`), task-orchestration tools (`task_list`, `task_get`, `task_wait`, `bg_*`), and verification tools (`verify_session`) to interact with the file system, shell, web, containerised simulations, cloud clusters, and the durable provenance log.
+SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call core tools (`bash`, `file_ops`, `search`, `web`, `todo`, `skill`, `ask_user`), compute tools (`compute_run`, `compute_exec`, `compute_cluster`, `materialize`, `materialize_workspace`), task-orchestration tools (`task_list`, `task_get`, `task_wait`, `bg_*`), and the verification surfaces (the fresh-context `verifier` subagent plus durable provenance logging) to interact with the file system, shell, web, containerised simulations, cloud clusters, and the audit trail.
 
 ```
 ┌─────────────────────────────────────────────────┐

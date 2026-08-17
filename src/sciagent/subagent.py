@@ -2838,9 +2838,9 @@ def create_agent_with_subagents(
 
 ## Available Sub-Agents
 Use the `task` tool to delegate work:
-- **researcher**: For exploring and understanding code (read-only)
-- **reviewer**: For code review and finding issues
-- **test_writer**: For writing tests
+- **explore**: For quick codebase searches and file lookups
+- **research**: For web research and synthesizing local or external sources
+- **verifier**: For independent verification and review of claims or outputs
 - **general**: For complex multi-step tasks
 
 ## When to Use Sub-Agents
@@ -3064,9 +3064,9 @@ def create_agent_with_orchestration(
 
 ### task - Delegate single tasks
 Use for isolated, independent tasks:
-- **researcher**: Explore and understand code (read-only)
-- **reviewer**: Review code for issues
-- **test_writer**: Write tests
+- **explore**: Quick codebase searches and file lookups
+- **research**: Web research and source synthesis
+- **verifier**: Independent verification and review
 - **general**: General purpose tasks
 
 ### workflow - Execute task workflows

@@ -66,7 +66,7 @@ config = AgentConfig(
     temperature=0.0,
     max_tokens=16384,                # per-call output cap
     max_iterations=120,              # agent-loop iteration cap
-    max_session_tokens=4_000_000,    # cumulative soft budget
+    session_soft_budget=4_000_000,   # cumulative soft budget
     compact_at_fraction=None,        # None = use profile default (0.6)
     working_dir=".",
     verbose=True,
@@ -75,7 +75,7 @@ config = AgentConfig(
 )
 ```
 
-`max_session_tokens` is overridden by the active model's profile when `SCIAGENT_SESSION_SOFT_BUDGET` is set.
+`session_soft_budget` is the cumulative soft token budget for the session. When left as `None`, the active model profile can supply the default; `SCIAGENT_SESSION_SOFT_BUDGET` can override it via the profile layer.
 
 `compact_at_fraction` overrides the profile's compaction trigger when set. Precedence: env `SCIAGENT_COMPACT_AT_PCT` > AgentConfig > profile default.
 
@@ -155,7 +155,7 @@ agent = create_agent(
 from sciagent import create_agent_with_subagents
 
 agent = create_agent_with_subagents(
-    model=DEFAULT_MODEL,  # Sub-agents inherit this
+    model=DEFAULT_MODEL,  # main agent model
     working_dir="./project"
 )
 ```
@@ -168,10 +168,10 @@ agent = create_agent_with_subagents(
 from sciagent.subagent import SubAgentConfig
 
 config = SubAgentConfig(
-    name="researcher",
+    name="research",
     description="Research specialist",
     system_prompt="You are a researcher...",
-    model=None,  # Inherits parent model
+    model=DEFAULT_MODEL,
     max_iterations=20,
     allowed_tools=["file_ops", "search", "web"]
 )
@@ -185,11 +185,11 @@ from sciagent.subagent import SubAgentOrchestrator
 orch = SubAgentOrchestrator(
     tools=registry,
     working_dir="./project",
-    parent_model="anthropic/claude-sonnet-4-6"
+    max_workers=4,
 )
 
 # Foreground (synchronous) — returns SubAgentResult
-result = orch.spawn("researcher", "Find API endpoints")
+result = orch.spawn("research", "Find API endpoints")
 
 # Background — registers in task_index, returns task_id
 task_id = orch.spawn(

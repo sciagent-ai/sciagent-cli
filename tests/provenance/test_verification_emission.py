@@ -220,6 +220,66 @@ def test_llm_gate_emits_verification_result_per_task(session_log: ProvenanceLog)
     assert ev["claim"]["kind"] == "task_outcome"
 
 
+def test_execute_with_subagent_uses_current_registry_names():
+    """Workflow task types must route to built-in subagent names that
+    actually exist in the registry."""
+    todo = TodoTool()
+    todo.execute(todos=[
+        {
+            "id": "t-research",
+            "content": "Research the API surface",
+            "task_type": "research",
+            "depends_on": [],
+            "result_key": "research",
+            "can_parallel": False,
+            "status": "pending",
+        },
+        {
+            "id": "t-review",
+            "content": "Review the final result",
+            "task_type": "review",
+            "depends_on": [],
+            "result_key": "review",
+            "can_parallel": False,
+            "status": "pending",
+        },
+    ])
+
+    class _FakeSubagent:
+        def __init__(self):
+            self.calls = []
+
+        def spawn(self, agent_name, prompt):
+            self.calls.append((agent_name, prompt))
+            return MagicMock(
+                success=True,
+                output=f"{agent_name} ok",
+                error=None,
+                iterations=1,
+            )
+
+    fake = _FakeSubagent()
+    orch = TaskOrchestrator(
+        todo_tool=todo,
+        subagent_orchestrator=fake,
+        config=OrchestratorConfig(verbose=False),
+    )
+
+    graph = todo.get_graph()
+    research_task = graph.get("t-research")
+    review_task = graph.get("t-review")
+
+    research_result = orch._execute_with_subagent(research_task, {})
+    review_result = orch._execute_with_subagent(review_task, {})
+
+    assert research_result.success is True
+    assert review_result.success is True
+    assert fake.calls == [
+        ("research", "Research the API surface"),
+        ("verifier", "Review the final result"),
+    ]
+
+
 def test_llm_gate_emits_insufficient_when_subagent_errors(session_log: ProvenanceLog):
     todo = TodoTool()
     todo.execute(todos=[

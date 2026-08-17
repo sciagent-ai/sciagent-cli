@@ -43,7 +43,7 @@ Sessions auto-save to `.agent_states` for resumption.
 
 ## Context Window
 
-`ContextWindow` manages conversation history with three roles: `system`, `user`, `assistant`. Tool results are inserted as assistant messages with `tool_result` fields.
+`ContextWindow` manages conversation history across `system`, `user`, `assistant`, and `tool` messages. Tool results are recorded with `add_tool_result(...)`, which appends a message with role `tool`.
 
 When approaching token limits, older messages are summarized while preserving tool-use integrity:
 
@@ -77,7 +77,7 @@ Full-featured tools in `sciagent.tools.atomic`. Grouped by purpose:
 
 **Monitoring** — `monitor`, `monitor_stop` (push-style stdout-line events delivered as `<system-reminder>` on the next agent turn — no per-event LLM round-trip).
 
-**Verification** — `verify` / `verify_session` (snapshot read of the durable provenance log).
+**Verification** — live verification runs through the fresh-context `verifier` subagent and the provenance gates; the pure helper `verify_session(session_id, ...)` reads a snapshot of the durable log for offline inspection.
 
 See [Tools reference](../tools.md) for full signatures.
 
@@ -250,7 +250,7 @@ In `blocked_resume`, the subagent itself decides the work can't finish in the cu
 | `compute_job_launched` | `compute_run` |
 | `compute_job_status_changed` | `bg_status` polling |
 | `artifact_produced` | File observation |
-| `verification_result` | `verify` / `verify_session` |
+| `verification_result` | Provenance checker + fresh-context verifier gate |
 | `correction` | Manual override |
 
 Per-line cap 16 KB; per-field cap 4 KB (oversize fields are replaced with a truncation stub carrying a SHA-256 + preview). Thread-safe via `fcntl.flock` so concurrent writes from main thread + orchestrator threads + verify probes never interleave.

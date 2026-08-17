@@ -220,7 +220,7 @@ Cross-domain pipelines work directly — e.g., RDKit → GROMACS → SciPy for m
 
 ### 5. Research-first workflow
 
-The `use-service` skill enforces documentation research before code generation:
+The `sci-compute` skill enforces documentation research before code generation:
 
 1. **Discovery** – Find the right service in the registry (`service_search`)
 2. **Research** – Read official docs and examples (`web`, `service_detail`)

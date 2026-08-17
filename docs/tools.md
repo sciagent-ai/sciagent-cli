@@ -75,9 +75,9 @@ ask_user(
 Load specialized workflow definitions (SKILL.md). Auto-triggers based on task description.
 
 ```
-skill(name="use-service")
-skill(name="build-service")
-skill(name="code-review")
+skill(skill_name="sci-compute")
+skill(skill_name="build-service")
+skill(skill_name="code-review")
 ```
 
 ---
@@ -139,7 +139,7 @@ compute_run(
 
 Modes: `mode="job"` (managed job — Sky tears the cluster down) or `mode="cluster"` (persistent cluster you can iterate against).
 
-Cost gate: when the optimizer's estimated total exceeds `$5.00`, the tool prompts the user before launching. Override via `CloudConfig(commit_threshold_usd=...)`, env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`, or `~/.sciagent/config.yaml`. See [Configuration → CloudConfig](configuration.md#cloudconfig-fields).
+Cost gate: when the optimizer's estimated total exceeds `$5.00`, the tool prompts the user before launching. Override via `CloudConfig(commit_threshold_usd=...)`, env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD`, or `~/.sciagent/config.yaml`. See [Configuration](configuration.md).
 
 ### compute_exec
 Run a follow-up command on a warm cluster.
@@ -278,14 +278,11 @@ monitor_stop(watcher_id="...")
 
 ## Verification
 
-### verify_session
-Snapshot read of a session's durable provenance log; produces a structured verification report. Cross-LLM friendly — any provider can audit a session it didn't run. See [Provenance Log Schema](provenance_log_schema.md).
+Live verification is not exposed as a standalone registered tool in the default CLI registry.
 
-```
-verify_session(session_id="abc12345")
-```
-
-One-shot, non-blocking, snapshot semantics. There is no `wait=` or polling — invoke again to see a fresh snapshot.
+- End-of-run verification happens through the fresh-context `verifier` subagent and the orchestrator gates.
+- Durable evidence lands in `provenance.jsonl` as `verification_result` events.
+- The Python helper `verify_session(session_id, ...)` is documented in the developer API reference, not as a default agent tool.
 
 ---
 

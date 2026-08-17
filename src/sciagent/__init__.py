@@ -1,8 +1,8 @@
 """
-SWE Agent - A modular Software Engineering Agent Framework
+SciAgent - A modular engineering and scientific agent framework
 
 Quick Start:
-    from swe_agent import create_agent, run_task
+    from sciagent import create_agent, run_task
 
     # One-shot task
     result = run_task("Create a hello world script")
@@ -12,9 +12,9 @@ Quick Start:
     agent.run_interactive()
 
     # With sub-agents
-    from swe_agent import create_agent_with_subagents
+    from sciagent import create_agent_with_subagents
     agent = create_agent_with_subagents()
-    agent.run("Research this codebase and write tests")
+    agent.run("Research this codebase and summarize the main architecture")
 """
 # Suppress pydantic serialization warnings BEFORE any imports
 # These occur when litellm's pydantic models serialize LLM responses
@@ -57,7 +57,7 @@ from .orchestrator import (
 )
 from .defaults import DEFAULT_MODEL
 
-__version__ = "2.1.1"
+__version__ = "2.1.2"
 __all__ = [
     # Config
     "DEFAULT_MODEL",

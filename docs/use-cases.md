@@ -6,33 +6,39 @@ nav_order: 7
 
 # Use Cases
 
+All examples below use the current CLI form:
+
+```bash
+sciagent run --task "..."
+```
+
 ## Software Engineering
 
 ```bash
 # Generate code from description
-sciagent "Create a REST API endpoint for user authentication"
+sciagent run --task "Create a REST API endpoint for user authentication"
 
 # Fix bugs and refactor
-sciagent "Fix the memory leak in process_data.py"
+sciagent run --task "Fix the memory leak in process_data.py"
 
 # Write tests
-sciagent "Write pytest tests for the User class"
+sciagent run --task "Write pytest tests for the User class"
 
 # Search and analyze
-sciagent "Find all TODO comments and summarize what needs work"
+sciagent run --task "Find all TODO comments and summarize what needs work"
 ```
 
 ## Research
 
 ```bash
 # Literature search
-sciagent "Find recent papers on transformer architectures"
+sciagent run --task "Find recent papers on transformer architectures"
 
 # API exploration
-sciagent "Show me how to use the pandas groupby function with examples"
+sciagent run --task "Show me how to use the pandas groupby function with examples"
 
 # Comparative analysis
-sciagent "Compare React and Vue for building dashboards"
+sciagent run --task "Compare React and Vue for building dashboards"
 ```
 
 ## Scientific Computing
@@ -41,39 +47,39 @@ SciAgent runs simulations in isolated Docker containers. Ask naturally:
 
 ```bash
 # Photonics & Electromagnetics
-sciagent "Simulate electromagnetic wave propagation through a metasurface using RCWA"
-sciagent "Design a photonic crystal waveguide with MEEP"
-sciagent "Trace rays through a lens system using pyoptools"
+sciagent run --task "Simulate electromagnetic wave propagation through a metasurface using RCWA"
+sciagent run --task "Design a photonic crystal waveguide with MEEP"
+sciagent run --task "Trace rays through a lens system using pyoptools"
 
 # Chemistry & Materials
-sciagent "Analyze molecular properties of this compound from SMILES"
-sciagent "Run a molecular dynamics simulation of a protein-ligand complex"
-sciagent "Build a crystal structure with ASE and compute its lattice properties"
+sciagent run --task "Analyze molecular properties of this compound from SMILES"
+sciagent run --task "Run a molecular dynamics simulation of a protein-ligand complex"
+sciagent run --task "Build a crystal structure with ASE and compute its lattice properties"
 
 # Math & Optimization
-sciagent "Solve this optimization problem using CVXPY"
-sciagent "Derive the symbolic integral of this expression with SymPy"
-sciagent "Tune hyperparameters for my ML model using Optuna"
+sciagent run --task "Solve this optimization problem using CVXPY"
+sciagent run --task "Derive the symbolic integral of this expression with SymPy"
+sciagent run --task "Tune hyperparameters for my ML model using Optuna"
 
 # Circuit & IC Design
-sciagent "Simulate this RC circuit with ngspice"
-sciagent "Run RTL-to-GDS flow for this Verilog design using OpenROAD"
+sciagent run --task "Simulate this RC circuit with ngspice"
+sciagent run --task "Run RTL-to-GDS flow for this Verilog design using OpenROAD"
 
 # Quantum Computing
-sciagent "Implement Grover's algorithm and simulate it with Qiskit"
+sciagent run --task "Implement Grover's algorithm and simulate it with Qiskit"
 
 # Bioinformatics
-sciagent "Analyze this DNA sequence and find ORFs using Biopython"
-sciagent "Run BLAST search against a local database"
+sciagent run --task "Analyze this DNA sequence and find ORFs using Biopython"
+sciagent run --task "Run BLAST search against a local database"
 
 # Network & Graph Analysis
-sciagent "Find communities in this social network using NetworkX"
+sciagent run --task "Find communities in this social network using NetworkX"
 
 # Chemical Process Engineering
-sciagent "Simulate a distillation column using DWSIM"
+sciagent run --task "Simulate a distillation column using DWSIM"
 
 # Differential Equations (Julia)
-sciagent "Solve this system of ODEs using Julia's DifferentialEquations.jl"
+sciagent run --task "Solve this system of ODEs using Julia's DifferentialEquations.jl"
 ```
 
 ### Available Services
@@ -98,39 +104,39 @@ Combine services for complex pipelines:
 
 ```bash
 # Drug screening pipeline
-sciagent "Screen molecules from compounds.sdf for binding affinity to target protein"
+sciagent run --task "Screen molecules from compounds.sdf for binding affinity to target protein"
 # Uses: rdkit -> gromacs -> scipy-base
 
 # Photonic optimization
-sciagent "Optimize a metasurface unit cell for maximum transmission at 1550nm"
+sciagent run --task "Optimize a metasurface unit cell for maximum transmission at 1550nm"
 # Uses: scipy-base (optimization) -> rcwa (simulation)
 
 # Chip analysis
-sciagent "Analyze power/performance/area for this RTL design"
+sciagent run --task "Analyze power/performance/area for this RTL design"
 # Uses: openroad -> scipy-base
 
 # Protein structure pipeline
-sciagent "Find similar proteins to this sequence and run MD simulation"
+sciagent run --task "Find similar proteins to this sequence and run MD simulation"
 # Uses: blast -> biopython -> gromacs
 
 # Optical system design
-sciagent "Design a lens system and optimize for minimum aberration"
+sciagent run --task "Design a lens system and optimize for minimum aberration"
 # Uses: pyoptools (ray tracing) -> optuna (optimization) -> scipy-base (analysis)
 
 # Crystal structure + analysis pipeline
-sciagent "Build a crystal structure and analyze its lattice properties"
+sciagent run --task "Build a crystal structure and analyze its lattice properties"
 # Uses: ase (structure) -> scipy-base (analysis)
 
 # Network-based drug discovery
-sciagent "Build protein interaction network and identify key drug targets"
+sciagent run --task "Build protein interaction network and identify key drug targets"
 # Uses: biopython (sequences) -> networkx (graph analysis) -> scipy-base (statistics)
 
 # Chemical process optimization
-sciagent "Optimize reactor conditions for maximum yield"
+sciagent run --task "Optimize reactor conditions for maximum yield"
 # Uses: dwsim (process sim) -> optuna (optimization)
 
 # Quantum chemistry workflow
-sciagent "Calculate ground state energy using VQE algorithm"
+sciagent run --task "Calculate ground state energy using VQE algorithm"
 # Uses: qiskit (quantum simulation) -> scipy-base (classical optimization)
 ```
 

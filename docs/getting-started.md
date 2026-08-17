@@ -6,9 +6,20 @@ nav_order: 2
 
 # Getting Started
 
-Install SciAgent and run your first task in minutes.
+Install SciAgent, learn the current CLI shape, and run your first task in minutes.
 
 > **New in v2.0**: cloud compute via SkyPilot, durable provenance log, background subagents with checkpoint/resume. See [What's New in v2.0](whats-new-v2.md) for the full list.
+
+## CLI shape
+
+The current CLI has two top-level verbs:
+
+```bash
+sciagent run ...
+sciagent config ...
+```
+
+Use `sciagent run` for tasks, and `sciagent config show` / `sciagent config keys` to inspect the layered configuration surface.
 
 ## Installation
 
@@ -49,17 +60,19 @@ Get a free key at [brave.com/search/api](https://brave.com/search/api/). Without
 ## Running your first task
 
 ```bash
-sciagent --project-dir ~/my-project "Create a hello world Python script"
+sciagent run --project-dir ~/my-project --task "Create a hello world Python script"
 ```
 
-The agent reads/writes files in `~/my-project`, runs shell commands, searches the web, and tracks progress with a todo list. When finished, you'll see a summary and can inspect the generated code.
+The agent reads and writes files in `~/my-project`, runs shell commands, searches the web, and tracks progress with a todo list. When finished, you'll see a summary and can inspect the generated code.
+
+`--project-dir` is optional. If you omit it, SciAgent uses the current working directory.
 
 ### Interactive mode
 
 For multi-turn conversations:
 
 ```bash
-sciagent --project-dir ~/my-project --interactive
+sciagent run --project-dir ~/my-project --interactive
 ```
 
 Press `Ctrl+C` anytime to pause and choose to continue, stop, or redirect.
@@ -69,26 +82,37 @@ Press `Ctrl+C` anytime to pause and choose to continue, stop, or redirect.
 For simulations, SciAgent uses containerized services (SciPy, RCWA, MEEP, etc.):
 
 ```bash
-sciagent "Run an RCWA simulation for a photonic crystal grating"
+sciagent run --project-dir ~/my-project --task "Run an RCWA simulation for a photonic crystal grating"
 ```
 
 The agent researches documentation, writes code, and runs it in Docker automatically.
 
 ## Command-line options
 
-Common options (defaults from `AgentConfig`):
+Common `sciagent run` options:
 
 | Option | Purpose | Default |
 |--------|---------|---------|
-| `--project-dir PATH` | Directory for reading/writing files | Required |
-| `--model NAME` | LLM to use (e.g. `openai/gpt-4.1`) | `anthropic/claude-sonnet-4-6` |
-| Fast model | Used for `explore` subagent and content processing. See `defaults.py` | `anthropic/claude-haiku-4-5-20251001` |
+| `--task TEXT` | Task to execute | — |
+| `--project-dir PATH` | Directory for reading/writing files | current working directory |
+| `--config PATH` | Explicit config YAML | — |
+| `--set KEY=VAL` | Override one config key; repeatable | — |
+| `--model NAME` | Main model to use (e.g. `openai/gpt-4.1`) | `anthropic/claude-sonnet-4-6` |
 | `--interactive` | Multi-turn conversation mode | Off |
-| `--subagents` | Enable WorkflowTool for full DAG execution | Off |
+| `--subagents` | Enable task orchestration and DAG execution | Off |
 | `--max-iterations N` | Max agent loop cycles | 120 |
 | `--temperature T` | LLM randomness (0 = deterministic) | 0.0 |
 | `--resume ID` | Continue a previous session | — |
 | `--list-sessions` | Show available resumable sessions | — |
 | `--quiet` | Minimal output | Off |
+| `--system-prompt PATH` | Replace the default system prompt | — |
+| `--skills-dir PATH` | Load SKILL.md definitions from a custom directory | — |
 
-Run `sciagent --help` for all options.
+Inspect the current surface with:
+
+```bash
+sciagent --help
+sciagent run --help
+sciagent config keys
+sciagent config show --project-dir ~/my-project
+```

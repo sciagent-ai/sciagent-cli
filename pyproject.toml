@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sciagent-cli"
-version = "2.1.1"
+version = "2.1.2"
 description = "A modular, extensible agent framework for software engineering and scientific computing tasks"
 readme = "README.md"
 license = {text = "Apache-2.0"}

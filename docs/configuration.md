@@ -6,81 +6,123 @@ nav_order: 3
 
 # Configuration
 
-Configure SciAgent via command-line flags or Python.
+SciAgent has two configuration surfaces:
 
-## Models
+- **CLI / YAML configuration** for normal `sciagent run` usage
+- **Python dataclasses** for embedding SciAgent inside another program
 
-### Default Model
-
-SciAgent uses Claude Sonnet as the default. Change it with `--model`:
-
-```bash
-sciagent --model openai/gpt-4.1 "Summarize README.md"
-sciagent --model gemini/gemini-3-pro-preview "Analyze this diagram"
-sciagent --model deepseek/deepseek-reasoner "Solve this physics problem"
-```
-
-Supported providers (via [litellm](https://github.com/BerriAI/litellm)): OpenAI, Anthropic, Google, and custom endpoints.
-
-### Model Tiers
-
-SciAgent uses five model tiers for cost-effective operation. Configure in `src/sciagent/defaults.py`:
-
-| Tier | Variable | Purpose |
-|------|----------|---------|
-| Scientific | `SCIENTIFIC_MODEL` | Main agent, planning |
-| Vision | `VISION_MODEL` | Image and multimodal analysis |
-| Coding | `CODING_MODEL` | Debug, research, general sub-agents |
-| Verification | `VERIFICATION_MODEL` | Independent verifier subagent |
-| Fast | `FAST_MODEL` | Explore sub-agent (speed/cost) |
-
-The main agent uses `DEFAULT_MODEL` (set to `SCIENTIFIC_MODEL`). The verification tier powers the independent verifier subagent that validates task outputs. Sub-agents use tier-appropriate models automatically.
-
-### Alternative Models by Provider
-
-SciAgent supports multiple LLM providers via [LiteLLM](https://github.com/BerriAI/litellm). Use `--model provider/model-name` to switch.
-
-> **Note**: Only Anthropic models are tested. Alternatives below are based on comparable capabilities but have NOT been validated. Your mileage may vary.
-
-| Tier | Anthropic (tested) | OpenAI | Google | xAI |
-|------|-------------------|--------|--------|-----|
-| **Scientific** | `claude-sonnet-4-6` (default), `claude-opus-4-7` | `gpt-5.4`, `gpt-4.1`, `o3`, `o3-pro` | `gemini-3-pro-preview`, `gemini-2.5-pro` | `grok-4-1-fast-reasoning` |
-| **Vision** | `claude-opus-4-7` (default) | `gpt-5.4`, `gpt-4.1`, `o3` | `gemini-3.1-pro-preview`, `gemini-3-pro-image-preview` | `grok-4.3`, `grok-2-vision-1212` |
-| **Coding** | `claude-sonnet-4-6` (default) | `gpt-5.4-mini`, `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Verification** | `claude-sonnet-4-6` (default) | `gpt-5.4`, `gpt-4.1-mini`, `o4-mini` | `gemini-3-flash-preview`, `gemini-2.5-flash` | `grok-code-fast-1` |
-| **Fast** | `claude-haiku-4-5-20251001` (default) | `gpt-5.4-mini`, `gpt-4.1-nano`, `o4-mini` | `gemini-2.5-flash-lite` | `grok-3-mini` |
-
-**Open-Source alternatives** (via Together AI, Groq, or self-hosted):
-
-| Tier | Models |
-|------|--------|
-| Scientific | `deepseek/deepseek-reasoner`, `together_ai/Qwen/Qwen3-235B-A22B-Instruct` |
-| Vision | `together_ai/Qwen/Qwen2.5-VL-72B-Instruct`, `together_ai/meta-llama/Llama-3.2-90B-Vision-Instruct` |
-| Coding | `deepseek/deepseek-chat`, `together_ai/meta-llama/Llama-3.3-70B-Instruct` |
-| Verification | `deepseek/deepseek-chat`, `together_ai/meta-llama/Llama-3.3-70B-Instruct` |
-| Fast | `groq/llama-3.3-70b-versatile`, `together_ai/Qwen/Qwen2.5-7B-Instruct` |
-
-See `src/sciagent/defaults.py` for the full list with notes.
-
-### Model Parameters
+The most important thing to know is that the current CLI uses subcommands:
 
 ```bash
-sciagent --temperature 0.7 "Generate creative function names"  # More random
-sciagent --temperature 0 "Refactor this code"                  # Deterministic
-sciagent --max-iterations 50 "Quick task"                      # Limit cycles
+sciagent run ...
+sciagent config ...
 ```
 
-## System Prompts
+## Configuration layers
 
-Override the default behavior with a custom prompt:
+### CLI configuration
+
+### Resolution order
+
+When you run `sciagent run`, config is merged in this order, with later layers winning:
+
+1. Built-in dataclass defaults
+2. `~/.sciagent/config.yaml`
+3. `<project>/.sciagent.yaml`
+4. `--config PATH`
+5. `--set KEY=VALUE`
+
+This is implemented in [`src/sciagent/config.py`](../src/sciagent/config.py).
+
+### Inspect the effective config
 
 ```bash
-sciagent --system-prompt my_prompt.txt "Translate comments to Spanish"
+sciagent config keys
+sciagent config show --project-dir ~/my-project
+sciagent config show --config ./run.yaml --set agent.max_iterations=40
 ```
 
-## Custom Tools
+### Run with overrides
 
-Add your own tools by creating a Python module:
+```bash
+sciagent run \
+  --project-dir ~/my-project \
+  --config ./run.yaml \
+  --set agent.max_iterations=40 \
+  --set orchestrator.max_cost_usd=25.0 \
+  --task "Reproduce the analysis and summarize the result"
+```
+
+`--set` values are parsed as YAML scalars, so `true`, `false`, `null`, integers, and floats work as expected.
+
+## Common CLI keys
+
+These are the knobs most users will reach for first.
+
+### `agent.*`
+
+| Key | Purpose | Default |
+|-----|---------|---------|
+| `agent.model` | Main model id | `anthropic/claude-sonnet-4-6` |
+| `agent.temperature` | Sampling temperature | `0.0` |
+| `agent.max_iterations` | Agent-loop cap | `120` |
+| `agent.max_tokens` | Per-call output token cap | `16384` |
+| `agent.session_soft_budget` | Cumulative session token budget before compaction pressure | provider/profile dependent |
+| `agent.reasoning_effort` | Model reasoning setting | `medium` |
+
+### `orchestrator.*`
+
+| Key | Purpose | Default |
+|-----|---------|---------|
+| `orchestrator.enable_data_gate` | Validate acquired data before downstream analysis | `true` |
+| `orchestrator.enable_exec_gate` | Validate that claimed commands actually ran | `true` |
+| `orchestrator.enable_verification` | Run the fresh-context verifier at the end | `true` |
+| `orchestrator.verification_threshold` | Minimum confidence for a passing verifier verdict | `0.7` |
+| `orchestrator.verifier_model` | Override the verifier model | unset |
+| `orchestrator.scientific_model` | Override the planning/scientific tier | unset |
+| `orchestrator.coding_model` | Override the coding tier for subagents | unset |
+| `orchestrator.fast_model` | Override the fast tier | unset |
+| `orchestrator.vision_model` | Override the vision tier | unset |
+| `orchestrator.verifier_include_child_sessions` | Let the verifier inspect child session logs | `true` |
+| `orchestrator.max_wall_seconds` | Hard wall-clock cap | unset |
+| `orchestrator.max_cost_usd` | Hard aggregate cost cap | unset |
+
+Run `sciagent config keys` to see the complete supported set straight from the code.
+
+## Model selection
+
+### Alternative models by provider
+
+Use `--model` to swap the main agent model:
+
+```bash
+sciagent run --model openai/gpt-4.1 --task "Summarize README.md"
+sciagent run --model gemini/gemini-3-pro-preview --task "Analyze this diagram"
+sciagent run --model deepseek/deepseek-reasoner --task "Solve this physics problem"
+```
+
+If you want different models for different roles, use `--set` on the orchestrator role overrides:
+
+```bash
+sciagent run \
+  --set orchestrator.verifier_model=openai/gpt-5.4 \
+  --set orchestrator.fast_model=anthropic/claude-haiku-4-5-20251001 \
+  --task "Run the workflow and verify it with a different model"
+```
+
+SciAgent's default role mapping lives in [`src/sciagent/defaults.py`](../src/sciagent/defaults.py).
+
+## Prompts and custom tools
+
+### Custom system prompt
+
+```bash
+sciagent run --system-prompt ./my_prompt.txt --task "Translate comments to Spanish"
+```
+
+### Custom tools
+
+#### Extra tools
 
 ```python
 # my_tools.py
@@ -94,184 +136,78 @@ def count_lines(path: str) -> ToolResult:
 TOOLS = [count_lines]
 ```
 
-Load it:
+```bash
+sciagent run --load-tools ./my_tools.py --task "How many lines are in main.py?"
+```
+
+### Custom skills
 
 ```bash
-sciagent --load-tools my_tools.py "How many lines in main.py?"
+sciagent run --skills-dir ./skills --task "Use our local review workflow"
 ```
-
-## Sub-agents
-
-Enable specialized agents for research, review, and testing:
-
-```bash
-sciagent --subagents "Research this codebase and write tests"
-```
-
-Built-in sub-agents (each uses a cost-optimised model tier):
-
-| Name | Model Tier | Purpose |
-|------|------------|---------|
-| `explore` | Fast | Quick codebase searches and file lookups |
-| `debug` | Coding | Error investigation with web research |
-| `research` | Coding | Web research, documentation lookup |
-| `plan` | Scientific | Break down complex problems |
-| `compute` | Coding | Cloud-job orchestration with token-isolated context |
-| `analyze` | Coding | Post-job derivation (plots, statistics, light fits) |
-| `general` | Coding | Complex multi-step tasks |
-| `verifier` | Verification | Independent validation against the provenance log |
-
-Model tiers are defined in `src/sciagent/defaults.py`. See [Sub-agents](developers/architecture.md#sub-agents) for customization.
-
-## Configuration layers
-
-SciAgent has two configuration surfaces, deliberately kept separate:
-
-- **`AgentConfig`** — agent-loop concerns: model, tokens, iterations, compaction. Lives in `sciagent.AgentConfig`.
-- **`CloudConfig`** — cloud / compute concerns: cost gate, workspace storage backend, cluster lifecycle defaults. Lives in `sciagent.compute.CloudConfig`.
-
-Both are passed independently to `AgentLoop`:
-
-```python
-from sciagent import AgentConfig, AgentLoop
-from sciagent.compute import CloudConfig
-
-agent = AgentLoop(
-    config=AgentConfig(model="anthropic/claude-sonnet-4-6", max_session_tokens=2_000_000),
-    cloud_config=CloudConfig(commit_threshold_usd=10.0),
-)
-```
-
-### AgentConfig fields
-
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `model` | from `defaults.py` | LLM identifier (LiteLLM format) |
-| `temperature` | `0.0` | Sampling temperature |
-| `max_tokens` | `16384` | Per-call output token cap |
-| `max_iterations` | `120` | Agent-loop iteration cap |
-| `max_session_tokens` | `4_000_000` | Cumulative soft budget; profile / `SCIAGENT_SESSION_SOFT_BUDGET` env override |
-| `compact_at_fraction` | `None` | Fraction of context window above which compaction triggers; `None` defers to profile (typically `0.6`); `SCIAGENT_COMPACT_AT_PCT` env wins |
-| `working_dir` | `"."` | Project directory |
-| `verbose`, `auto_save`, `state_dir`, `reasoning_effort` | various | See `AgentConfig` source |
-
-### CloudConfig fields
-
-For cloud-scale simulations, install with the `cloud*` extras:
-
-```bash
-pip install 'sciagent-cli[cloud]'        # AWS
-pip install 'sciagent-cli[cloud-gcp]'    # GCP
-pip install 'sciagent-cli[cloud-azure]'  # Azure
-pip install 'sciagent-cli[cloud-all]'    # All three
-```
-
-SciAgent inherits whatever credentials SkyPilot can find. Set up your provider once with the SkyPilot-supported flow (`aws configure`, `gcloud auth application-default login`, `az login`) and `sky check` will confirm.
-
-| Field | Default | Purpose |
-|-------|---------|---------|
-| `commit_threshold_usd` | `None` (→ $5) | Estimated total ($) above which `compute_run` prompts before launching |
-| `workspace_store` | `None` (→ auto-detect) | Cloud provider for the per-session workspace bucket: `s3` / `gcs` / `az` / `r2` / `oci` |
-| `default_autostop_minutes` | `None` (→ provider default) | Default `idle_minutes` for cluster autostop |
-| `default_timeout_sec` | `None` (→ 3600) | Per-job wall-clock budget. The reaper terminates clusters whose runtime exceeds this. Per-call `compute_run(timeout_sec=...)` wins. Pass 0 to disable. |
-| `subagent_warm_resume_seconds` | `None` | Window during which a crashed subagent can be warm-resumed without prompting the parent |
-
-Each field also has an env var and (for some) a `~/.sciagent/config.yaml` key. Precedence per knob: **env > CloudConfig field > yaml > built-in default**.
-
-| Field | Env var | YAML key |
-|-------|---------|----------|
-| `commit_threshold_usd` | `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` | `compute.commit_threshold_usd` |
-| `workspace_store` | `SCIAGENT_WORKSPACE_STORE` | — |
-| `subagent_warm_resume_seconds` | `SCIAGENT_SUBAGENT_WARM_RESUME_SECONDS` | `subagent.warm_resume_seconds` |
-
-See [Cloud Compute](cloud-compute.md) for the full cloud-compute guide.
 
 ## Cost caps
 
-SciAgent tracks cost on three separate axes and gates on the aggregate. Per-axis is the source of truth — never collapsed into one number internally, because bench-style honest comparison needs the split.
+SciAgent has two different control planes here:
 
-### Three-axis rollup
+- **Per-launch cloud confirmation**: the compute layer can prompt before an expensive cluster launch
+- **Session-wide orchestrator kill switches**: hard caps checked while the workflow runs
 
-`RunCostTracker` (owned by `TaskOrchestrator` while `execute_all` runs, exposed as a process-level "active tracker" so peripheral layers can update it without a constructor dep):
-
-| Axis | What it counts | Source |
-|------|----------------|--------|
-| `llm_cost_usd` | Per-LLM-call cost | `response._hidden_params["response_cost"]` via litellm, fed by `LLMClient`'s hook |
-| `compute_cost_usd` | Sky-realized cluster cost | `sky.cost_report()`, recomputed each poll (idempotent — replaces, doesn't increment) |
-| `storage_cost_usd` | Workspace bucket size × per-region rate | Computed once on session shutdown via `finalize_storage` |
-
-`total_usd = llm + compute + storage` — that's the number the kill switch reads.
-
-### Kill switch: `max_cost_usd`
-
-Hard cap on aggregate cost. Set on `OrchestratorConfig`:
+### Session-wide hard caps
 
 ```bash
-sciagent --set orchestrator.max_cost_usd=25.0 "…"
+sciagent run \
+  --set orchestrator.max_wall_seconds=3600 \
+  --set orchestrator.max_cost_usd=25.0 \
+  --task "Run the full benchmark"
 ```
 
-The orchestrator checks once per iteration; on exceed, the loop halts and session-owned clusters are stopped. Companion: `orchestrator.max_wall_seconds` for a wall-clock cap. Both default to `None` (disabled).
-
-### Per-launch prompt: `commit_threshold_usd`
-
-Different mechanism, different intent. `CloudConfig.commit_threshold_usd` (default `$5.00`) is the estimated total above which `compute_run` prompts the user before launching a cluster. This is a per-launch confirmation gate, not a session-wide cap. Precedence: env `SCIAGENT_COMPUTE_COMMIT_THRESHOLD_USD` > `CloudConfig` field > `~/.sciagent/config.yaml` `compute.commit_threshold_usd` > $5 default.
-
-### Session token budget: `session_soft_budget`
-
-`AgentConfig.session_soft_budget` is the cumulative token budget for one agent session; the loop triggers compaction (not termination) as it approaches the limit. Resolution: profile default (Anthropic 1M, OpenAI 2M, xAI 2M) → explicit `--set agent.session_soft_budget=N` → `SCIAGENT_SESSION_SOFT_BUDGET` env. `None` on both profile and override disables the soft cap. Distinct from `max_cost_usd`: this one bounds tokens, not dollars, and triggers a compaction rather than a stop.
-
-### Where cost lands in the log
-
-Each `tool_result` event carries a per-call `cost_usd` when litellm reported one. The `session_end` event (fired at `AgentLoop.run` exit) carries session-level totals — same axes, same aggregate — so post-hoc adapters can read one event per session instead of summing per-call rows. See [Provenance Log Schema](provenance_log_schema.md).
-
-## Image Analysis
-
-SciAgent can analyze images including scientific plots, microscopy, diagrams, and visualisations. Supported formats: PNG, JPG/JPEG, GIF, WebP.
+### Verification tuning
 
 ```bash
-# Analyze a scientific plot
-sciagent "Interpret the results in ./output/graph.png"
+sciagent run \
+  --set orchestrator.enable_verification=false \
+  --task "Run without the end-of-session verifier"
 
-# Review simulation output
-sciagent "What does the velocity field in ./cfd/velocity.png show?"
+sciagent run \
+  --set orchestrator.verifier_include_child_sessions=false \
+  --task "Run the no-recursion verifier ablation"
 ```
 
-The agent reads images via the `file_ops` tool and passes them to the LLM for visual analysis. This uses the `VISION_MODEL` tier.
+## Python embedding
 
-## Scientific Services
+For programmatic use, the relevant dataclasses are:
 
-SciAgent runs simulations in Docker containers. Available services:
-
-| Domain | Services | Capabilities |
-|--------|----------|--------------|
-| **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
-| **Chemistry & Materials** | `rdkit`, `ase`, `dwsim` | Molecular analysis, atomistic simulations, chemical process simulation |
-| **Molecular Dynamics** | `gromacs` | Biomolecular simulations, soft matter |
-| **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
-| **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
-| **Post-processing & Visualisation** | `paraview` | Multi-arch (with EGL) — pairs with the OpenFOAM services |
-| **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
-| **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
-| **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |
-| **Network Analysis** | `networkx` | Graph algorithms, centrality, community detection |
-| **Scientific ML** | `sciml-julia` | Julia ODE/SDE solving, symbolic modelling, neural DEs |
-
-The agent automatically researches documentation, writes code, and runs it in the appropriate container. You can also ask the agent to build a service and add to the registry.
-
-```bash
-sciagent "Build a Docker service for the XYZ library and publish to GHCR"                           
-```                                                                                                
-This triggers the build-service skill which automates the entire workflow: researches the package, creates the Dockerfile, updates registry.yaml, and builds/pushes the image. 
-
-The full documentation is in src/sciagent/skills/build-service/SKILL.md.   
-
-## Python Usage
+- [`AgentConfig`](../src/sciagent/agent.py) for the agent loop
+- [`OrchestratorConfig`](../src/sciagent/orchestrator.py) for verification and workflow policy
+- [`CloudConfig`](../src/sciagent/compute/__init__.py) for cloud-compute defaults
 
 ```python
-from sciagent import create_agent, DEFAULT_MODEL
+from sciagent import AgentConfig, AgentLoop, OrchestratorConfig
+from sciagent.compute import CloudConfig
 
-agent = create_agent(model=DEFAULT_MODEL, working_dir="./project")
-result = agent.run("Analyze this codebase")
+agent = AgentLoop(
+    config=AgentConfig(
+        model="anthropic/claude-sonnet-4-6",
+        max_iterations=80,
+    ),
+    orchestrator_config=OrchestratorConfig(
+        enable_verification=True,
+        verifier_model="openai/gpt-5.4",
+        max_cost_usd=25.0,
+    ),
+    cloud_config=CloudConfig(
+        commit_threshold_usd=10.0,
+        default_timeout_sec=7200,
+    ),
+)
 ```
 
-For detailed Python API, see [API Reference](developers/api-reference.md).
+`CloudConfig` is mainly for Python embedding. In the CLI, the authoritative surface is the layered config described above plus environment variables and per-tool arguments.
+
+## Related guides
+
+- [Getting Started](getting-started.md)
+- [Cloud Compute](cloud-compute.md)
+- [Task Orchestration](task-orchestration.md)
+- [Tools](tools.md)
