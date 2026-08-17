@@ -207,7 +207,7 @@ results = orch.spawn_parallel([
 ])
 ```
 
-When `produces_uris=` is declared, the orchestrator validates that each pattern resolves to at least one file with size ≥ `produces_min_bytes` (default 100). Failure transitions the task to state `blocked_produce_missing`.
+When `produces_uris=` is declared, the orchestrator validates that each pattern resolves to at least one file with size ≥ `produces_min_bytes` (default 256). Failure transitions the task to state `blocked_produce_missing`.
 
 ## Compute
 
@@ -356,7 +356,7 @@ log.append({
 events = log.read_events()
 ```
 
-Schema version `1`. Per-line cap 16 KB; per-field cap 4 KB. Thread-safe via `fcntl.flock`. See [Provenance Log Schema](../provenance_log_schema.md).
+Schema version `2`. Per-line cap 16 KB; per-field cap 4 KB. Thread-safe via `fcntl.flock`. See [Provenance Log Schema](../provenance_log_schema.md).
 
 ### verify_session
 

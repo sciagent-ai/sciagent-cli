@@ -174,13 +174,13 @@ task_id = orch.spawn(
 )
 ```
 
-When `produces_uris=` is declared, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 100). Failure lands the task in `blocked_produce_missing` state, so the parent can detect missing artifacts even when the subagent reported success.
+When `produces_uris=` is declared, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 256). Failure lands the task in `blocked_produce_missing` state, so the parent can detect missing artifacts even when the subagent reported success.
 
 ## SkyPilot Integration & Cluster Lifecycle
 
 The compute layer (`src/sciagent/compute/`) routes scientific simulations between two backends — local Docker for small jobs, [SkyPilot](https://skypilot.readthedocs.io/) for cloud-scale work. Both produce the same `JobResult` shape so downstream tooling doesn't branch on backend.
 
-The router (`compute/router.py`) selects SkyPilot when GPUs are requested, memory > 16 GB, CPUs > 8, or `backend="skypilot"` is explicit. Two execution modes:
+The router (`compute/router.py`) selects SkyPilot when GPUs are requested, memory > 16 GB, CPUs > 4, or `backend="skypilot"` is explicit. Two execution modes:
 
 - **Managed jobs** (`mode="job"`): Sky launches a transient cluster, runs the command, tears the cluster down on completion. One-shot.
 - **Cluster mode** (`mode="cluster"`): Sky launches a persistent cluster the agent can iterate against (`compute_exec` for follow-up commands, `compute_cluster(action="refresh_mounts")` to point it at new inputs).
@@ -241,7 +241,7 @@ In `blocked_resume`, the subagent itself decides the work can't finish in the cu
 
 ## Provenance Log
 
-`src/sciagent/provenance_log.py` writes an append-only JSONL log per session at `~/.sciagent/sessions/<session_id>/provenance.jsonl`. Schema version `1`. Event kinds:
+`src/sciagent/provenance_log.py` writes an append-only JSONL log per session at `~/.sciagent/sessions/<session_id>/provenance.jsonl`. Schema version `2`. Event kinds:
 
 | Event | Emitted by |
 |-------|------------|
@@ -249,9 +249,11 @@ In `blocked_resume`, the subagent itself decides the work can't finish in the cu
 | `tool_result` | Agent after tool completion |
 | `compute_job_launched` | `compute_run` |
 | `compute_job_status_changed` | `bg_status` polling |
+| `compute_cost_observed` | Run-cost tracker when realized or fallback cluster cost is recorded |
 | `artifact_produced` | File observation |
 | `verification_result` | Provenance checker + fresh-context verifier gate |
 | `correction` | Manual override |
+| `session_end` | `AgentLoop.run()` exit with session-level totals |
 
 Per-line cap 16 KB; per-field cap 4 KB (oversize fields are replaced with a truncation stub carrying a SHA-256 + preview). Thread-safe via `fcntl.flock` so concurrent writes from main thread + orchestrator threads + verify probes never interleave.
 

@@ -134,7 +134,7 @@ The background task is registered in the task index with `kind="subagent"` and a
 
 ### produces_uris validation
 
-If the parent declares `produces_uris=[...]` when spawning, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 100). If validation fails, the task lands in `blocked_produce_missing` state — the parent can read the manifest and decide whether to retry, redirect, or report.
+If the parent declares `produces_uris=[...]` when spawning, the orchestrator validates after the subagent returns: each pattern must resolve to at least one file with size ≥ `produces_min_bytes` (default 256). If validation fails, the task lands in `blocked_produce_missing` state — the parent can read the manifest and decide whether to retry, redirect, or report.
 
 This is the contract that prevents silent "I claimed success but actually the file isn't there" failures.
 

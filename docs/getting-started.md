@@ -75,7 +75,7 @@ For multi-turn conversations:
 sciagent run --project-dir ~/my-project --interactive
 ```
 
-Press `Ctrl+C` anytime to pause and choose to continue, stop, or redirect.
+Press `Ctrl+C` during a task to stop the current run and return to the interactive prompt.
 
 ### Scientific computing
 
