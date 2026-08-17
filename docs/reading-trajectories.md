@@ -22,7 +22,7 @@ Examples from a benchmark bundle:
 - `icml_results_clean/20260630T135609Z/brca1_fitness_structure/brca1_fitness_structure__sciagent-verifier-on-default__sonnet/`
 - `icml_results_clean/20260630T184838Z/cfd_fig3_kde/cfd_fig3_kde__sciagent-verifier-on-default__sonnet/`
 
-Matching Claude Code baselines live alongside them as `__cc-bare__...` cells.
+Matching Claude Code baselines live alongside them as `__cc-bare__...` cells. In this benchmark shorthand, `cc-bare` means Claude Code without access to SciAgent's registry or compute subagents.
 
 ## What to read first
 

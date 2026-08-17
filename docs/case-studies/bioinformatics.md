@@ -34,7 +34,7 @@ SciAgent parsed all 1,837 mutations, aligned them to BRCA1 structural positions,
 | Mean fitness, buried | **-1.497** |
 | Mean fitness, exposed | **-0.591** |
 
-Both SciAgent and the matching `cc-bare` baseline achieve a mapping rate of `1.00`. The resulting structure-function pattern is also directionally right: buried residues are much less tolerant to mutation than exposed residues.
+Both SciAgent and the matching `cc-bare` baseline, meaning Claude Code without access to SciAgent's registry or compute subagents, achieve a mapping rate of `1.00`. The resulting structure-function pattern is also directionally right: buried residues are much less tolerant to mutation than exposed residues.
 
 ## What the audit trail adds
 

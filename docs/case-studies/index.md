@@ -20,6 +20,8 @@ These pages are written as narrative summaries of benchmarked reproductions. Eac
 - what happened in the audited run
 - what the audit layer revealed beyond a simple pass/fail result
 
+Throughout these pages, `cc-bare` means the Claude Code baseline without access to SciAgent's registry or compute subagents.
+
 The full benchmark bundle is not shipped in the main repo. If you are working from a separate results archive, see [Reading Trajectories](../reading-trajectories.md) for how to inspect the companion provenance and outputs.
 
 ## Available Studies

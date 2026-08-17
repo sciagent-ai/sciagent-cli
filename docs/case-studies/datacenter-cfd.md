@@ -36,7 +36,7 @@ The benchmark intentionally capped the solve at 1000 SIMPLE iterations, so the s
 | Temperature range | **290.9645 K to 302.9278 K** |
 | Mean temperature in target range 294-298 K | **YES** |
 
-The SciAgent run lands squarely inside the target `294-298 K` band and reproduces the characteristic bimodal datacenter temperature structure from the paper. The matching `cc-bare` baseline also lands in-range at `295.333 K`, so this is another case where the interesting difference is not pass/fail correctness.
+The SciAgent run lands squarely inside the target `294-298 K` band and reproduces the characteristic bimodal datacenter temperature structure from the paper. The matching `cc-bare` baseline, meaning Claude Code without access to SciAgent's registry or compute subagents, also lands in-range at `295.333 K`, so this is another case where the interesting difference is not pass/fail correctness.
 
 ## What the audit trail adds
 

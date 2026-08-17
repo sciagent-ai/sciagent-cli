@@ -18,6 +18,8 @@ Reproduce the paper's RCWA-based in-coupler optimization from the manuscript alo
 
 This is the flagship long-horizon workflow in the benchmark set. The scientific answer is not the whole story: both SciAgent and the `cc-bare` baseline clear the headline threshold, but photonics is where the verifier's access to the real execution trail most clearly changes the quality of the audit.
 
+Here, `cc-bare` means the Claude Code baseline without access to SciAgent's registry or compute subagents.
+
 ## What the audited run did
 
 SciAgent read the paper PDF, recovered the key optical and geometric parameters, and then built a staged RCWA workflow to optimize the three metasurface zones instead of stopping at a single one-shot script.
