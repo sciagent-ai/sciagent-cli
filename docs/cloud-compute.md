@@ -152,10 +152,10 @@ Pairs with the cluster auto-mount: anything written to `/workspace/<path>` from 
 ### Install with cloud extras
 
 ```bash
-pip install '.[cloud]'        # AWS
-pip install '.[cloud-gcp]'    # GCP
-pip install '.[cloud-azure]'  # Azure
-pip install '.[cloud-all]'    # All three
+pip install 'sciagent-cli[cloud]'        # AWS
+pip install 'sciagent-cli[cloud-gcp]'    # GCP
+pip install 'sciagent-cli[cloud-azure]'  # Azure
+pip install 'sciagent-cli[cloud-all]'    # All three
 ```
 
 The base install ships without SkyPilot — the `cloud*` extras pull it in.

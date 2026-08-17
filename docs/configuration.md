@@ -160,10 +160,10 @@ agent = AgentLoop(
 For cloud-scale simulations, install with the `cloud*` extras:
 
 ```bash
-pip install '.[cloud]'        # AWS
-pip install '.[cloud-gcp]'    # GCP
-pip install '.[cloud-azure]'  # Azure
-pip install '.[cloud-all]'    # All three
+pip install 'sciagent-cli[cloud]'        # AWS
+pip install 'sciagent-cli[cloud-gcp]'    # GCP
+pip install 'sciagent-cli[cloud-azure]'  # Azure
+pip install 'sciagent-cli[cloud-all]'    # All three
 ```
 
 SciAgent inherits whatever credentials SkyPilot can find. Set up your provider once with the SkyPilot-supported flow (`aws configure`, `gcloud auth application-default login`, `az login`) and `sky check` will confirm.

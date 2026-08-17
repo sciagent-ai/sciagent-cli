@@ -3,8 +3,8 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sciagent"
-version = "2.0.0"
+name = "sciagent-cli"
+version = "2.1.1"
 description = "A modular, extensible agent framework for software engineering and scientific computing tasks"
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -63,10 +63,10 @@ cloud-all = [
 sciagent = "sciagent.main:main"
 
 [project.urls]
-Homepage = "https://github.com/sciagent/sciagent"
-Documentation = "https://github.com/sciagent/sciagent#readme"
-Repository = "https://github.com/sciagent/sciagent"
-Issues = "https://github.com/sciagent/sciagent/issues"
+Homepage = "https://sciagent.ai/"
+Documentation = "https://sciagent-ai.github.io/sciagent-cli/"
+Repository = "https://github.com/sciagent-ai/sciagent-cli"
+Issues = "https://github.com/sciagent-ai/sciagent-cli/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -10,12 +10,12 @@ permalink: /
 A terminal-based AI agent for software engineering and scientific computing. SciAgent automates file operations, shell commands, web research, simulations, and cloud compute so you can focus on problem-solving.
 
 {: .note }
-**v2.0 is current.** Looking for v1.0 docs? Browse them on the [`release/v1.0` branch on GitHub](https://github.com/sciagent-ai/sciagent-cli/tree/release/v1.0/docs). Highlights of v2.0: cloud compute via SkyPilot, durable provenance log, task orchestration with background subagents and checkpoint/resume. See [What's New in v2.0](whats-new-v2.md).
+**v2.1 is current.** Looking for v1.0 docs? Browse them on the [`release/v1.0` branch on GitHub](https://github.com/sciagent-ai/sciagent-cli/tree/release/v1.0/docs). Highlights of v2.1: multimodal attachments, three-axis cost rollup, scientific web search, verification gate improvements. See [What's New in v2.0](whats-new-v2.md).
 
 ## Quick Start
 
 ```bash
-pip install -e .
+pip install sciagent-cli
 export ANTHROPIC_API_KEY="your-key"
 sciagent --project-dir ~/my-project "Create a Python script that fetches weather data"
 ```

@@ -54,14 +54,18 @@ Properties of this loop:
 SciAgent requires Python 3.9 or newer. We recommend installing it inside a virtual environment:
 
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -e .                # base install (local Docker compute)
-pip install -e '.[cloud]'       # optional: SkyPilot + AWS extras
-pip install -e '.[cloud-all]'   # optional: SkyPilot + AWS, GCP, Azure
+pip install sciagent-cli                       # base install (local Docker compute)
+pip install 'sciagent-cli[cloud]'              # optional: SkyPilot + AWS extras
+pip install 'sciagent-cli[cloud-all]'          # optional: SkyPilot + AWS, GCP, Azure
 ```
 
-PyPI package coming soon — for now, install from source.
+Or install from source:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -e .
+```
 
 ### Set API keys
 

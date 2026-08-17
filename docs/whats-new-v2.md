@@ -74,7 +74,7 @@ There are no breaking API changes — v1.0 code that called `AgentLoop`, `SubAge
 
 - The default model has changed from `claude-opus-4-5` to `claude-sonnet-4-6` for the scientific tier. To pin to v1.0 behavior, pass `--model anthropic/claude-opus-4-5-20251101`.
 - The `compute_*`, `materialize*`, `task_*`, `bg_*`, and `monitor*` tools are new — main agents pre-v2.0 didn't have them. They're registered automatically; nothing to opt into.
-- `pip install '.[cloud]'` is required for SkyPilot. The base install does not pull it in.
+- `pip install 'sciagent-cli[cloud]'` is required for SkyPilot. The base install does not pull it in.
 
 If you have v1.0 sessions saved in `.agent_states/`, they remain loadable — the session schema is back-compat.
 
