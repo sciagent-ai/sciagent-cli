@@ -1,7 +1,7 @@
 ---
 layout: default
 title: Comparison
-nav_order: 6
+nav_order: 8
 ---
 
 # How SciAgent Fits the AI Agent Landscape

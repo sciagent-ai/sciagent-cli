@@ -1,18 +1,18 @@
 Metadata-Version: 2.4
 Name: sciagent
-Version: 0.1.0
+Version: 2.1.0
 Summary: A modular, extensible agent framework for software engineering and scientific computing tasks
 Author: SciAgent Team
-License: MIT
+License: Apache-2.0
 Project-URL: Homepage, https://github.com/sciagent/sciagent
 Project-URL: Documentation, https://github.com/sciagent/sciagent#readme
 Project-URL: Repository, https://github.com/sciagent/sciagent
 Project-URL: Issues, https://github.com/sciagent/sciagent/issues
 Keywords: agent,llm,ai,software-engineering,scientific-computing,cli
-Classifier: Development Status :: 3 - Alpha
+Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
 Classifier: Intended Audience :: Science/Research
-Classifier: License :: OSI Approved :: MIT License
+Classifier: License :: OSI Approved :: Apache Software License
 Classifier: Operating System :: OS Independent
 Classifier: Programming Language :: Python :: 3
 Classifier: Programming Language :: Python :: 3.9
@@ -48,25 +48,52 @@ Dynamic: license-file
 
 # SciAgent
 
-SciAgent is a modular agent framework for software engineering and scientific computing. It combines a standard agent loop with dependency-aware task orchestration, allowing the language model to plan and execute complex workflows by invoking external tools and containerised services.
+![SciAgent Design Overview](assets/systemdesign.png)
+
+SciAgent is an LLM-agnostic framework — a runtime and reusable harness — for scientific computing agents. A user submits a scientific task — a simulation to run, a hypothesis to test, results to reproduce or extend — and the framework plans the work, delegates to role-isolated sub-agents (compute, analyze, research, verify), executes the heavy work in containerised services on local Docker or SkyPilot-managed cloud clusters, and writes every tool call, cloud job, artifact, and verification to an append-only provenance log. A separate verifier sub-agent reads the log in a fresh context to check the trail before the result is returned.
+
+The architecture has five layers (see diagram):
+
+- **Provider-agnostic orchestration** routes through LiteLLM so the same harness runs against Anthropic, OpenAI, Gemini, xAI, DeepSeek, or open-source models.
+- **Runtime** is a standard agent loop (planner + context + task DAG) over atomic tools (`bash`, `file_ops`, `web`, `search`, `todo`).
+- **Role sub-agents** (compute, analyze, research, verify) run with isolated tool surfaces and per-role model tiers.
+- **Registry, Compute, Provenance, Audit** are the four side-layers: registered scientific service containers, local-Docker / SkyPilot / cluster execution, append-only JSONL log, and an independent verifier that reads the log + artifacts.
+
+> **v2.0 is current.** Highlights: cloud compute via SkyPilot, durable provenance log, task orchestration with background subagents and checkpoint/resume. See [What's New in v2.0](docs/whats-new-v2.md). v1.0 is preserved on branch `release/v1.0` and tag `v1.0`.
+
+## How it works
+
+Properties of this loop:
+
+- **Cloud compute.** `compute` runs simulations on SkyPilot-managed clusters with a per-session S3/GCS/Azure/R2/OCI workspace bucket. Outputs survive cluster teardown.
+- **Durable log.** Every tool call, cloud job, artifact, and verification appends to a per-session JSONL log. The audit trail comes out of normal operation.
+- **Verifier with fresh context.** The `verifier` sub-agent has no memory of the main agent's reasoning. It reads only the log and the on-disk artifacts. A different model in a different process can audit a session it didn't run.
+- **Scientific services in registered containers.** Twenty-plus images (RCWA, MEEP, OpenFOAM + SWAK4Foam, GROMACS, ParaView, OpenROAD, ...). The user does not manage container builds or host environments.
+- **Background sub-agents with checkpoints.** Per-iteration checkpoints; if a long-running run is interrupted, the next spawn matches by description hash and offers the parent a 3-way resume (skip · use prior · retry).
 
 ## Features
 
-- **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like scientific computing, code review, and service building. Skills auto-trigger based on user input patterns.
+- **Cloud compute** – Run scientific simulations on cloud clusters via SkyPilot, with a local Docker fallback for small jobs. Per-session workspace bucket persists outputs across cluster lifecycle. See [Cloud Compute](docs/cloud-compute.md).
 
-- **Image & multimodal analysis** – Analyse scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
+- **Durable provenance log** – Every tool call, compute job, artifact, and verification result lands in an append-only JSONL log per session — cross-LLM verifiable. See [Provenance Log Schema](docs/provenance_log_schema.md).
+
+- **Task orchestration** – Unified registry for in-flight work (`task_index`) covering cloud jobs and background subagents. Background subagents support checkpoint and 3-way resume. See [Task Orchestration](docs/task-orchestration.md).
+
+- **Skill-based workflows** – Load specialised workflows from SKILL.md files for complex tasks like service building and code review. Skills auto-trigger based on user input patterns.
+
+- **Image & multimodal analysis** – Analyze scientific plots, microscopy images, diagrams, and data visualisations. Supports PNG, JPG, GIF, and WebP formats.
 
 - **Service isolation** – Run all scientific computations inside isolated Docker containers for reproducibility, security, and portability.
 
 - **Task DAG orchestration** – Define a graph of tasks with dependencies (`depends_on`), batch parallelisable steps and pass data between tasks via `result_key`.
 
-- **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria.
+- **Artifact & target validation** – Verify that expected files exist or that computed metrics meet user-defined criteria; `produces_uris` validation on subagent outputs.
 
-- **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY) and more.
+- **Scientific services** – Run simulations inside Docker containers for electromagnetics (RCWA, MEEP), fluid dynamics (OpenFOAM + swak4foam), molecular dynamics (GROMACS), cheminformatics (RDKit), symbolic math (SymPy), optimisation (CVXPY), post-processing (ParaView), digital IC (OpenROAD, iic-osic-tools) and more.
 
 - **Multi-model support** – Choose between Anthropic Claude, OpenAI (GPT-4.1, o3, o4-mini), Google Gemini 3, xAI Grok 4, DeepSeek, or open-source models via LiteLLM. Caching reduces cost and latency.
 
-- **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning and general tasks. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
+- **Sub-agents** – Spawn specialised agents for exploration, debugging, research, planning, cloud compute, post-job analysis, general implementation, and verification. Each agent uses a cost-optimised model tier (scientific for planning, coding for implementation, fast for exploration).
 
 ## Quick start
 
@@ -77,8 +104,12 @@ SciAgent requires Python 3.9 or newer. We recommend installing it inside a virtu
 ```bash
 python3 -m venv venv
 source venv/bin/activate
-pip install -e .  # install from source; alternatively use pip install sciagent when available
+pip install -e .                # base install (local Docker compute)
+pip install -e '.[cloud]'       # optional: SkyPilot + AWS extras
+pip install -e '.[cloud-all]'   # optional: SkyPilot + AWS, GCP, Azure
 ```
+
+PyPI package coming soon — for now, install from source.
 
 ### Set API keys
 
@@ -108,7 +139,7 @@ sciagent --interactive
 Select a different model or enable sub-agents when needed:
 
 ```bash
-sciagent -m openai/gpt-4.1 "Analyse this codebase"
+sciagent -m openai/gpt-4.1 "Analyze this codebase"
 sciagent -m gemini/gemini-3-pro-preview "Explain this diagram"
 sciagent --subagents "Research and refactor this module"
 ```
@@ -117,14 +148,14 @@ For more details on CLI flags see the [Configuration](docs/configuration.md) gui
 
 ## Image analysis examples
 
-SciAgent can analyse images including scientific plots, microscopy, diagrams, and data visualisations:
+SciAgent can analyze images including scientific plots, microscopy, diagrams, and data visualisations:
 
 ```bash
-# Analyse a scientific plot
+# Analyze a scientific plot
 sciagent "Read and interpret the graph at ./results/figure1.png"
 
 # Examine microscopy images
-sciagent "Analyse the cell structure in ./data/microscopy.jpg"
+sciagent "Analyze the cell structure in ./data/microscopy.jpg"
 
 # Interpret simulation output
 sciagent "What does the CFD velocity field in ./output/velocity.png show?"
@@ -151,7 +182,12 @@ sciagent "Solve a portfolio optimisation problem using cvxpy"
 
 # Symbolic math (SymPy)
 sciagent "Derive equations of motion for a double pendulum using sympy"
+
+# Cloud-scale CFD (SkyPilot + OpenFOAM)
+sciagent "Reproduce Fig 3 of the datacenter CFD paper on a SkyPilot cluster"
 ```
+
+For an end-to-end cloud example, see the [Datacenter CFD case study](docs/case-studies/datacenter-cfd.md).
 
 See [Available Services](#available-services) below for the full list of containerised environments.
 
@@ -160,10 +196,11 @@ See [Available Services](#available-services) below for the full list of contain
 | Domain | Services | Capabilities |
 |--------|----------|--------------|
 | **Math & Optimisation** | `scipy-base`, `sympy`, `cvxpy`, `optuna` | Numerical computing, symbolic math, convex optimisation, hyperparameter tuning |
-| **Chemistry & Materials** | `rdkit`, `ase`, `lammps`, `dwsim` | Molecular analysis, atomistic simulations, MD, chemical process simulation |
-| **Molecular Dynamics** | `gromacs`, `lammps` | Biomolecular simulations, soft matter, solid-state materials |
+| **Chemistry & Materials** | `rdkit`, `ase`, `dwsim` | Molecular analysis, atomistic simulations, chemical process simulation |
+| **Molecular Dynamics** | `gromacs` | Biomolecular simulations, soft matter |
 | **Photonics & Optics** | `rcwa`, `meep`, `pyoptools` | RCWA for gratings, FDTD electromagnetics, optical ray tracing |
 | **CFD & FEM** | `openfoam`, `gmsh`, `elmer` | Fluid dynamics, mesh generation, multiphysics FEM |
+| **Post-processing & Visualisation** | `paraview` | Multi-arch (with EGL) — pairs with the OpenFOAM services |
 | **Circuits & EDA** | `ngspice`, `openroad`, `iic-osic-tools` | SPICE simulation, RTL-to-GDS flow, 80+ IC design tools |
 | **Quantum Computing** | `qiskit` | Quantum circuits, gates, algorithms (Grover, VQE, QAOA) |
 | **Bioinformatics** | `biopython`, `blast` | Sequence analysis, BLAST searching, phylogenetics |
@@ -179,11 +216,11 @@ SciAgent uses a skill-based workflow system for complex, multi-phase tasks. Skil
 
 | Skill | Purpose |
 |-------|---------|
-| `sci-compute` | Scientific simulations with research-first approach |
+| `use-service` | Look up a registered scientific service and run a simulation |
 | `build-service` | Build and publish Docker services to GHCR |
 | `code-review` | Comprehensive code review with security analysis |
 
-The `sci-compute` skill implements a five-phase workflow: Discovery → Research → Code Generation → Execution → Debug. This ensures correct API usage by researching official documentation before writing simulation code.
+The `use-service` skill implements a research-first workflow: discover the right service, read its docs, write the simulation code, run it in the container, debug. This ensures correct API usage by researching official documentation before writing simulation code.
 
 ## Sub-agents
 
@@ -195,19 +232,24 @@ SciAgent uses a tiered model system for cost-effective sub-agent delegation:
 | `debug` | Coding | Error investigation with web research |
 | `research` | Coding | Web research, documentation, literature review |
 | `plan` | Scientific | Break down complex problems (needs deep reasoning) |
+| `compute` | Coding | Cloud-job orchestration with token-isolated context |
+| `analyze` | Coding | Post-job derivation (plots, statistics, light fits, DSE) |
 | `general` | Coding | Complex multi-step implementation tasks |
-| `verifier` | Verification | Independent validation of task outputs |
+| `verifier` | Verification | Independent validation against the provenance log |
 
-Model tiers are defined in `src/sciagent/defaults.py`:
-- **Scientific**: Main agent, planning 
-- **Vision**: Image and multimodal analysis 
-- **Coding**: Implementation, debugging, research 
-- **Verification**: Independent verifier subagent
-- **Fast**: Quick/cheap for exploration and extraction 
+Model tiers are defined in `src/sciagent/defaults.py`. Current Anthropic defaults:
+
+- **Scientific** — `claude-sonnet-4-6` (main agent, planning)
+- **Coding** — `claude-sonnet-4-6` (debug, research, compute, analyze, verifier, general subagents)
+- **Vision** — `claude-opus-4-7` (image and multimodal analysis)
+- **Verification** — `claude-sonnet-4-6` (independent verifier subagent, fresh context)
+- **Fast** — `claude-haiku-4-5-20251001` (explore subagent, web extraction, summarisation)
+
+All tiers are provider-agnostic via [LiteLLM](https://github.com/BerriAI/litellm) — substitute any tier with `openai/...`, `gemini/...`, `xai/...`, `deepseek/...`, etc. See [Configuration](docs/configuration.md#alternative-models-by-provider) for tested vs. untested options.
 
 ## Architecture
 
-SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call tools such as `bash`, `file_ops`, `search`, `web`, `todo`, `skill` and `ask_user` to interact with the file system, shell, web, containerised simulations and request user input when needed.
+SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed acyclic graph and a set of **Agents** that execute those tasks. Each agent follows a Think → Act → Observe loop and can call core tools (`bash`, `file_ops`, `search`, `web`, `todo`, `skill`, `ask_user`), compute tools (`compute_run`, `compute_exec`, `compute_cluster`, `materialize`, `materialize_workspace`), task-orchestration tools (`task_list`, `task_get`, `task_wait`, `bg_*`), and verification tools (`verify_session`) to interact with the file system, shell, web, containerised simulations, cloud clusters, and the durable provenance log.
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -236,21 +278,67 @@ SciAgent consists of a **Task Orchestrator** that schedules tasks in a directed 
 └─────────────────────────────────────────────────┘
 ```
 
+The v2.0 cloud + audit layer sits underneath:
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Compute subagent                                     │
+│  compute_run / compute_exec / compute_cluster        │
+│  materialize / materialize_workspace                 │
+└──────────────┬───────────────────────────────────────┘
+               │
+       ┌───────┴────────┐
+       ▼                ▼
+  ┌──────────┐    ┌──────────────┐
+  │  Local   │    │  SkyPilot    │     ┌──────────────────────┐
+  │  Docker  │    │  managed     │◀────│ Workspace bucket     │
+  │          │    │  / cluster   │     │ <cloud>://...-<sid>/ │
+  └──────────┘    └──────┬───────┘     └──────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────────┐
+              │ Task index              │
+              │ ~/.sciagent/tasks/*.json│
+              │ kind=compute_job|sub…   │
+              └─────────────────────────┘
+                         │
+                         ▼
+              ┌─────────────────────────┐
+              │ Provenance log (JSONL)  │
+              │ tool_call/result        │
+              │ compute_job_*           │
+              │ artifact_produced       │
+              │ verification_result     │
+              └─────────────────────────┘
+```
+
 ## Documentation
 
 Comprehensive documentation is available in the `docs` folder. Start with the following pages:
 
+- **[What's New in v2.0](docs/whats-new-v2.md)** – migration notes from v1.0, headline features, link to v1.0 archive.
 - **[Getting Started](docs/getting-started.md)** – installation, running your first task and CLI basics.
-- **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry and sub-agents.
+- **[Configuration](docs/configuration.md)** – customise the model, system prompt, caching, tool registry, sub-agents, and cloud setup.
+- **[Cloud Compute](docs/cloud-compute.md)** – SkyPilot integration, cluster lifecycle, workspace bucket, materialize.
+- **[Task Orchestration](docs/task-orchestration.md)** – task index, background subagents, checkpoint and resume.
 - **[Use Cases](docs/use-cases.md)** – real-world examples of how to apply SciAgent to coding, research and simulation.
-- **[Architecture](docs/developers/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, and sub-agent system.
+- **[Architecture](docs/developers/architecture.md)** – detailed explanation of the agent loop, context management, tools, skills, sub-agents, SkyPilot integration, and the provenance log.
 - **[Comparison](docs/comparison.md)** – what sets SciAgent apart from other agent frameworks.
 
 ## Requirements
 
 - Python 3.9+
-- Docker (for containerised services)
+- Docker (for containerised services running locally)
+- SkyPilot extras (`pip install '.[cloud]'`) — only required for cloud compute
+- Cloud credentials (`aws configure` / `gcloud auth application-default login` / `az login`) — only required for cloud compute
 - API key for your chosen LLM provider (e.g. Anthropic, OpenAI, Google) and `BRAVE_SEARCH_API_KEY` for web search
+
+## Citing
+
+If you use SciAgent in your work, please cite:
+
+- **SciAgent: Containerized Code Generation for Scientific Computing with Verification.** Shruti Badhwar. AI4X – Accelerate, Singapore, 16–19 June 2026. [OpenReview PDF](https://openreview.net/pdf?id=FzcjjKIoqt)
+- **Audit-Grade Harness for Agent-driven Scientific Computation Workflows.** Shruti Badhwar. ICML 2026 AI4Science Workshop. [OpenReview PDF](https://openreview.net/pdf?id=6rOHtK32Mp)
 
 ## License
 
