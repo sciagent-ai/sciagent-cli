@@ -13,22 +13,20 @@ Real-world examples of SciAgent reproducing scientific research from peer-review
 
 ## Overview
 
-Each study includes the prompt given to SciAgent, the workflow it followed (paper analysis → setup → run → validation), the artifacts produced, and a numerical comparison against the published values.
+These pages are written as narrative summaries of benchmarked reproductions. Each one answers four questions:
 
-For the audit-grade benchmark artifacts themselves, read the trajectories under `icml_results_clean/`. A SciAgent cell usually includes:
+- what scientific task was attempted
+- why that task matters for understanding SciAgent
+- what happened in the audited run
+- what the audit layer revealed beyond a simple pass/fail result
 
-- `result.txt` for the final answer
-- `stdout.txt` for the terminal transcript
-- `provenance.jsonl` for the append-only audit trail
-- `project/` for the working directory and generated outputs
-
-The matching `cc-bare` cells keep `result.txt`, `stdout.txt`, and the project workspace, but do not include SciAgent provenance by construction. See [Reading Trajectories](../reading-trajectories.md) for a practical walkthrough.
+The full benchmark bundle is not shipped in the main repo. If you are working from a separate results archive, see [Reading Trajectories](../reading-trajectories.md) for how to inspect the companion provenance and outputs.
 
 ## Available Studies
 
-| Study | Domain | Stack |
-|-------|--------|-------|
-| [AR Waveguide Metasurface](photonics.md) | Photonics / RCWA | S4 (Stanford RCWA) |
-| [BRCA1 Fitness-Structure Analysis](bioinformatics.md) | Bioinformatics | BioPython, SciPy |
-| [Datacenter Temperature with OpenFOAM](datacenter-cfd.md) | CFD / OpenFOAM | OpenFOAM v2012, SkyPilot |
-| [Digital IC Synthesis](digital-ic.md) | EDA *(coming soon)* | OpenROAD |
+| Study | Domain | Benchmark criterion | What it shows |
+|-------|--------|---------------------|---------------|
+| [AR Waveguide Metasurface](photonics.md) | Photonics / RCWA | `MFE >= 0.25` | Long-horizon scientific workflow and why verifier recursion matters |
+| [BRCA1 Fitness-Structure Analysis](bioinformatics.md) | Bioinformatics | Mapping rate `>= 0.95` | A correct result with a caught scope downgrade in the audit trail |
+| [Datacenter Temperature with OpenFOAM](datacenter-cfd.md) | CFD / OpenFOAM | Mean temperature in `294-298 K` | Clean end-to-end cloud execution with a strong verifier story |
+| [Digital IC Synthesis](digital-ic.md) | EDA *(coming soon)* | - | OpenROAD-based benchmark in progress |
